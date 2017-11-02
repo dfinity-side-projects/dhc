@@ -61,7 +61,8 @@ supercombinators = sc `sepBy` want ";" where
     s <- foldl1' (<|>) $ want <$> xs
     pure $ \x y -> Var s :@ x :@ y
   molecule = lambda <|> foldl1' (:@) <$> many1 atom
-  atom = tup <|> call <|> qvar <|> var <|> num <|> str <|> lis
+  atom = preOp <|> tup <|> call <|> qvar <|> var <|> num <|> str <|> lis
+  preOp = try $ Var <$> between (want "(") (want ")") opTok
   tup = do
     xs <- between (want "(") (want ")") $ expr `sepBy` want ","
     pure $ case xs of
@@ -102,8 +103,12 @@ supercombinators = sc `sepBy` want ";" where
     s <- tok
     unless (s == t) $ fail $ "expected " ++ t
     pure s
-  tok = do
-    s <- many1 (alphaNum <|> char '_') <|> many1 (oneOf "\\:!+-/*^><=$.&|") <|>
+  opTok = do
+    s <- many1 (oneOf "\\:!+-/*^><=$.&|")
+    filler
+    pure s
+  tok = opTok <|> do
+    s <- many1 (alphaNum <|> char '_') <|>
          foldl1' (<|>) (string . pure <$> ";()[],")
     filler
     pure s

@@ -2,10 +2,11 @@
 
 The following compiles a fragment of Haskell to WebAssembly and runs it.
 
-It expects a pure function named `run`, which it executes. If the result is
-an integer, then we print this integer. If the result is algebraic data
-type, then we print the index of the data constructor; for example, `False` and
-`Nothing` are 0, `True` and `Just` are 1.
+It expects a pure function named `run`, which it reduces to weak head
+normal form. If the result is an integer, then we print this integer. If
+the result is algebraic data type, then we print the index of the data
+constructor; for example, `False` and `Nothing` are 0, `True` and `Just`
+are 1.
 
 There is no garbage collection nor lazy evaluation.
 
@@ -18,8 +19,11 @@ function runWasmInts(a){WebAssembly.instantiate(new Uint8Array(a),
 <script src="dhcdemo.js">
 </script>
 <p><textarea id="src" rows="25" cols="80">
-g n = (case n == 0 of True -> 1; False -> n * g(n - 1));
-run = g 5
+factorial n = (case n == 0 of True -> 1; False -> n * factorial (n - 1));
+foldr f n xs = (case xs of [] -> n; 
+                           (a:as) -> f a (foldr f n as));
+sum = foldr (+) 0;
+run = factorial 5 + sum [1,2,3,4,5]
 </textarea></p>
 <button id="go">Compile & Run!</button>
 <p><textarea id="asm" readonly rows="5" cols="80">

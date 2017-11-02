@@ -29,8 +29,10 @@ data WasmOp = GetGlobal Int | SetGlobal Int
   | Block | Loop | Br Int | BrTable [Int] | WasmCall Int | Unreachable | End
   deriving Show
 
+nPages :: Int
 nPages = 8
 
+encWasmOp :: WasmOp -> [Int]
 encWasmOp op = case op of
   GetGlobal n -> 0x23 : leb128 n
   SetGlobal n -> 0x24 : leb128 n
@@ -101,8 +103,140 @@ wasm prog = do
       , End
       ]])
     ]
+  where
+  encStr s = lenc $ ord <$> s
+  encProcedure = lenc . (0:) . concatMap encWasmOp
+  encType TypeI32 = 0x7f
+  encType TypeI64 = 0x7e
+  -- | Encodes function signature.
+  encSig ins outs = 0x60 : lenc (encType <$> ins) ++ lenc (encType <$> outs)
+  [addAsm, subAsm, mulAsm] = intAsm <$> [I64Add, I64Sub, I64Mul]
+  intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval ] ++
+    [ GetGlobal hp  -- [hp] = Int
+    , I64Const wInt
+    , I64Store
+    -- [hp + 8] = [[sp + 4] + 8] `op` [[sp + 8] + 8]
+    , GetGlobal hp  -- PUSH hp + 8
+    , I32Const 8
+    , I32Add
+    , GetGlobal sp  -- PUSH [[sp + 4] + 8]
+    , I32Const 4
+    , I32Add
+    , I32Load
+    , I32Const 8
+    , I32Add
+    , I64Load
+    , GetGlobal sp  -- PUSH [[sp + 8] + 8]
+    , I32Const 8
+    , I32Add
+    , I32Load
+    , I32Const 8
+    , I32Add
+    , I64Load
+    , op
+    , I64Store
+    , GetGlobal sp  -- [sp + 8] = hp
+    , I32Const 8
+    , I32Add
+    , GetGlobal hp
+    , I32Store
+    , GetGlobal sp  -- sp = sp + 4
+    , I32Const 4
+    , I32Add
+    , SetGlobal sp
+    , GetGlobal hp  -- hp = hp + 16
+    , I32Const 16
+    , I32Add
+    , SetGlobal hp
+    ] ++ fromIns (Slide 2) ++ [End]
 
-encProcedure = lenc . (0:) . concatMap encWasmOp
+  eqAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval ] ++
+    [ GetGlobal hp  -- [hp] = Int
+    , I64Const wSum
+    , I64Store
+    -- [hp + 8] = [[sp + 4] + 8] == [[sp + 8] + 8]
+    , GetGlobal hp  -- PUSH hp + 8
+    , I32Const 8
+    , I32Add
+    , GetGlobal sp  -- PUSH [[sp + 4] + 8]
+    , I32Const 4
+    , I32Add
+    , I32Load
+    , I32Const 8
+    , I32Add
+    , I64Load
+    , GetGlobal sp  -- PUSH [[sp + 8] + 8]
+    , I32Const 8
+    , I32Add
+    , I32Load
+    , I32Const 8
+    , I32Add
+    , I64Load
+    , I64Xor  -- Compare.
+    , I64Eqz
+    , I32Store
+    , GetGlobal sp  -- [sp + 8] = hp
+    , I32Const 8
+    , I32Add
+    , GetGlobal hp
+    , I32Store
+    , GetGlobal sp  -- sp = sp + 4
+    , I32Const 4
+    , I32Add
+    , SetGlobal sp
+    , GetGlobal hp  -- hp = hp + 16
+    , I32Const 16
+    , I32Add
+    , SetGlobal hp
+    ] ++ fromIns (Slide 2) ++ [End]
+
+  evalAsm n =
+    [ Block
+    , Loop
+    , GetGlobal sp  -- bp = [sp + 4]
+    , I32Const 4
+    , I32Add
+    , I32Load
+    , SetGlobal bp
+    , Block
+    , GetGlobal bp
+    , I32Load
+    , BrTable [0, 2, 3]  -- case [bp]
+    , End  -- 0: Ap
+    , GetGlobal sp   -- [sp + 4] = [bp + 12]
+    , I32Const 4
+    , I32Add
+    , GetGlobal bp
+    , I32Const 12
+    , I32Add
+    , I32Load
+    , I32Store
+    , GetGlobal sp  -- [sp] = [bp + 8]
+    , GetGlobal bp
+    , I32Const 8
+    , I32Add
+    , I32Load
+    , I32Store
+    , GetGlobal sp  -- sp = sp - 4
+    , I32Const 4
+    , I32Sub
+    , SetGlobal sp
+    , Br 0
+    , End  -- 1: Ap loop.
+    , End  -- 2: Global
+    , GetGlobal sp  -- sp = sp + 4
+    , I32Const 4
+    , I32Add
+    , SetGlobal sp
+    ] ++ replicate n Block ++
+    [ GetGlobal bp  -- case [bp + 8]
+    , I32Const 8
+    , I32Add
+    , I32Load
+    , BrTable [0..n]
+    ] ++ concat [[End, WasmCall $ 1 + i, Br (n - i)] | i <- [1..n]] ++
+    [ End  -- 3: Other. It's already WHNF.
+    ]
 
 leb128 :: Int -> [Int]
 leb128 n | n < 64    = [n]
@@ -113,30 +247,26 @@ leb128 n | n < 64    = [n]
 sleb128 :: Integral a => a -> [Int]
 sleb128 n | n < 64    = [fromIntegral n]
           | n < 128   = [128 + fromIntegral n, 0]
-          | otherwise = 128 + (fromIntegral n `mod` 128) : sleb128 (fromIntegral n `div` 128)
+          | otherwise = 128 + (fromIntegral n `mod` 128) : sleb128 (n `div` 128)
 
+varlen :: [a] -> [Int]
 varlen xs = leb128 $ length xs
 
+lenc :: [Int] -> [Int]
 lenc xs = varlen xs ++ xs
-
-encStr s = lenc $ ord <$> s
-
-encType :: WasmType -> Int
-encType TypeI32 = 0x7f
-encType TypeI64 = 0x7e
-
--- | Encodes function signature.
-encSig :: [WasmType] -> [WasmType] -> [Int]
-encSig ins outs = 0x60 : lenc (encType <$> ins) ++ lenc (encType <$> outs)
 
 wAp = 0
 wGlobal = 1
 wInt = 2
 wSum = 3
+sp :: Int
 sp = 0
+hp :: Int
 hp = 1
+bp :: Int
 bp = 2
 
+fromIns :: Ins -> [WasmOp]
 fromIns instruction = case instruction of
   Trap -> [ Unreachable ]
   Eval -> [ WasmCall 1 ]  -- (Tail call.)
@@ -330,137 +460,7 @@ fromIns instruction = case instruction of
     , I32Sub
     , SetGlobal sp
     ]
-
-evalAsm n =
-  [ Block
-  , Loop
-  , GetGlobal sp  -- bp = [sp + 4]
-  , I32Const 4
-  , I32Add
-  , I32Load
-  , SetGlobal bp
-  , Block
-  , GetGlobal bp
-  , I32Load
-  , BrTable [0, 2, 3]  -- case [bp]
-  , End  -- 0: Ap
-  , GetGlobal sp   -- [sp + 4] = [bp + 12]
-  , I32Const 4
-  , I32Add
-  , GetGlobal bp
-  , I32Const 12
-  , I32Add
-  , I32Load
-  , I32Store
-  , GetGlobal sp  -- [sp] = [bp + 8]
-  , GetGlobal bp
-  , I32Const 8
-  , I32Add
-  , I32Load
-  , I32Store
-  , GetGlobal sp  -- sp = sp - 4
-  , I32Const 4
-  , I32Sub
-  , SetGlobal sp
-  , Br 0
-  , End  -- 1: Ap loop.
-  , End  -- 2: Global
-  , GetGlobal sp  -- sp = sp + 4
-  , I32Const 4
-  , I32Add
-  , SetGlobal sp
-  ] ++ replicate n Block ++
-  [ GetGlobal bp  -- case [bp + 8]
-  , I32Const 8
-  , I32Add
-  , I32Load
-  , BrTable [0..n]
-  ] ++ concat [[End, WasmCall $ 1 + i, Br (n - i)] | i <- [1..n]] ++
-  [ End  -- 3: Other. It's already WHNF.
-  ]
-
-addAsm = intAsm I64Add
-subAsm = intAsm I64Sub
-mulAsm = intAsm I64Mul
-
-intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval ] ++
-  [ GetGlobal hp  -- [hp] = Int
-  , I64Const wInt
-  , I64Store
-  -- [hp + 8] = [[sp + 4] + 8] `op` [[sp + 8] + 8]
-  , GetGlobal hp  -- PUSH hp + 8
-  , I32Const 8
-  , I32Add
-  , GetGlobal sp  -- PUSH [[sp + 4] + 8]
-  , I32Const 4
-  , I32Add
-  , I32Load
-  , I32Const 8
-  , I32Add
-  , I64Load
-  , GetGlobal sp  -- PUSH [[sp + 8] + 8]
-  , I32Const 8
-  , I32Add
-  , I32Load
-  , I32Const 8
-  , I32Add
-  , I64Load
-  , op
-  , I64Store
-  , GetGlobal sp  -- [sp + 8] = hp
-  , I32Const 8
-  , I32Add
-  , GetGlobal hp
-  , I32Store
-  , GetGlobal sp  -- sp = sp + 4
-  , I32Const 4
-  , I32Add
-  , SetGlobal sp
-  , GetGlobal hp  -- hp = hp + 16
-  , I32Const 16
-  , I32Add
-  , SetGlobal hp
-  ] ++ fromIns (Slide 2) ++ [End]
-
-eqAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval ] ++
-  [ GetGlobal hp  -- [hp] = Int
-  , I64Const wSum
-  , I64Store
-  -- [hp + 8] = [[sp + 4] + 8] == [[sp + 8] + 8]
-  , GetGlobal hp  -- PUSH hp + 8
-  , I32Const 8
-  , I32Add
-  , GetGlobal sp  -- PUSH [[sp + 4] + 8]
-  , I32Const 4
-  , I32Add
-  , I32Load
-  , I32Const 8
-  , I32Add
-  , I64Load
-  , GetGlobal sp  -- PUSH [[sp + 8] + 8]
-  , I32Const 8
-  , I32Add
-  , I32Load
-  , I32Const 8
-  , I32Add
-  , I64Load
-  , I64Xor  -- Compare.
-  , I64Eqz
-  , I32Store
-  , GetGlobal sp  -- [sp + 8] = hp
-  , I32Const 8
-  , I32Add
-  , GetGlobal hp
-  , I32Store
-  , GetGlobal sp  -- sp = sp + 4
-  , I32Const 4
-  , I32Add
-  , SetGlobal sp
-  , GetGlobal hp  -- hp = hp + 16
-  , I32Const 16
-  , I32Add
-  , SetGlobal hp
-  ] ++ fromIns (Slide 2) ++ [End]
+  _ -> undefined
 
 mk1 :: BM.Bimap String Int -> Ast -> State [(String, Int)] [Ins]
 mk1 funs ast = case ast of
@@ -470,8 +470,8 @@ mk1 funs ast = case ast of
     bump 1
     mt <- rec t
     bump (-1)
-    pure $ case mt of
-      [Copro _ _] -> mu ++ mt
+    pure $ case last mt of
+      Copro _ _ -> mu ++ mt
       _ -> concat [mu, mt, [MkAp]]
   Lam a b -> do
     modify' $ \bs -> (a, length bs):bs
@@ -502,12 +502,13 @@ mk1 funs ast = case ast of
       put orig
       pure (f, b)
     pure $ me ++ [Eval, Casejump xs]
+  _ -> undefined
   where
     rec = mk1 funs
     bump n = modify' $ map $ second (+n)
 
 fromApList :: Ast -> [Ast]
-fromApList (a :@ b) = a : fromApList b
+fromApList (a :@ b) = fromApList a ++ [b]
 fromApList a = [a]
 
 data Node = NInt Int64 | NAp Int Int | NGlobal Int | NCon Int [Int] deriving Show
@@ -522,14 +523,16 @@ prelude = M.fromList $ (second ((,) Nothing) <$>
   , ("True",    (jp 1 0, TC "Bool"))
   , ("Nothing", (jp 0 0, TApp (TC "Maybe") a))
   , ("Just",    (jp 1 1, a :-> TApp (TC "Maybe") a))
+  , ("[]",      (jp 0 0, TApp (TC "List") a))
+  , (":",       (jp 1 2, a :-> TApp (TC "List") a :-> TApp (TC "List") a))
   ]
   where
     jp = (Just .) .  Pack
     a = GV "a"
 
 compileMk1 :: String -> Either String [(String, [Ins])]
-compileMk1 s = do
-  ds <- compileMinimal prelude s
+compileMk1 haskell = do
+  ds <- compileMinimal prelude haskell
   let funs = BM.fromList $ zip (["+", "-", "*", "Int-=="] ++ (fst <$> ds)) [0..]
   pure $ map (\(s, (d, _)) -> (s, evalState (mk1 funs d) [] ++ [Eval])) ds
 
@@ -546,6 +549,7 @@ testmk1 = go prog [] [] where
   go (ins:rest) s h = do
     let k = length h
     case ins of
+      Trap -> print "UNREACHABLE"
       PushInt n -> go rest (k:s) ((k, NInt n):h)
       Push n -> go rest (s!!n:s) h
       PushGlobal g -> go rest (k:s) ((k, NGlobal g):h)
@@ -595,3 +599,4 @@ testmk1 = go prog [] [] where
     case node of
       NInt n -> print n
       NCon n _ -> print ("PACK", n)
+      _ -> undefined
