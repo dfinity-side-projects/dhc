@@ -1,7 +1,8 @@
 = Dfinity Haskell Compiler =
 
-The DHC compiler produces WebAssembly from an input program written in a subset
-of Haskell.
+DHC is a Haskell compiler that produces WebAssembly.
 
-There is no support for the `S` (strings), `Call` and `Qual` language features,
-which are used by other Dfinity projects.
+It accepts only a tiny subset of the language.
+
+There is no support for the `S` (strings), `Call` and `Qual` language features
+declared in `DHC.hs`, which are used by other Dfinity projects.

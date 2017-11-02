@@ -25,7 +25,7 @@ data WasmOp = GetGlobal Int | SetGlobal Int
   | I64Store | I64Load | I64Add | I64Sub | I64Mul | I64Const Int64
   | I32Store | I32Load | I32Add | I32Sub | I32Const Int
   | I32WrapI64
-  | I64Xor | I64Eqz
+  | I64Xor | I64Eqz | I64ShrU
   | Block | Loop | Br Int | BrTable [Int] | WasmCall Int | Unreachable | End
   deriving Show
 
@@ -41,6 +41,7 @@ encWasmOp op = case op of
   I64Add -> [0x7c]
   I64Sub -> [0x7d]
   I64Mul -> [0x7e]
+  I64ShrU -> [0x88]
   I64Const n -> 0x42 : sleb128 n
   I32Const n -> 0x41 : sleb128 n
   I32WrapI64 -> [0xa7]
@@ -67,7 +68,7 @@ wasm prog = do
     sect t xs = t : lenc (varlen xs ++ concat xs)
   pure $ concat
     [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
-    , sect 1 [encSig [TypeI32] [], encSig [] []]  -- Type section.
+    , sect 1 [encSig [TypeI32, TypeI32] [], encSig [] []]  -- Type section.
     -- Import section.
     -- [0, 0] = external_kind Function, index 0.
     , sect 2 [encStr "i" ++ encStr "f" ++ [0, 0]]
@@ -89,16 +90,31 @@ wasm prog = do
       , I32Load
       , SetGlobal bp
       , Block
+      , Block
       , GetGlobal bp
+      , I32Load
+      , BrTable [2, 2, 0, 1, 2]
+      , End  -- Int.
+      , GetGlobal bp  -- High bits.
+      , I32Const 8
+      , I32Add
       , I64Load
+      , I64Const 32
+      , I64ShrU
       , I32WrapI64
-      , BrTable [1, 1, 0, 0, 1]
-      , End
-      , GetGlobal bp
+      , GetGlobal bp  -- Low bits.
       , I32Const 8
       , I32Add
       , I64Load
       , I32WrapI64
+      , WasmCall 0
+      , Br 1
+      , End  -- Sum (enum).
+      , I32Const 0
+      , GetGlobal bp
+      , I32Const 4
+      , I32Add
+      , I32Load
       , WasmCall 0
       , End
       ]])
@@ -113,8 +129,8 @@ wasm prog = do
   [addAsm, subAsm, mulAsm] = intAsm <$> [I64Add, I64Sub, I64Mul]
   intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval ] ++
     [ GetGlobal hp  -- [hp] = Int
-    , I64Const wInt
-    , I64Store
+    , I32Const wInt
+    , I32Store
     -- [hp + 8] = [[sp + 4] + 8] `op` [[sp + 8] + 8]
     , GetGlobal hp  -- PUSH hp + 8
     , I32Const 8
@@ -152,11 +168,11 @@ wasm prog = do
 
   eqAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval ] ++
     [ GetGlobal hp  -- [hp] = Int
-    , I64Const wSum
-    , I64Store
-    -- [hp + 8] = [[sp + 4] + 8] == [[sp + 8] + 8]
-    , GetGlobal hp  -- PUSH hp + 8
-    , I32Const 8
+    , I32Const wSum
+    , I32Store
+    -- [hp + 4] = [[sp + 4] + 8] == [[sp + 8] + 8]
+    , GetGlobal hp  -- PUSH hp + 4
+    , I32Const 4
     , I32Add
     , GetGlobal sp  -- PUSH [[sp + 4] + 8]
     , I32Const 4
@@ -184,8 +200,8 @@ wasm prog = do
     , I32Const 4
     , I32Add
     , SetGlobal sp
-    , GetGlobal hp  -- hp = hp + 16
-    , I32Const 16
+    , GetGlobal hp  -- hp = hp + 8
+    , I32Const 8
     , I32Add
     , SetGlobal hp
     ] ++ fromIns (Slide 2) ++ [End]
@@ -229,8 +245,8 @@ wasm prog = do
     , I32Add
     , SetGlobal sp
     ] ++ replicate n Block ++
-    [ GetGlobal bp  -- case [bp + 8]
-    , I32Const 8
+    [ GetGlobal bp  -- case [bp + 4]
+    , I32Const 4
     , I32Add
     , I32Load
     , BrTable [0..n]
@@ -279,8 +295,8 @@ fromIns instruction = case instruction of
     , I32Sub
     , SetGlobal sp
     , GetGlobal hp  -- [hp] = Int
-    , I64Const wInt
-    , I64Store
+    , I32Const wInt
+    , I32Store
     , GetGlobal hp  -- [hp + 8] = n
     , I32Const 8
     , I32Add
@@ -305,8 +321,8 @@ fromIns instruction = case instruction of
     ]
   MkAp ->
     [ GetGlobal hp  -- [hp] = Ap
-    , I64Const wAp
-    , I64Store
+    , I32Const wAp
+    , I32Store
     , GetGlobal hp  -- [hp + 8] = [sp + 4]
     , I32Const 8
     , I32Add
@@ -346,14 +362,14 @@ fromIns instruction = case instruction of
     , I32Sub
     , SetGlobal sp
     , GetGlobal hp  -- [hp] = Global
-    , I64Const wGlobal
-    , I64Store
-    , GetGlobal hp  -- [hp + 8] = n
-    , I32Const 8
+    , I32Const wGlobal
+    , I32Store
+    , GetGlobal hp  -- [hp + 4] = n
+    , I32Const 4
     , I32Add
-    , I64Const $ fromIntegral g
-    , I64Store
-    , GetGlobal hp  -- hp = hp + 16
+    , I32Const g
+    , I32Store
+    , GetGlobal hp  -- hp = hp + 8
     , I32Const 16
     , I32Add
     , SetGlobal hp
@@ -375,16 +391,16 @@ fromIns instruction = case instruction of
     ]
   Copro m n ->
     [ GetGlobal hp  -- [hp] = Sum
-    , I64Const wSum
-    , I64Store
-    , GetGlobal hp  -- [hp + 8] = m
-    , I32Const 8
+    , I32Const wSum
+    , I32Store
+    , GetGlobal hp  -- [hp + 4] = m
+    , I32Const 4
     , I32Add
     , I32Const m
     , I32Store
     ] ++ concat [
-      [ GetGlobal hp  -- [hp + 8 + 4*i] = [sp + 4*i]
-      , I32Const $ 8 + 4*i
+      [ GetGlobal hp  -- [hp + 4 + 4*i] = [sp + 4*i]
+      , I32Const $ 4 + 4*i
       , I32Add
       , GetGlobal sp
       , I32Const $ 4*i
@@ -402,8 +418,8 @@ fromIns instruction = case instruction of
     , I32Const 4
     , I32Sub
     , SetGlobal sp
-    , GetGlobal hp  -- hp = hp + 16 + floor(n / 2) * 8
-    , I32Const $ 16 + 8 * (n `div` 2)
+    , GetGlobal hp  -- hp = hp + 8 + ceil(n / 2) * 8
+    , I32Const $ 8 + 8 * ((n + 1) `div` 2)
     , I32Add
     , SetGlobal hp
     ]
@@ -416,8 +432,8 @@ fromIns instruction = case instruction of
       m = 1 + (maximum $ fromJust . fst <$> alts)
     -- [sp + 4] should be:
     -- 0: wSum
-    -- 8: "Enum"
-    -- 12, 16, ...: fields
+    -- 4: "Enum"
+    -- 8, 12, ...: fields
     in [ GetGlobal sp  -- bp = [sp + 4]
     , I32Const 4
     , I32Add
@@ -426,8 +442,8 @@ fromIns instruction = case instruction of
 
     , Block]
     ++ replicate (length alts + 1) Block ++
-    [ GetGlobal bp  -- [bp + 8]
-    , I32Const 8
+    [ GetGlobal bp  -- [bp + 4]
+    , I32Const 4
     , I32Add
     , I32Load
     , BrTable [fromIntegral $ fromMaybe (length alts) $ lookup i tab | i <- [0..m]]]
@@ -446,11 +462,11 @@ fromIns instruction = case instruction of
     , I32Add
     , SetGlobal sp
     ] ++ concat [
-      [ GetGlobal sp  -- [sp - 4*(n - i)] = [bp + 8 + 4*i]
+      [ GetGlobal sp  -- [sp - 4*(n - i)] = [bp + 4 + 4*i]
       , I32Const $ 4*(n - i)
       , I32Sub
       , GetGlobal bp
-      , I32Const $ 8 + 4*i
+      , I32Const $ 4 + 4*i
       , I32Add
       , I32Load
       , I32Store

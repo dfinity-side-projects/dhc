@@ -14,7 +14,7 @@ There is no garbage collection nor lazy evaluation.
 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 <script type="text/javascript">
 function runWasmInts(a){WebAssembly.instantiate(new Uint8Array(a),
-{i:{f:x => Haste.outputcb(x)}}).then(x => x.instance.exports.e());}
+{i:{f:(x,y) => Haste.outputcb(x,y)}}).then(x => x.instance.exports.e());}
 </script>
 <script src="dhcdemo.js">
 </script>
@@ -40,12 +40,16 @@ import Haste.Events
 import Haste.Foreign
 import Asm
 
-printInt :: Elem -> Int -> IO ()
-printInt e n = setProp e "innerHTML" $ show n
+printInts :: Elem -> Int -> Int -> IO ()
+printInts e x y = setProp e "innerHTML" $ case x of
+  0 -> show y ++ if y >= 0 then "" else
+    " (unsigned = " ++ show (fromIntegral y + b) ++ ")"
+  _ -> show $ fromIntegral x * b + ((fromIntegral y + b) `mod` b)
+  where b = 2^(32 :: Int) :: Integer
 
 main :: IO ()
 main = withElems ["src", "asm", "go", "out"] $ \[src, asmEl, goB, outE] -> do
-  export "outputcb" $ printInt outE
+  export "outputcb" $ printInts outE
   void $ goB `onEvent` Click $ const $ do
     setProp asmEl "value" ""
     s <- getProp src "value"
