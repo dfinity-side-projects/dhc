@@ -65,11 +65,10 @@ supercombinators = sc `sepBy` want ";" where
   preOp = try $ Var <$> between (want "(") (want ")") opTok
   tup = do
     xs <- between (want "(") (want ")") $ expr `sepBy` want ","
-    pure $ case xs of
-      [] -> Var "()"
+    pure $ case xs of  -- Abuse Pack to represent tuples.
+      [] -> Pack 0 0
       [x] -> x
-      -- Abuse Pack to represent tuples.
-      _ -> foldl' (:@) (Pack (-1) (length xs)) xs
+      _ -> foldl' (:@) (Pack 0 $ length xs) xs
   lis = try $ do
     items <- between (want "[") (want "]") $ expr `sepBy` want ","
     pure $ foldr (\a b -> Var ":" :@ a :@ b) (Var "[]") items
@@ -197,7 +196,7 @@ gather findExport prelude env ast = case ast of
       addConstraint (x, ta)
       pure (astp, asta)
     pure (Cas aste astas, x)
-  Pack (-1) n -> do
+  Pack _ n -> do  -- Only tuples are pre`Pack`ed.
     xs <- replicateM n newTV
     let r = foldl' (TApp) (TC "()") xs
     pure (ast, foldr (:->) r xs)
@@ -283,16 +282,36 @@ unify ((TApp s1 s2, TApp t1 t2):cs) m = unify ((s1, t1):(s2, t2):cs) m
 unify (( s1 :-> s2, t1 :-> t2):cs)  m = unify ((s1, t1):(s2, t2):cs) m
 unify ((s, t):_) _    = Left $ "mismatch: " ++ show s ++ " /= " ++ show t
 
-compileMinimal :: Map String (Maybe Ast, Type) -> String
-  -> Either String [(String, (Ast, Type))]
-compileMinimal prelude s = case parseDefs s of
+preludeMinimal :: Map String (Maybe Ast, Type)
+preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
+  [ ("+", TC "Int" :-> TC "Int" :-> TC "Int")
+  , ("-", TC "Int" :-> TC "Int" :-> TC "Int")
+  , ("*", TC "Int" :-> TC "Int" :-> TC "Int")
+  ]) ++
+  [ ("False",   (jp 0 0, TC "Bool"))
+  , ("True",    (jp 1 0, TC "Bool"))
+  , ("Nothing", (jp 0 0, TApp (TC "Maybe") a))
+  , ("Just",    (jp 1 1, a :-> TApp (TC "Maybe") a))
+  , ("Left",    (jp 0 1, a :-> TApp (TApp (TC "Either") a) b))
+  , ("Right",   (jp 1 1, b :-> TApp (TApp (TC "Either") a) b))
+  , ("[]",      (jp 0 0, TApp (TC "List") a))
+  , (":",       (jp 1 2, a :-> TApp (TC "List") a :-> TApp (TC "List") a))
+  ]
+  where
+    jp = (Just .) . Pack
+    a = GV "a"
+    b = GV "b"
+
+compileMinimal :: String -> Either String [(String, (Ast, Type))]
+compileMinimal s = case parseDefs s of
   Left err -> Left $ "parse error: " ++ show err
   Right ds -> do
     let
       tvs = TV . ('*':) . fst <$> ds
       env = zip (fst <$> ds) tvs
     (bs, ConState _ cs m) <- buildConstraints $ do
-      ts <- mapM (gather (\_ _ -> Left "no exports") prelude env) $ snd <$> ds
+      ts <- mapM (gather (\_ _ -> Left "no exports") preludeMinimal env) $
+        snd <$> ds
       mapM_ addConstraint $ zip tvs $ snd <$> ts
       pure $ fst <$> ts
     soln <- unify cs m

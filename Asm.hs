@@ -7,8 +7,6 @@ import qualified Data.Bimap as BM
 import Data.Char
 import Data.Int
 import Data.List
-import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as M
 import Data.Maybe
 
 import DHC
@@ -271,9 +269,13 @@ varlen xs = leb128 $ length xs
 lenc :: [Int] -> [Int]
 lenc xs = varlen xs ++ xs
 
+wAp :: Int
 wAp = 0
+wGlobal :: Int
 wGlobal = 1
+wInt :: Int
 wInt = 2
+wSum :: Int
 wSum = 3
 sp :: Int
 sp = 0
@@ -529,36 +531,20 @@ fromApList a = [a]
 
 data Node = NInt Int64 | NAp Int Int | NGlobal Int | NCon Int [Int] deriving Show
 
-prelude :: Map String (Maybe Ast, Type)
-prelude = M.fromList $ (second ((,) Nothing) <$>
-  [ ("+", TC "Int" :-> TC "Int" :-> TC "Int")
-  , ("-", TC "Int" :-> TC "Int" :-> TC "Int")
-  , ("*", TC "Int" :-> TC "Int" :-> TC "Int")
-  ]) ++
-  [ ("False",   (jp 0 0, TC "Bool"))
-  , ("True",    (jp 1 0, TC "Bool"))
-  , ("Nothing", (jp 0 0, TApp (TC "Maybe") a))
-  , ("Just",    (jp 1 1, a :-> TApp (TC "Maybe") a))
-  , ("[]",      (jp 0 0, TApp (TC "List") a))
-  , (":",       (jp 1 2, a :-> TApp (TC "List") a :-> TApp (TC "List") a))
-  ]
-  where
-    jp = (Just .) .  Pack
-    a = GV "a"
-
 compileMk1 :: String -> Either String [(String, [Ins])]
 compileMk1 haskell = do
-  ds <- compileMinimal prelude haskell
+  ds <- compileMinimal haskell
   let funs = BM.fromList $ zip (["+", "-", "*", "Int-=="] ++ (fst <$> ds)) [0..]
   pure $ map (\(s, (d, _)) -> (s, evalState (mk1 funs d) [] ++ [Eval])) ds
 
 -- | Test that interprets G-Machine instructions.
 testmk1 :: IO ()
-testmk1 = go prog [] [] where
+testmk1 = print ds >> print m >> go prog [] [] where
   drop' n as | n > length as = error "BUG!"
              | otherwise     = drop n as
   -- TODO: Deduplicate.
-  Right ds = compileMinimal prelude "g n = (case n of 0 -> 1; n -> n * g(n - 1)); f x = x * x; run = f (f 3); run1 = case Just 3 of Just n -> n + 1"
+  --Right ds = compileMinimal "g n = (case n of 0 -> 1; n -> n * g(n - 1)); f x = x * x; run = f (f 3); run1 = case Just 3 of Just n -> n + 1"
+  Right ds = compileMinimal "g n = (case n of (a, b) -> a); run = g (5,3)"
   funs = BM.fromList $ zip (["+", "-", "*", "Int-=="] ++ (fst <$> ds)) [0..]
   m = map (\(s, (d, _)) -> (s, evalState (mk1 funs d) [] ++ [Eval])) ds
   Just prog = lookup "run" m
