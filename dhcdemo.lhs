@@ -27,7 +27,8 @@ foldr f n xs = (case xs of [] -> n;
                            (a:as) -> f a (foldr f n as));
 uncurry f p = (case p of (a, b) -> f a b);
 sum = foldr (+) 0;
-run = uncurry (+) (factorial 5, sum [1,2,3,4,5])
+enumFromTo a b = (case a > b of True -> []; False -> a : enumFromTo (a + 1) b);
+run = uncurry (+) (factorial 5, sum [1..5])
 </textarea></p>
 <button id="go">Compile & Run!</button>
 <p><textarea id="asm" readonly rows="5" cols="80">
