@@ -61,7 +61,8 @@ supercombinators = sc `sepBy` want ";" where
     s <- foldl1' (<|>) $ want <$> xs
     pure $ \x y -> Var s :@ x :@ y
   molecule = lambda <|> foldl1' (:@) <$> many1 atom
-  atom = preOp <|> tup <|> call <|> qvar <|> var <|> num <|> str <|> lis
+  atom = preOp <|> tup <|> call <|> qvar <|> var <|> num <|> str
+    <|> lis <|> enumLis
   preOp = try $ Var <$> between (want "(") (want ")") opTok
   tup = do
     xs <- between (want "(") (want ")") $ expr `sepBy` want ","
@@ -69,6 +70,11 @@ supercombinators = sc `sepBy` want ";" where
       [] -> Pack 0 0
       [x] -> x
       _ -> foldl' (:@) (Pack 0 $ length xs) xs
+  enumLis = try $ between (want "[") (want "]") $ do
+    a <- expr
+    void $ want ".."
+    b <- expr
+    pure $ Var "enumFromTo" :@ a :@ b
   lis = try $ do
     items <- between (want "[") (want "]") $ expr `sepBy` want ","
     pure $ foldr (\a b -> Var ":" :@ a :@ b) (Var "[]") items
@@ -287,6 +293,10 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
   [ ("+", TC "Int" :-> TC "Int" :-> TC "Int")
   , ("-", TC "Int" :-> TC "Int" :-> TC "Int")
   , ("*", TC "Int" :-> TC "Int" :-> TC "Int")
+  , ("div", TC "Int" :-> TC "Int" :-> TC "Int")
+  , ("mod", TC "Int" :-> TC "Int" :-> TC "Int")
+  , ("<", TC "Int" :-> TC "Int" :-> TC "Bool")
+  , (">", TC "Int" :-> TC "Int" :-> TC "Bool")
   ]) ++
   [ ("False",   (jp 0 0, TC "Bool"))
   , ("True",    (jp 1 0, TC "Bool"))

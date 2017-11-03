@@ -12,8 +12,7 @@ import Data.Maybe
 import DHC
 
 -- | G-Machine instructions.
-data Ins = PrMul | PrAdd | PrSub  -- For testing.
-  | Copro Int Int | PushInt Int64 | Push Int | PushGlobal Int
+data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal Int
   | MkAp | Slide Int | Split Int | Eval
   | Casejump [(Maybe Int64, [Ins])] | Trap deriving Show
 
@@ -23,7 +22,8 @@ data WasmOp = GetGlobal Int | SetGlobal Int
   | I64Store | I64Load | I64Add | I64Sub | I64Mul | I64Const Int64
   | I32Store | I32Load | I32Add | I32Sub | I32Const Int
   | I32WrapI64
-  | I64Xor | I64Eqz | I64ShrU
+  | I64Xor | I64Eqz | I64ShrU | I64DivS | I64RemS
+  | I64Eq | I64Ne | I64LTS | I64GTS
   | Block | Loop | Br Int | BrTable [Int] | WasmCall Int | Unreachable | End
   deriving Show
 
@@ -39,12 +39,18 @@ encWasmOp op = case op of
   I64Add -> [0x7c]
   I64Sub -> [0x7d]
   I64Mul -> [0x7e]
+  I64DivS -> [0x7f]
+  I64RemS -> [0x81]
   I64ShrU -> [0x88]
   I64Const n -> 0x42 : sleb128 n
   I32Const n -> 0x41 : sleb128 n
   I32WrapI64 -> [0xa7]
   I64Xor -> [0x85]
   I64Eqz -> [0x50]
+  I64Eq -> [0x51]
+  I64Ne -> [0x52]
+  I64LTS -> [0x53]
+  I64GTS -> [0x55]
   WasmCall n -> 0x10 : leb128 n
   Unreachable -> [0x0]
   End -> [0xb]
@@ -61,7 +67,21 @@ wasm :: String -> Either String [Int]
 wasm prog = do
   m <- compileMk1 prog
   let
-    fs = [evalAsm (4 + length m), addAsm, subAsm, mulAsm, eqAsm]
+    -- Primitive functions. Must be kept in sync with `funs` table below.
+    prims =
+      [ intAsm I64Add
+      , intAsm I64Sub
+      , intAsm I64Mul
+      , intAsm I64DivS
+      , intAsm I64RemS
+      , cmpAsm I64Eq
+      , cmpAsm I64LTS
+      , cmpAsm I64GTS
+      ]
+    -- Function 0: import function which we send our outputs.
+    -- Function 1: Eval.
+    -- Afterwards, the primitive functions, then the functions in the program.
+    fs = evalAsm (length prims + length m) : prims
       ++ ((++ [End]) . concatMap fromIns . snd <$> m)
     sect t xs = t : lenc (varlen xs ++ concat xs)
   pure $ concat
@@ -81,7 +101,7 @@ wasm prog = do
     -- [0, n] = external_kind Function, index n.
     , sect 7 [encStr "e" ++ [0, length fs + 1]]
     , sect 10 $ encProcedure <$> (fs ++  -- Code section.
-      [[ WasmCall $ 6 + (fromJust $ elemIndex "run" $ fst <$> m)
+      [[ WasmCall $ 2 + length prims + (fromJust $ elemIndex "run" $ fst <$> m)
       , GetGlobal sp
       , I32Const 4
       , I32Add
@@ -124,8 +144,7 @@ wasm prog = do
   encType TypeI64 = 0x7e
   -- | Encodes function signature.
   encSig ins outs = 0x60 : lenc (encType <$> ins) ++ lenc (encType <$> outs)
-  [addAsm, subAsm, mulAsm] = intAsm <$> [I64Add, I64Sub, I64Mul]
-  intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval ] ++
+  intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
     [ GetGlobal hp  -- [hp] = Int
     , I32Const wInt
     , I32Store
@@ -164,7 +183,7 @@ wasm prog = do
     , SetGlobal hp
     ] ++ fromIns (Slide 2) ++ [End]
 
-  eqAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval ] ++
+  cmpAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval ] ++
     [ GetGlobal hp  -- [hp] = Int
     , I32Const wSum
     , I32Store
@@ -186,8 +205,7 @@ wasm prog = do
     , I32Const 8
     , I32Add
     , I64Load
-    , I64Xor  -- Compare.
-    , I64Eqz
+    , op
     , I32Store
     , GetGlobal sp  -- [sp + 8] = hp
     , I32Const 8
@@ -478,7 +496,6 @@ fromIns instruction = case instruction of
     , I32Sub
     , SetGlobal sp
     ]
-  _ -> undefined
 
 mk1 :: BM.Bimap String Int -> Ast -> State [(String, Int)] [Ins]
 mk1 funs ast = case ast of
@@ -517,6 +534,7 @@ mk1 funs ast = case ast of
           bump 1
           modify' $ \bs -> (s, 0):bs
           (,) Nothing . (++ [Slide 1]) <$> rec body
+        _ -> undefined
       put orig
       pure (f, b)
     pure $ me ++ [Eval, Casejump xs]
@@ -534,23 +552,27 @@ data Node = NInt Int64 | NAp Int Int | NGlobal Int | NCon Int [Int] deriving Sho
 compileMk1 :: String -> Either String [(String, [Ins])]
 compileMk1 haskell = do
   ds <- compileMinimal haskell
-  let funs = BM.fromList $ zip (["+", "-", "*", "Int-=="] ++ (fst <$> ds)) [0..]
+  let funs = BM.fromList $ zip (["+", "-", "*", "div", "mod", "Int-==", "<", ">"] ++ (fst <$> ds)) [0..]
   pure $ map (\(s, (d, _)) -> (s, evalState (mk1 funs d) [] ++ [Eval])) ds
 
 -- | Test that interprets G-Machine instructions.
 testmk1 :: IO ()
-testmk1 = print ds >> print m >> go prog [] [] where
+testmk1 = go (Right <$> prog) [] [] where
   drop' n as | n > length as = error "BUG!"
              | otherwise     = drop n as
-  -- TODO: Deduplicate.
-  --Right ds = compileMinimal "g n = (case n of 0 -> 1; n -> n * g(n - 1)); f x = x * x; run = f (f 3); run1 = case Just 3 of Just n -> n + 1"
-  Right ds = compileMinimal "g n = (case n of (a, b) -> a); run = g (5,3)"
-  funs = BM.fromList $ zip (["+", "-", "*", "Int-=="] ++ (fst <$> ds)) [0..]
-  m = map (\(s, (d, _)) -> (s, evalState (mk1 funs d) [] ++ [Eval])) ds
+  Right m = compileMk1 "g n = (case n of 0 -> 1; n -> n * g(n - 1)); f x = x * x; run = f (f 3); run1 = case Just 3 of Just n -> n + 1"
   Just prog = lookup "run" m
-  go (ins:rest) s h = do
-    let k = length h
-    case ins of
+  go (fOrIns:rest) s h = either primFun exec fOrIns where
+    k = length h
+    intInt f = go rest (k:srest) ((k, NInt $ f x y):h) where
+      (s0:s1:srest) = s
+      Just (NInt x) = lookup s0 h
+      Just (NInt y) = lookup s1 h
+    primFun 0 = intInt (+)
+    primFun 1 = intInt (-)
+    primFun 2 = intInt (*)
+    primFun _ = error "unsupported"
+    exec ins = case ins of
       Trap -> print "UNREACHABLE"
       PushInt n -> go rest (k:s) ((k, NInt n):h)
       Push n -> go rest (s!!n:s) h
@@ -562,40 +584,25 @@ testmk1 = print ds >> print m >> go prog [] [] where
         (s0:srest) = s
         Just (NCon _ as) = lookup s0 h
         in go rest (as ++ srest) h
-      PrAdd -> let
-        (s0:s1:srest) = s
-        Just (NInt x) = lookup s0 h
-        Just (NInt y) = lookup s1 h
-        in go rest (k:srest) ((k, NInt $ x + y):h)
-      PrSub -> let
-        (s0:s1:srest) = s
-        Just (NInt x) = lookup s0 h
-        Just (NInt y) = lookup s1 h
-        in go rest (k:srest) ((k, NInt $ x - y):h)
-      PrMul -> let
-        (s0:s1:srest) = s
-        Just (NInt x) = lookup s0 h
-        Just (NInt y) = lookup s1 h
-        in go rest (k:srest) ((k, NInt $ x * y):h)
       Eval -> do
         let Just node = lookup (head s) h
         case node of
-          NAp a b -> go (Eval:rest) (a:b:tail s) h
+          NAp a b -> go (Right Eval:rest) (a:b:tail s) h
           NGlobal g -> let
-            p = if g >= 4 then snd (m!!(g - 4)) else case g of
-              0 -> [Push 1, Eval, Push 1, Eval, PrAdd, Slide 2]
-              1 -> [Push 1, Eval, Push 1, Eval, PrSub, Slide 2]
-              2 -> [Push 1, Eval, Push 1, Eval, PrMul, Slide 2]
+            p = if g >= 8 then Right <$> snd (m!!(g - 8)) else
+              (Right <$> [Push 1, Eval, Push 1, Eval]) ++
+              [Left g, Right $ Slide 2]
             in go (p ++ rest) (tail s) h
           _ -> go rest s h
       Casejump alts -> let
         x = case lookup (head s) h of
           Just (NInt n) -> n
           Just (NCon n _) -> fromIntegral n
+          _ -> undefined
         body = case lookup (Just x) alts of
           Just b -> b
           _ -> fromJust $ lookup Nothing alts
-        in go (body ++ rest) s h
+        in go ((Right <$> body) ++ rest) s h
   go [] s h = do
     let Just node = lookup (head s) h
     case node of
