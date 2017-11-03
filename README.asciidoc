@@ -1,5 +1,7 @@
 = Dfinity Haskell Compiler =
 
+image:https://jenkins.london.dfinity.build/job/dhc/badge/icon[link="https://jenkins.london.dfinity.build/job/dhc/"]
+
 DHC is a Haskell compiler that produces WebAssembly.
 
 It accepts only a tiny subset of the language.
