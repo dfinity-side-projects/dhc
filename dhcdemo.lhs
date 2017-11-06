@@ -13,6 +13,8 @@ sugar.
 
 There is no garbage collection nor lazy evaluation.
 
+https://github.com/dfinity/dhc[Source].
+
 [pass]
 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 <script type="text/javascript">

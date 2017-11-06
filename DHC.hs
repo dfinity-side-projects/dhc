@@ -101,9 +101,10 @@ supercombinators = sc `sepBy` want ";" where
     unless (all isDigit s) $ fail ""
     pure $ I $ read s
   str = do
-    s <- try <$> between (char '"') (char '"') $ S <$> many (noneOf "\"")
+    s <- try <$> between (char '"') (char '"') $ S <$> many rune
     filler
     pure s
+  rune = (char '\\' >> oneOf "\\\"") <|> noneOf "\""
   want t = try $ do
     s <- tok
     unless (s == t) $ fail $ "expected " ++ t
