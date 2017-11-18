@@ -15,6 +15,7 @@ library
     binary,
     bimap,
     containers,
+    deepseq,
     mtl,
     parsec
   default-language:
