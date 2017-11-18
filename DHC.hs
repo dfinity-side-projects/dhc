@@ -26,6 +26,13 @@ infixr 5 :->
 data Type = TC String | TApp Type Type | Type :-> Type
   | TV String | GV String deriving (Read, Show, Eq, Generic)
 
+program :: Parser [(String, Ast)]
+program = do
+  filler
+  defs <- supercombinators
+  eof
+  pure defs
+
 supercombinators :: Parser [(String, Ast)]
 supercombinators = sc `sepBy` want ";" where
   sc = do
@@ -105,24 +112,32 @@ supercombinators = sc `sepBy` want ";" where
     filler
     pure s
   rune = (char '\\' >> oneOf "\\\"") <|> noneOf "\""
-  want t = try $ do
-    s <- tok
-    unless (s == t) $ fail $ "expected " ++ t
-    pure s
-  opTok = do
-    s <- many1 (oneOf "\\:!+-/*^><=$.&|")
-    filler
-    pure s
-  tok = opTok <|> do
-    s <- many1 (alphaNum <|> char '_') <|>
-         foldl1' (<|>) (string . pure <$> ";()[],")
-    filler
-    pure s
-  filler = void $ many $ many1 space <|>
-    (between (try $ string "--") (char '\n') $ many $ noneOf "\n")
+
+want :: String -> Parser String
+want t = try $ do
+  s <- tok
+  unless (s == t) $ fail $ "expected " ++ t
+  pure s
+
+opTok :: Parser String
+opTok = do
+  s <- many1 (oneOf "\\:!+-/*^><=$.&|")
+  filler
+  pure s
+
+tok :: Parser String
+tok = opTok <|> do
+  s <- many1 (alphaNum <|> char '_') <|>
+       foldl1' (<|>) (string . pure <$> ";()[],")
+  filler
+  pure s
+
+filler :: Parser ()
+filler = void $ many $ many1 space <|>
+  (between (try $ string "--") (char '\n') $ many $ noneOf "\n")
 
 parseDefs :: String -> Either ParseError [(String, Ast)]
-parseDefs = parse supercombinators ""
+parseDefs = parse program ""
 
 -- The Constraints monad combines a State monad and an Either monad.
 -- The state consists of the set of constraints and next integer available
