@@ -2,6 +2,7 @@
 module DHC where
 
 import Control.Arrow
+import Control.DeepSeq (NFData(..))
 import Control.Monad
 import Data.Binary (Binary)
 import Data.Char
@@ -25,6 +26,26 @@ data Ast = RealWorld | Qual String String | Call String String
 infixr 5 :->
 data Type = TC String | TApp Type Type | Type :-> Type
   | TV String | GV String deriving (Read, Show, Eq, Generic)
+
+instance NFData Ast where
+  rnf (RealWorld) = ()
+  rnf (Qual s1 s2) = rnf s1 `seq` rnf s2 `seq` ()
+  rnf (Call s1 s2) = rnf s1 `seq` rnf s2 `seq` ()
+  rnf (Pack i1 i2) = rnf i1 `seq` rnf i2 `seq` ()
+  rnf (I i) = rnf i `seq` ()
+  rnf (S s) = rnf s `seq` ()
+  rnf (Var s) = rnf s `seq` ()
+  rnf (a1 :@ a2) = rnf a1 `seq` rnf a2 `seq` ()
+  rnf (Lam s a) = rnf s `seq` rnf a `seq` ()
+  rnf (Cas a as) = rnf a `seq` rnf as `seq` ()
+  rnf (Placeholder s t) = rnf s `seq` rnf t `seq` ()
+
+instance NFData Type where
+  rnf (TC s) = rnf s `seq` ()
+  rnf (TApp t1 t2) = rnf t1 `seq` rnf t2 `seq` ()
+  rnf (t1 :-> t2) = rnf t1 `seq` rnf t2 `seq` ()
+  rnf (TV s) = rnf s `seq` ()
+  rnf (GV s) = rnf s `seq` ()
 
 program :: Parser [(String, Ast)]
 program = do
