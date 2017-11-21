@@ -1,4 +1,4 @@
-= Dfinity Haskell Compiler =
+# Dfinity Haskell Compiler
 
 image:https://jenkins.london.dfinity.build/job/dhc/badge/icon[link="https://jenkins.london.dfinity.build/job/dhc/"]
 
