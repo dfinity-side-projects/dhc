@@ -1,6 +1,6 @@
 # Dfinity Haskell Compiler
 
-image:https://jenkins.london.dfinity.build/job/dhc/badge/icon[link="https://jenkins.london.dfinity.build/job/dhc/"]
+[![Build Status](https://jenkins.london.dfinity.build/job/dhc/badge/icon)](https://jenkins.london.dfinity.build/job/dhc/)
 
 ## Summary
 DHC is a Haskell compiler that produces WebAssembly.
