@@ -30,7 +30,10 @@ foldr f n xs = (case xs of [] -> n;
 uncurry f p = (case p of (a, b) -> f a b);
 sum = foldr (+) 0;
 enumFromTo a b = (case a > b of True -> []; False -> a : enumFromTo (a + 1) b);
-run = uncurry (+) (factorial 5, sum [1..5])
+map f = foldr (mapHelper f) [];
+mapHelper f x xs = f x : xs;
+tenTimes x = 10 * x;
+run = uncurry (+) (factorial 5, sum (map tenTimes [1..5]))
 </textarea></p>
 <button id="go">Compile & Run!</button>
 <p><textarea id="asm" readonly rows="5" cols="80">

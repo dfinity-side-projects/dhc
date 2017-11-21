@@ -352,15 +352,43 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
 compileMinimal :: String -> Either String [(String, (Ast, Type))]
 compileMinimal s = case parseDefs s of
   Left err -> Left $ "parse error: " ++ show err
-  Right ds -> do
-    let
-      tvs = TV . ('*':) . fst <$> ds
-      env = zip (fst <$> ds) tvs
-    (bs, ConState _ cs m) <- buildConstraints $ do
-      ts <- mapM (gather (\_ _ -> Left "no exports") preludeMinimal env) $
-        snd <$> ds
-      mapM_ addConstraint $ zip tvs $ snd <$> ts
-      pure $ fst <$> ts
-    soln <- unify cs m
-    pure $ zip (fst <$> ds) $ zip (fillPlaceholders soln <$> bs) $ generalize [] . typeSolve soln <$> tvs
+  Right ds -> case topo (callees ds) $ fst <$> ds of
+    -- TODO: Find strongly-connected components (in topological order) to
+    -- support mutual recursion.
+    Nothing -> Left $ "mutual recursion not supported yet"
+    Just sorted -> foldM inferType [] $ (\k -> [(k, fromJust $ lookup k ds)]) <$> reverse sorted
+
+inferType :: [(String, (Ast, Type))] -> [(String, Ast)] -> Either String [(String, (Ast, Type))]
+inferType acc ds = do
+  let
+    tvs = TV . ('*':) . fst <$> ds
+    env = zip (fst <$> ds) tvs ++ map (second snd) acc
+  (bs, ConState _ cs m) <- buildConstraints $ do
+    ts <- mapM (gather (\_ _ -> Left "no exports") preludeMinimal env) $
+      snd <$> ds
+    mapM_ addConstraint $ zip tvs $ snd <$> ts
+    pure $ fst <$> ts
+  soln <- unify cs m
+  pure $ (++ acc) $ zip (fst <$> ds) $ zip (fillPlaceholders soln <$> bs) $ generalize [] . typeSolve soln <$> tvs
   where buildConstraints (Constraints f) = f $ ConState 0 [] M.empty
+
+topo :: Eq a => (a -> [a]) -> [a] -> Maybe [a]
+topo suc vs = fst <$> foldM visit ([], []) vs where
+  visit (done, doing) v
+    | v `elem` done  = Just (done, doing)
+    | v `elem` doing = Nothing
+    | otherwise = (\(xs, x:ys) -> (x:xs, ys)) <$>
+      foldM visit (done, v:doing) (suc v)
+
+callees :: [(String, Ast)] -> String -> [String]
+callees ds f = deps f (fromJust $ lookup f ds) where
+  deps name body = case body of
+    Lam s t | s /= name -> rec t
+    -- TODO: Look for shadowed function name in case statement.
+    Cas x as          -> rec x ++ concatMap rec (snd <$> as)
+    x :@ y            -> rec x ++ rec y
+    Var v | v /= name -> case lookup v ds of 
+      Nothing -> []
+      Just _  -> [v]
+    _                 -> []
+    where rec = deps name
