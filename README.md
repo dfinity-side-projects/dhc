@@ -31,4 +31,4 @@ TBD
 
 All code and designs are open sourced under GPL V3.
 
-![image](https://user-images.githubusercontent.com/6457089/32753794-10f4cbc2-c883-11e7-8dcf-ff8088b38f9f.png)
+![dfinity logo](https://user-images.githubusercontent.com/6457089/32753794-10f4cbc2-c883-11e7-8dcf-ff8088b38f9f.png)
