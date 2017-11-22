@@ -24,7 +24,9 @@ function runWasmInts(a){WebAssembly.instantiate(new Uint8Array(a),
 <script src="dhcdemo.js">
 </script>
 <p><textarea id="src" rows="25" cols="80">
-factorial n = (case n == 0 of True -> 1; False -> n * factorial (n - 1));
+-- Gratuitous mutual recursion.
+factorial n = (case n == 0 of True -> 1; False -> n * factorial2 (n - 1));
+factorial2 n = (case n == 0 of True -> 1; False -> n * factorial (n - 1));
 foldr f n xs = (case xs of [] -> n; 
                            (a:as) -> f a (foldr f n as));
 uncurry f p = (case p of (a, b) -> f a b);

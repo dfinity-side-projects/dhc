@@ -352,11 +352,7 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
 compileMinimal :: String -> Either String [(String, (Ast, Type))]
 compileMinimal s = case parseDefs s of
   Left err -> Left $ "parse error: " ++ show err
-  Right ds -> case topo (callees ds) $ fst <$> ds of
-    -- TODO: Find strongly-connected components (in topological order) to
-    -- support mutual recursion.
-    Nothing -> Left $ "mutual recursion not supported yet"
-    Just sorted -> foldM inferType [] $ (\k -> [(k, fromJust $ lookup k ds)]) <$> reverse sorted
+  Right ds -> foldM inferType [] $ map (map (\k -> (k, fromJust $ lookup k ds))) $ reverse $ scc (callees ds) $ fst <$> ds
 
 inferType :: [(String, (Ast, Type))] -> [(String, Ast)] -> Either String [(String, (Ast, Type))]
 inferType acc ds = do
@@ -372,14 +368,6 @@ inferType acc ds = do
   pure $ (++ acc) $ zip (fst <$> ds) $ zip (fillPlaceholders soln <$> bs) $ generalize [] . typeSolve soln <$> tvs
   where buildConstraints (Constraints f) = f $ ConState 0 [] M.empty
 
-topo :: Eq a => (a -> [a]) -> [a] -> Maybe [a]
-topo suc vs = fst <$> foldM visit ([], []) vs where
-  visit (done, doing) v
-    | v `elem` done  = Just (done, doing)
-    | v `elem` doing = Nothing
-    | otherwise = (\(xs, x:ys) -> (x:xs, ys)) <$>
-      foldM visit (done, v:doing) (suc v)
-
 callees :: [(String, Ast)] -> String -> [String]
 callees ds f = deps f (fromJust $ lookup f ds) where
   deps name body = case body of
@@ -387,8 +375,22 @@ callees ds f = deps f (fromJust $ lookup f ds) where
     -- TODO: Look for shadowed function name in case statement.
     Cas x as          -> rec x ++ concatMap rec (snd <$> as)
     x :@ y            -> rec x ++ rec y
-    Var v | v /= name -> case lookup v ds of 
+    Var v | v /= name -> case lookup v ds of
       Nothing -> []
       Just _  -> [v]
     _                 -> []
     where rec = deps name
+
+-- | Returns strongly connected components in topological order.
+scc :: Eq a => (a -> [a]) -> [a] -> [[a]]
+scc suc vs = foldl' (\cs v -> assign cs [] v : cs) [] $ reverse $ topo suc vs where
+  assign cs c v | any (elem v) $ c:cs = c
+                | otherwise           = foldl' (assign cs) (v:c) (suc v)
+
+topo :: Eq a => (a -> [a]) -> [a] -> [a]
+topo suc vs = fst $ foldl' visit ([], []) vs where
+  visit (done, doing) v
+    | v `elem` done || v `elem` doing = (done, doing)
+    | otherwise = (\(xs, x:ys) -> (x:xs, ys)) $
+      foldl' visit (done, v:doing) (suc v)
+
