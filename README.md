@@ -14,7 +14,8 @@ There is no support for the `S` (strings), `Call` and `Qual` language features
 declared in `DHC.hs`, which are used by other Dfinity projects.
 
 ## Live demo
-https://dhc.dfinity.org/[https://dhc.dfinity.org/]
+
+https://dhc.dfinity.org
 
 ## Installation / Dependencies
 TBD
