@@ -5,6 +5,7 @@ import Control.Arrow
 import Control.DeepSeq (NFData(..))
 import Control.Monad
 import Data.Binary (Binary)
+import Data.ByteString.Char8 (ByteString, pack)
 import Data.Char
 import Data.Int
 import Data.List
@@ -19,7 +20,7 @@ instance Binary Type
 
 infixl 5 :@
 data Ast = RealWorld | Qual String String | Call String String
-  | Pack Int Int | I Int64 | S String | Var String
+  | Pack Int Int | I Int64 | S ByteString | Var String
   | Ast :@ Ast | Lam String Ast | Cas Ast [(Ast, Ast)]
   | Placeholder String Type deriving (Read, Show, Generic)
 
@@ -129,7 +130,7 @@ supercombinators = sc `sepBy` want ";" where
     unless (all isDigit s) $ fail ""
     pure $ I $ read s
   str = do
-    s <- try <$> between (char '"') (char '"') $ S <$> many rune
+    s <- try <$> between (char '"') (char '"') $ S . pack <$> many rune
     filler
     pure s
   rune = (char '\\' >> oneOf "\\\"") <|> noneOf "\""
