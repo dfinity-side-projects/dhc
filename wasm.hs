@@ -45,14 +45,11 @@ execute fns Wasm {imports, exports, code, globals} s = let
     _                   -> run vm {insts = tail insts}
   run vm@VM{globs, stack, insts, mem} = case head $ head insts of
     Call i -> if i < fCount then do
-        let
-          Import _ _ (params, _) = imports!!i
-          k = length params
+        let k = length $ fst $ snd $ imports!!i
         fns!!i $ take k stack
         run vm { stack = drop k stack, insts = i1 }
       else do
-        let Body _ os = code!!(i - fCount)
-        run vm { insts = os:i1 }
+        run vm { insts = snd (code!!(i - fCount)):i1 }
     Set_global i -> run vm {globs = IM.insert i (head stack) globs, stack = tail stack, insts = i1}
     Get_global i -> run vm {stack = globs IM.! i:stack, insts = i1}
     c@(I32_const _) -> run vm {stack = c:stack, insts = i1}
@@ -113,5 +110,5 @@ execute fns Wasm {imports, exports, code, globals} s = let
         c = I64_const $ f a b
   Just fI = lookup s exports
   in if fI < fCount then void $ fns!!fI $ [] else do
-    let Body _ os = code!!(fI - fCount)
-    run $ VM (IM.fromList $ zip [0..] $ head . snd <$> globals) [] [os] IM.empty
+    run $ VM (IM.fromList $ zip [0..] $ head . snd <$> globals)
+      [] [snd $ code!!(fI - fCount)] IM.empty

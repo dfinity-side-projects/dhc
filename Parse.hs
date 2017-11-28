@@ -1,19 +1,18 @@
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Parse where
+module Parse(parseWasm, Op(..), Wasm(..)) where
 import Control.Monad
 import qualified Data.ByteString.Char8 as B8
+import Data.ByteString.Char8 (ByteString)
 import Data.Char
 import Data.Int
 import Data.Word
-import Text.Parsec.ByteString
-import Text.Parsec
 
 data Type = I32 | I64 | F32 | F64 | Func | AnyFunc | Nada deriving (Show, Eq)
 data ExternalKind = Function | Table | Memory | Global
 type FuncType = ([Type], [Type])
-data Import = Import String String FuncType deriving Show
-data Body = Body [Type] [Op] deriving Show
+type Body = ([Type], [Op])
+type Import = ((String, String), FuncType)
 data Wasm = Wasm {
   types :: [FuncType],
   imports :: [Import],
@@ -43,36 +42,67 @@ zeroOperandOps = cmpOps ++ ariOps ++ crops where
   ariOps = [(0x67, I32_clz), (0x68, I32_ctz), (0x69, I32_popcnt), (0x6a, I32_add), (0x6b, I32_sub), (0x6c, I32_mul), (0x6d, I32_div_s), (0x6e, I32_div_u), (0x6f, I32_rem_s), (0x70, I32_rem_u), (0x71, I32_and), (0x72, I32_or), (0x73, I32_xor), (0x74, I32_shl), (0x75, I32_shr_s), (0x76, I32_shr_u), (0x77, I32_rotl), (0x78, I32_rotr), (0x79, I64_clz), (0x7a, I64_ctz), (0x7b, I64_popcnt), (0x7c, I64_add), (0x7d, I64_sub), (0x7e, I64_mul), (0x7f, I64_div_s), (0x80, I64_div_u), (0x81, I64_rem_s), (0x82, I64_rem_u), (0x83, I64_and), (0x84, I64_or), (0x85, I64_xor), (0x86, I64_shl), (0x87, I64_shr_s), (0x88, I64_shr_u), (0x89, I64_rotl), (0x8a, I64_rotr), (0x8b, F32_abs), (0x8c, F32_neg), (0x8d, F32_ceil), (0x8e, F32_floor), (0x8f, F32_trunc), (0x90, F32_nearest), (0x91, F32_sqrt), (0x92, F32_add), (0x93, F32_sub), (0x94, F32_mul), (0x95, F32_div), (0x96, F32_min), (0x97, F32_max), (0x98, F32_copysign), (0x99, F64_abs), (0x9a, F64_neg), (0x9b, F64_ceil), (0x9c, F64_floor), (0x9d, F64_trunc), (0x9e, F64_nearest), (0x9f, F64_sqrt), (0xa0, F64_add), (0xa1, F64_sub), (0xa2, F64_mul), (0xa3, F64_div), (0xa4, F64_min), (0xa5, F64_max), (0xa6, F64_copysign)]
   crops = [(0xa7, I32_wrap_i64), (0xa8, I32_trunc_s_f32), (0xa9, I32_trunc_u_f32), (0xaa, I32_trunc_s_f64), (0xab, I32_trunc_u_f64), (0xac, I64_extend_s_i32), (0xad, I64_extend_u_i32), (0xae, I64_trunc_s_f32), (0xaf, I64_trunc_u_f32), (0xb0, I64_trunc_s_f64), (0xb1, I64_trunc_u_f64), (0xb2, F32_convert_s_i32), (0xb3, F32_convert_u_i32), (0xb4, F32_convert_s_i64), (0xb5, F32_convert_u_i64), (0xb6, F32_demote_f64), (0xb7, F64_convert_s_i32), (0xb8, F64_convert_u_i32), (0xb9, F64_convert_s_i64), (0xba, F64_convert_u_i64), (0xbb, F64_promote_f32), (0xbc, I32_reinterpret_f32), (0xbd, I64_reinterpret_f64), (0xbe, F32_reinterpret_i32), (0xbf, F64_reinterpret_i64)]
 
-wasm :: Parser Wasm
+data ByteParser a = ByteParser (ByteString -> Either String (a, ByteString))
+
+instance Functor     ByteParser where fmap = liftM
+instance Applicative ByteParser where {pure  = return; (<*>) = ap}
+instance Monad       ByteParser where
+  ByteParser f >>= g = ByteParser $ \s -> case f s of
+    Left err -> Left err
+    Right (r, t) -> let ByteParser gg = g r in gg t
+  return a = ByteParser $ \s -> Right (a, s)
+
+next :: ByteParser Char
+next = ByteParser f where
+  f s | B8.null s = Left "unexpected EOF"
+      | otherwise = Right (B8.head s, B8.tail s)
+
+repNext :: Int -> ByteParser ByteString
+repNext n = ByteParser f where
+  f s | B8.length s < n = Left "missing bytes or size too large"
+      | otherwise = Right $ B8.splitAt n s
+
+isEof :: ByteParser Bool
+isEof = ByteParser f where f s = Right (B8.null s, s)
+
+bad :: String -> ByteParser a
+bad = ByteParser . const . Left
+
+byteParse :: ByteParser a -> ByteString -> Either String a
+byteParse (ByteParser f) s = case f s of
+  Left err     -> Left err
+  Right (w, t) -> if B8.null t then Right w else Left "expected EOF"
+
+wasm :: ByteParser Wasm
 wasm = do
   let
     rep getInt task = getInt >>= (`replicateM` task)
 
-    varuint = f 1 0 where
-      f :: Int -> Int -> Parser Int
+    varuint = fromIntegral <$> f 1 0 where
+      f :: Integer -> Integer -> ByteParser Integer
       f m acc = do
-        d <- ord <$> anyChar
+        d <- fromIntegral . ord <$> next
         if d > 127 then f (m * 128) $ (d - 128) * m + acc else pure $ d*m + acc
 
     varint = varuint  -- TODO: Negative values.
 
     varuint1 = varuint
-    varuint7 = ord <$> anyChar
+    varuint7 = ord <$> next
     varuint32 = varuint
 
     varint7 = varint
     varint32 = varint
     varint64 = varint
 
-    uint64 :: Parser Word64
+    uint64 :: ByteParser Word64
     uint64 = do
-      cs <- map ord <$> replicateM 8 anyChar
+      cs <- map ord <$> replicateM 8 next
       let
         f _ acc [] = acc
         f m acc (d:ds) = f (m * 256) (acc + fromIntegral d * m) ds
       pure $ f 1 0 cs
 
-    lstr = rep varuint32 anyChar
+    lstr = rep varuint32 next
 
     allType = do
       t <- varuint7
@@ -101,7 +131,7 @@ wasm = do
 
     funcType = do
       form <- varint7
-      when (form /= 0x60) $ fail "expected func type"
+      when (form /= 0x60) $ bad "expected func type"
       paramTypes <- rep varuint32 valueType
       returnTypes <- rep varuint1 valueType
       pure (paramTypes, returnTypes)
@@ -120,8 +150,8 @@ wasm = do
         case k of
           Function -> do
             t <- varuint32
-            when (t > length (types w)) $ fail "type out of range"
-            pure $ Import moduleStr fieldStr (types w !! t)
+            when (t > length (types w)) $ bad "type out of range"
+            pure ((moduleStr, fieldStr), types w !! t)
       pure w { imports = ms }
 
     sectExport w = do
@@ -129,7 +159,7 @@ wasm = do
         fieldStr <- lstr
         k <- externalKind
         t <- varuint32
-        when (t > functionCount w) $ fail "function index out of range"
+        when (t > functionCount w) $ bad "function index out of range"
         case k of
           Function -> pure (fieldStr, t)
       pure w { exports = es }
@@ -141,14 +171,14 @@ wasm = do
 
     sectStart w = do
       i <- varuint32
-      when (i > functionCount w) $ fail "function index out of range"
+      when (i > functionCount w) $ bad "function index out of range"
       pure w { start = Just i }
 
     sectTable _ = undefined
 
     sectMemory w = do
       n <- varuint32
-      when (n > 1) $ fail "MVP allows at most one memory"
+      when (n > 1) $ bad "MVP allows at most one memory"
       if n == 0 then pure w else do
         flags <- varuint1
         initial <- varuint32
@@ -174,10 +204,10 @@ wasm = do
         _ <- varuint32
         locals <- concat <$> rep varuint32 (rep varuint32 valueType)
         ops <- codeBlock
-        pure $ Body locals ops
+        pure (locals, ops)
       pure w { code = bodies}
 
-    codeBlock :: Parser [Op]
+    codeBlock :: ByteParser [Op]
     codeBlock = do
       opcode <- varuint7
       s <- if
@@ -211,15 +241,15 @@ wasm = do
           0x10 -> do
             i <- varuint32
             pure $ Call i
-          _ -> fail ("bad opcode " ++ show opcode)
+          _ -> bad ("bad opcode " ++ show opcode)
       if
         | End <- s -> pure []
         | otherwise -> (s:) <$> codeBlock
 
-    sect w = do
+    sect w = isEof >>= \b -> if b then pure w else do
       n <- varuint7
       m <- varuint32
-      s <- B8.pack <$> replicateM m anyChar  -- Ugh.
+      s <- repNext m
       let
         f = case n of
           1 -> sectType
@@ -232,13 +262,14 @@ wasm = do
           8 -> sectStart
           10 -> sectCode
           _ -> pure
-      either (fail . show) pure $ parse (f w >>= (eof >>) . pure) "" s
+      case byteParse (f w) s of
+        Left err -> bad err
+        Right w1 -> sect w1
 
-    accumSect w | not $ null $ code w = pure w
-    accumSect w = (eof >> pure w) <|> (sect w >>= accumSect)
+  header <- repNext 8  -- Header and version.
+  if header /= "\000asm\001\000\000\000" then
+    bad "bad header or version"
+  else sect emptyWasm  -- Sections.
 
-  void $ string "\000asm\001\000\000\000"  -- Header and version.
-  accumSect emptyWasm  -- Sections.
-
-parseWasm :: B8.ByteString -> Either ParseError Wasm
-parseWasm = parse wasm ""
+parseWasm :: B8.ByteString -> Either String Wasm
+parseWasm = byteParse wasm
