@@ -34,7 +34,7 @@ emptyWasm = Wasm [] [] [] [] [] [] Nothing []
 data Op = I32_eqz | I32_eq | I32_ne | I32_lt_s | I32_lt_u | I32_gt_s | I32_gt_u | I32_le_s | I32_le_u | I32_ge_s | I32_ge_u | I64_eqz | I64_eq | I64_ne | I64_lt_s | I64_lt_u | I64_gt_s | I64_gt_u | I64_le_s | I64_le_u | I64_ge_s | I64_ge_u | F32_eq | F32_ne | F32_lt | F32_gt | F32_le | F32_ge | F64_eq | F64_ne | F64_lt | F64_gt | F64_le | F64_ge | I32_clz | I32_ctz | I32_popcnt | I32_add | I32_sub | I32_mul | I32_div_s | I32_div_u | I32_rem_s | I32_rem_u | I32_and | I32_or | I32_xor | I32_shl | I32_shr_s | I32_shr_u | I32_rotl | I32_rotr | I64_clz | I64_ctz | I64_popcnt | I64_add | I64_sub | I64_mul | I64_div_s | I64_div_u | I64_rem_s | I64_rem_u | I64_and | I64_or | I64_xor | I64_shl | I64_shr_s | I64_shr_u | I64_rotl | I64_rotr | F32_abs | F32_neg | F32_ceil | F32_floor | F32_trunc | F32_nearest | F32_sqrt | F32_add | F32_sub | F32_mul | F32_div | F32_min | F32_max | F32_copysign | F64_abs | F64_neg | F64_ceil | F64_floor | F64_trunc | F64_nearest | F64_sqrt | F64_add | F64_sub | F64_mul | F64_div | F64_min | F64_max | F64_copysign | I32_wrap_i64 | I32_trunc_s_f32 | I32_trunc_u_f32 | I32_trunc_s_f64 | I32_trunc_u_f64 | I64_extend_s_i32 | I64_extend_u_i32 | I64_trunc_s_f32 | I64_trunc_u_f32 | I64_trunc_s_f64 | I64_trunc_u_f64 | F32_convert_s_i32 | F32_convert_u_i32 | F32_convert_s_i64 | F32_convert_u_i64 | F32_demote_f64 | F64_convert_s_i32 | F64_convert_u_i32 | F64_convert_s_i64 | F64_convert_u_i64 | F64_promote_f32 | I32_reinterpret_f32 | I64_reinterpret_f64 | F32_reinterpret_i32 | F64_reinterpret_i64
   | I32_load Int Int | I64_load Int Int | F32_load Int Int | F64_load Int Int | I32_load8_s Int Int | I32_load8_u Int Int | I32_load16_s Int Int | I32_load16_u Int Int | I64_load8_s Int Int | I64_load8_u Int Int | I64_load16_s Int Int | I64_load16_u Int Int | I64_load32_s Int Int | I64_load32_u Int Int | I32_store Int Int | I64_store Int Int | F32_store Int Int | F64_store Int Int | I32_store8 Int Int | I32_store16 Int Int | I64_store8 Int Int | I64_store16 Int Int | I64_store32 Int Int
   | Unreachable | Nop | Else | End | Return
-  | Block Type | Loop Type | If Type
+  | Block Type [Op] | Loop Type [Op] | If Type [Op]
   | Get_local Int | Set_local Int | Tee_local Int | Get_global Int | Set_global Int
   | I32_const Int32 | I64_const Int64 | F32_const Float | F64_const Double
   | Br_table [Int] Int
@@ -169,7 +169,7 @@ wasm = do
     sectGlobal w = do
       gs <- rep varuint32 $ do
         gt <- globalType
-        x <- codeBlock 0
+        x <- codeBlock
         pure (gt, x)
       pure w { globals = gs }
 
@@ -177,18 +177,19 @@ wasm = do
       bodies <- rep varuint32 $ do
         _ <- varuint32
         locals <- concat <$> rep varuint32 (rep varuint32 valueType)
-        ops <- codeBlock 0
+        ops <- codeBlock
         pure $ Body locals ops
       pure w { code = bodies}
 
-    codeBlock :: Int -> Parser [Op]
-    codeBlock lvl = do
+    codeBlock :: Parser [Op]
+    codeBlock = do
       opcode <- varuint7
       s <- if
         | Just s <- lookup opcode $ zeroOperandOps ++ [(0x00, Unreachable), (0x01, Nop), (0x05, Else), (0x0b, End), (0x0f, Return)] -> pure s
         | Just s <- lookup opcode [(0x02, Block), (0x03, Loop), (0x04, If)] -> do
           bt <- blockType
-          pure $ s bt
+          bl <- codeBlock
+          pure $ s bt bl
         | Just s <- lookup opcode [(0x20, Get_local), (0x21, Set_local), (0x22, Tee_local), (0x23, Get_global), (0x24, Set_global)] -> do
           v <- varuint32
           pure $ s v
@@ -219,16 +220,8 @@ wasm = do
             pure $ Call i
           _ -> fail ("bad opcode " ++ show opcode)
       if
-        | End <- s -> if lvl == 0
-          then pure [s]
-          else (s:) <$> codeBlock (lvl - 1)
-        | blockBegin s -> (s:) <$> codeBlock (lvl + 1)
-        | otherwise -> (s:) <$> codeBlock lvl
-        where
-          blockBegin (If _) = True
-          blockBegin (Block _) = True
-          blockBegin (Loop _) = True
-          blockBegin _ = False
+        | End <- s -> pure []
+        | otherwise -> (s:) <$> codeBlock
 
     sect w = do
       n <- varuint7
@@ -270,19 +263,20 @@ data VM = VM
 
 putNum :: Integral a => Int -> Int32 -> a -> IntMap Word8 -> IntMap Word8
 putNum w addr n m = foldl' f m [0..w-1] where
-  f m k = IM.insert (fromIntegral addr + k) (getByte (w-1 - k)) m
+  f m k = IM.insert (fromIntegral addr + k) (getByte k) m
   getByte k = fromIntegral $ fromIntegral n `div` (256^k) `mod` 256
 
 getNum :: Int -> Int32 -> IntMap Word8 -> Integer
 getNum w addr m = sum
-  [fromIntegral (m IM.! (fromIntegral addr + k)) * 2^(w-1 - k) | k <- [0..w-1]]
+  [fromIntegral (m IM.! (fromIntegral addr + k)) * 256^k | k <- [0..w-1]]
 
 execute w@Wasm {imports, exports, code, globals} s = do
   let
     Just i = lookup s exports
     imCount = length imports
+    run vm | null $ insts vm = putStrLn $ "DONE: " ++ show vm
     run vm@VM{globs, stack, insts, mem} = case head insts of
-      (Call i:rest) -> if i < imCount then print "TODO: call imported function"
+      (Call i:rest) -> if i < imCount then putStrLn "TODO: call imported function"
         else do
           let Body _ os = code!!(i - imCount)
           run vm { insts = os:rest:tail insts }
@@ -315,9 +309,25 @@ execute w@Wasm {imports, exports, code, globals} s = do
           I32_const addr = stack!!1
           I64_const n = head stack
         run vm {stack = drop 2 stack, insts = rest:tail insts, mem = putNum 8 addr n mem}
-      _ -> error $ show vm
+      (I64_load _ _:rest) -> do
+        let
+          I32_const addr = head stack
+          c = I64_const $ fromIntegral $ getNum 8 addr mem
+        run vm {stack = c:tail stack, insts = rest:tail insts}
+      (Block _ bl:rest) -> run vm {insts = bl:rest:tail insts}
+      loop@(Loop _ bl:rest) -> run vm {insts = bl:loop:tail insts}
+      (Br k:_) -> run vm {insts = drop (k + 1) insts}
+      (Br_table as d:_) -> do
+        let
+          n = fromIntegral n' where I32_const n' = head stack
+          k = if n < 0 || n >= length as then d else as!!n
+        run vm {stack = tail stack, insts = drop (k + 1) insts}
+      [] -> case tail insts of
+        ((Loop _ _:rest):t) -> run vm {insts = rest:t}
+        _ -> run vm {insts = tail insts }
+      _ -> error $ show insts
   if i < imCount then
-    print "TODO: call imported function"
+    putStrLn "TODO: call imported function"
   else do
     let Body _ os = code!!(i - imCount)
     run $ VM (IM.fromList $ zip [0..] $ head . snd <$> globals) [] [os] IM.empty
