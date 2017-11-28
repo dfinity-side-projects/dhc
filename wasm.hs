@@ -16,7 +16,7 @@ import Text.Parsec
 
 data Type = I32 | I64 | F32 | F64 | Func | AnyFunc | Nada deriving (Show, Eq)
 data ExternalKind = Function | Table | Memory | Global
-data FuncType = FuncType [Type] [Type] deriving Show
+type FuncType = ([Type], [Type])
 data Import = Import String String FuncType deriving Show
 data Body = Body [Type] [Op] deriving Show
 data Wasm = Wasm {
@@ -109,7 +109,7 @@ wasm = do
       when (form /= 0x60) $ fail "expected func type"
       paramTypes <- rep varuint32 valueType
       returnTypes <- rep varuint1 valueType
-      pure $ FuncType paramTypes returnTypes
+      pure (paramTypes, returnTypes)
 
     functionCount w = length (imports w) + length (decls w)
 
@@ -149,7 +149,7 @@ wasm = do
       when (i > functionCount w) $ fail "function index out of range"
       pure w { start = Just i }
 
-    sectTable w = undefined
+    sectTable _ = undefined
 
     sectMemory w = do
       n <- varuint32
@@ -213,9 +213,6 @@ wasm = do
           0x42 -> do
             i64 <- varint64
             pure $ I64_const $ fromIntegral i64
-          0x44 -> do
-            u64 <- uint64
-            pure $ F64_const 0  -- TODO: Convert from u64.
           0x10 -> do
             i <- varuint32
             pure $ Call i
@@ -255,7 +252,7 @@ main = do
     Left err -> putStrLn $ "parse error: " ++ show err
     Right out -> execute [fun0] out "e"
   where
-    fun0 (I32_const x:I32_const y:rest) = putStrLn (show (y, x)) >> pure rest
+    fun0 [I32_const x, I32_const y] = putStrLn $ show (y, x)
 
 data VM = VM
   { globs :: IntMap Op
@@ -267,107 +264,88 @@ data VM = VM
 putNum :: Integral a => Int -> Int32 -> a -> IntMap Word8 -> IntMap Word8
 putNum w addr n mem = foldl' f mem [0..w-1] where
   f m k = IM.insert (fromIntegral addr + k) (getByte k) m
-  getByte k = fromIntegral $ fromIntegral n `div` (256^k) `mod` 256
+  getByte k = fromIntegral $ n `div` (256^k) `mod` 256
 
 getNum :: Int -> Int32 -> IntMap Word8 -> Integer
 getNum w addr m = sum
   [fromIntegral (m IM.! (fromIntegral addr + k)) * 256^k | k <- [0..w-1]]
 
-execute fns Wasm {exports, code, globals} s = do
-  let
-    imCount = length fns
-    run vm | null $ insts vm = pure ()
-    run vm@VM{globs, stack, insts, mem} = case head insts of
-      (Call i:rest) -> if i < imCount then do
-          stack' <- fns!!i $ stack
-          run vm { stack = stack', insts = rest:tail insts }
-        else do
-          let Body _ os = code!!(i - imCount)
-          run vm { insts = os:rest:tail insts }
-      (Set_global i:rest) -> run vm {globs = IM.insert i (head stack) globs, stack = tail stack, insts = rest:tail insts}
-      (Get_global i:rest) -> run vm {stack = globs IM.! i:stack, insts = rest:tail insts}
-      (c@(I32_const _):rest) -> run vm {stack = c:stack, insts = rest:tail insts}
-      (c@(I64_const _):rest) -> run vm {stack = c:stack, insts = rest:tail insts}
-      (I32_add:rest) -> let
-        I32_const a = stack!!1
-        I32_const b = head stack
-        c = I32_const $ a + b
-        in run vm {stack = c:drop 2 stack, insts = rest:tail insts}
-      (I32_sub:rest) -> let
-        I32_const a = stack!!1
-        I32_const b = head stack
-        c = I32_const $ a - b
-        in run vm {stack = c:drop 2 stack, insts = rest:tail insts}
-      (I64_gt_s:rest) -> let
-        I64_const a = stack!!1
-        I64_const b = head stack
-        c = I32_const $ fromIntegral $ fromEnum $ a > b
-        in run vm {stack = c:drop 2 stack, insts = rest:tail insts}
-      (I64_eq:rest) -> let
-        I64_const a = stack!!1
-        I64_const b = head stack
-        c = I32_const $ fromIntegral $ fromEnum $ a == b
-        in run vm {stack = c:drop 2 stack, insts = rest:tail insts}
-      (I64_add:rest) -> let
-        I64_const a = stack!!1
-        I64_const b = head stack
-        c = I64_const $ a + b
-        in run vm {stack = c:drop 2 stack, insts = rest:tail insts}
-      (I64_sub:rest) -> let
-        I64_const a = stack!!1
-        I64_const b = head stack
-        c = I64_const $ a - b
-        in run vm {stack = c:drop 2 stack, insts = rest:tail insts}
-      (I64_mul:rest) -> let
-        I64_const a = stack!!1
-        I64_const b = head stack
-        c = I64_const $ a * b
-        in run vm {stack = c:drop 2 stack, insts = rest:tail insts}
-      (I64_shr_u:rest) -> let
-        I64_const a = stack!!1
-        I64_const b = head stack
-        w = fromIntegral a :: Word64
-        c = I64_const $ fromIntegral $ shiftR w (fromIntegral b)
-        in run vm {stack = c:drop 2 stack, insts = rest:tail insts}
-      (I32_wrap_i64:rest) -> let
-        I64_const a = head stack
-        c = I32_const $ fromIntegral a
-        in run vm {stack = c:tail stack, insts = rest:tail insts}
-      (I32_load _ _:rest) -> do
+execute :: Monad m => [[Op] -> m ()] -> Wasm -> [Char] -> m ()
+execute fns Wasm {imports, exports, code, globals} s = let
+  fCount = length fns
+  run VM {insts} | null insts = pure ()
+  run vm@VM {insts} | null $ head insts = case tail insts of
+    ((Loop _ _:rest):t) -> run vm {insts = rest:t}
+    _                   -> run vm {insts = tail insts}
+  run vm@VM{globs, stack, insts, mem} = case head $ head insts of
+    Call i -> if i < fCount then do
         let
-          I32_const addr = head stack
-          c = I32_const $ fromIntegral $ getNum 4 addr mem
-        run vm {stack = c:tail stack, insts = rest:tail insts}
-      (I32_store _ _:rest) -> do
-        let
-          I32_const addr = stack!!1
-          I32_const n = head stack
-        run vm {stack = drop 2 stack, insts = rest:tail insts, mem = putNum 4 addr n mem}
-      (I64_store _ _:rest) -> do
-        let
-          I32_const addr = stack!!1
-          I64_const n = head stack
-        run vm {stack = drop 2 stack, insts = rest:tail insts, mem = putNum 8 addr n mem}
-      (I64_load _ _:rest) -> do
-        let
-          I32_const addr = head stack
-          c = I64_const $ fromIntegral $ getNum 8 addr mem
-        run vm {stack = c:tail stack, insts = rest:tail insts}
-      (Block _ bl:rest) -> run vm {insts = bl:rest:tail insts}
-      loop@(Loop _ bl:_) -> run vm {insts = bl:loop:tail insts}
-      (Br k:_) -> run vm {insts = drop (k + 1) insts}
-      (Br_table as d:_) -> do
-        let
-          n = fromIntegral n' where I32_const n' = head stack
-          k = if n < 0 || n >= length as then d else as!!n
-        run vm {stack = tail stack, insts = drop (k + 1) insts}
-      [] -> case tail insts of
-        ((Loop _ _:rest):t) -> run vm {insts = rest:t}
-        _ -> run vm {insts = tail insts }
-      _ -> error $ show $ take 1 $ head insts
-  let Just i = lookup s exports
-  if i < imCount then
-    void $ fns!!i $ []
-  else do
-    let Body _ os = code!!(i - imCount)
+          Import _ _ (params, _) = imports!!i
+          k = length params
+        fns!!i $ take k stack
+        run vm { stack = drop k stack, insts = i1 }
+      else do
+        let Body _ os = code!!(i - fCount)
+        run vm { insts = os:i1 }
+    Set_global i -> run vm {globs = IM.insert i (head stack) globs, stack = tail stack, insts = i1}
+    Get_global i -> run vm {stack = globs IM.! i:stack, insts = i1}
+    c@(I32_const _) -> run vm {stack = c:stack, insts = i1}
+    c@(I64_const _) -> run vm {stack = c:stack, insts = i1}
+    I32_add -> binOp32 (+)
+    I32_sub -> binOp32 (-)
+    I32_mul -> binOp32 (*)
+    I64_gt_s -> let
+      (I64_const b:I64_const a:_) = stack
+      c = I32_const $ fromIntegral $ fromEnum $ a > b
+      in run vm {stack = c:drop 2 stack, insts = i1}
+    I64_eq -> let
+      (I64_const b:I64_const a:_) = stack
+      c = I32_const $ fromIntegral $ fromEnum $ a == b
+      in run vm {stack = c:drop 2 stack, insts = i1}
+    I64_add -> binOp64 (+)
+    I64_sub -> binOp64 (-)
+    I64_mul -> binOp64 (*)
+    I64_shr_u -> binOp64 $ \a b -> fromIntegral $
+      shiftR (fromIntegral a :: Word64) (fromIntegral b)
+    I32_wrap_i64 -> let
+      I64_const a = head stack
+      c = I32_const $ fromIntegral a
+      in run vm {stack = c:tail stack, insts = i1}
+    I32_load _ _ -> do
+      let
+        I32_const addr = head stack
+        c = I32_const $ fromIntegral $ getNum 4 addr mem
+      run vm {stack = c:tail stack, insts = i1}
+    I32_store _ _ -> let (I32_const n:I32_const addr:_) = stack in
+      run vm {stack = drop 2 stack, insts = i1, mem = putNum 4 addr n mem}
+    I64_store _ _ -> do
+      let
+        I32_const addr = stack!!1
+        I64_const n = head stack
+      run vm {stack = drop 2 stack, insts = i1, mem = putNum 8 addr n mem}
+    I64_load _ _ -> do
+      let
+        I32_const addr = head stack
+        c = I64_const $ fromIntegral $ getNum 8 addr mem
+      run vm {stack = c:tail stack, insts = i1}
+    Block _ bl -> run vm {insts = bl:i1}
+    Loop _ bl -> run vm {insts = bl:insts}
+    Br k -> run vm {insts = drop (k + 1) insts}
+    Br_table as d -> do
+      let
+        n = fromIntegral n' where I32_const n' = head stack
+        k = if n < 0 || n >= length as then d else as!!n
+      run vm {stack = tail stack, insts = drop (k + 1) insts}
+    _ -> error $ "TODO: " ++ show (head $ head insts)
+    where
+      i1 = tail (head insts):tail insts
+      binOp32 f = run vm {stack = c:drop 2 stack, insts = i1} where
+        (I32_const b:I32_const a:_) = stack
+        c = I32_const $ f a b
+      binOp64 f = run vm {stack = c:drop 2 stack, insts = i1} where
+        (I64_const b:I64_const a:_) = stack
+        c = I64_const $ f a b
+  Just fI = lookup s exports
+  in if fI < fCount then void $ fns!!fI $ [] else do
+    let Body _ os = code!!(fI - fCount)
     run $ VM (IM.fromList $ zip [0..] $ head . snd <$> globals) [] [os] IM.empty
