@@ -2,6 +2,7 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 import Control.Monad
+import Data.Bits
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
 import Data.Char
@@ -252,7 +253,9 @@ main = do
   s <- B.getContents
   case parse wasm "" s of
     Left err -> putStrLn $ "parse error: " ++ show err
-    Right out -> execute out "e"
+    Right out -> execute [fun0] out "e"
+  where
+    fun0 (I32_const x:I32_const y:rest) = putStrLn (show (y, x)) >> pure rest
 
 data VM = VM
   { globs :: IntMap Op
@@ -262,7 +265,7 @@ data VM = VM
   } deriving Show
 
 putNum :: Integral a => Int -> Int32 -> a -> IntMap Word8 -> IntMap Word8
-putNum w addr n m = foldl' f m [0..w-1] where
+putNum w addr n mem = foldl' f mem [0..w-1] where
   f m k = IM.insert (fromIntegral addr + k) (getByte k) m
   getByte k = fromIntegral $ fromIntegral n `div` (256^k) `mod` 256
 
@@ -270,13 +273,14 @@ getNum :: Int -> Int32 -> IntMap Word8 -> Integer
 getNum w addr m = sum
   [fromIntegral (m IM.! (fromIntegral addr + k)) * 256^k | k <- [0..w-1]]
 
-execute w@Wasm {imports, exports, code, globals} s = do
+execute fns Wasm {exports, code, globals} s = do
   let
-    Just i = lookup s exports
-    imCount = length imports
-    run vm | null $ insts vm = putStrLn $ "DONE: " ++ show vm
+    imCount = length fns
+    run vm | null $ insts vm = pure ()
     run vm@VM{globs, stack, insts, mem} = case head insts of
-      (Call i:rest) -> if i < imCount then putStrLn "TODO: call imported function"
+      (Call i:rest) -> if i < imCount then do
+          stack' <- fns!!i $ stack
+          run vm { stack = stack', insts = rest:tail insts }
         else do
           let Body _ os = code!!(i - imCount)
           run vm { insts = os:rest:tail insts }
@@ -294,6 +298,41 @@ execute w@Wasm {imports, exports, code, globals} s = do
         I32_const b = head stack
         c = I32_const $ a - b
         in run vm {stack = c:drop 2 stack, insts = rest:tail insts}
+      (I64_gt_s:rest) -> let
+        I64_const a = stack!!1
+        I64_const b = head stack
+        c = I32_const $ fromIntegral $ fromEnum $ a > b
+        in run vm {stack = c:drop 2 stack, insts = rest:tail insts}
+      (I64_eq:rest) -> let
+        I64_const a = stack!!1
+        I64_const b = head stack
+        c = I32_const $ fromIntegral $ fromEnum $ a == b
+        in run vm {stack = c:drop 2 stack, insts = rest:tail insts}
+      (I64_add:rest) -> let
+        I64_const a = stack!!1
+        I64_const b = head stack
+        c = I64_const $ a + b
+        in run vm {stack = c:drop 2 stack, insts = rest:tail insts}
+      (I64_sub:rest) -> let
+        I64_const a = stack!!1
+        I64_const b = head stack
+        c = I64_const $ a - b
+        in run vm {stack = c:drop 2 stack, insts = rest:tail insts}
+      (I64_mul:rest) -> let
+        I64_const a = stack!!1
+        I64_const b = head stack
+        c = I64_const $ a * b
+        in run vm {stack = c:drop 2 stack, insts = rest:tail insts}
+      (I64_shr_u:rest) -> let
+        I64_const a = stack!!1
+        I64_const b = head stack
+        w = fromIntegral a :: Word64
+        c = I64_const $ fromIntegral $ shiftR w (fromIntegral b)
+        in run vm {stack = c:drop 2 stack, insts = rest:tail insts}
+      (I32_wrap_i64:rest) -> let
+        I64_const a = head stack
+        c = I32_const $ fromIntegral a
+        in run vm {stack = c:tail stack, insts = rest:tail insts}
       (I32_load _ _:rest) -> do
         let
           I32_const addr = head stack
@@ -315,7 +354,7 @@ execute w@Wasm {imports, exports, code, globals} s = do
           c = I64_const $ fromIntegral $ getNum 8 addr mem
         run vm {stack = c:tail stack, insts = rest:tail insts}
       (Block _ bl:rest) -> run vm {insts = bl:rest:tail insts}
-      loop@(Loop _ bl:rest) -> run vm {insts = bl:loop:tail insts}
+      loop@(Loop _ bl:_) -> run vm {insts = bl:loop:tail insts}
       (Br k:_) -> run vm {insts = drop (k + 1) insts}
       (Br_table as d:_) -> do
         let
@@ -325,9 +364,10 @@ execute w@Wasm {imports, exports, code, globals} s = do
       [] -> case tail insts of
         ((Loop _ _:rest):t) -> run vm {insts = rest:t}
         _ -> run vm {insts = tail insts }
-      _ -> error $ show insts
+      _ -> error $ show $ take 1 $ head insts
+  let Just i = lookup s exports
   if i < imCount then
-    putStrLn "TODO: call imported function"
+    void $ fns!!i $ []
   else do
     let Body _ os = code!!(i - imCount)
     run $ VM (IM.fromList $ zip [0..] $ head . snd <$> globals) [] [os] IM.empty
