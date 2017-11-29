@@ -8,7 +8,7 @@ import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IM
 import Data.Word
 
-import Network.DFINITY.Parser
+import Network.DFINITY.Parse
 
 main :: IO ()
 main = do

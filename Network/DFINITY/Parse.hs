@@ -1,4 +1,4 @@
-module Network.DFINITY.Parser (parseWasm, Op(..), Wasm(..)) where
+module Network.DFINITY.Parse (parseWasm, Op(..), Wasm(..)) where
 
 import Control.Monad
 import qualified Data.ByteString.Char8 as B8
@@ -8,10 +8,15 @@ import Data.Int
 import Data.Word
 
 data Type = I32 | I64 | F32 | F64 | Func | AnyFunc | Nada deriving (Show, Eq)
+
 data ExternalKind = Function | Table | Memory | Global
+
 type FuncType = ([Type], [Type])
+
 type Body = ([Type], [Op])
+
 type Import = ((String, String), FuncType)
+
 data Wasm = Wasm {
   types :: [FuncType],
   imports :: [Import],

@@ -24,7 +24,7 @@ library
   default-language:
     Haskell2010
   exposed-modules:
-    Network.DFINITY.Parser
+    Network.DFINITY.Parse
   ghc-options:
     -O2
     -Wall
@@ -47,4 +47,4 @@ executable hero
   main-is:
     Main.hs
   other-modules:
-    Network.DFINITY.Parser
+    Network.DFINITY.Parse
