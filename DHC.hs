@@ -22,6 +22,7 @@ infixl 5 :@
 data Ast = RealWorld | Qual String String | Call String String
   | Pack Int Int | I Int64 | S ByteString | Var String
   | Ast :@ Ast | Lam String Ast | Cas Ast [(Ast, Ast)]
+  | Super [String] Ast
   | Placeholder String Type deriving (Read, Show, Generic)
 
 infixr 5 :->
@@ -37,6 +38,7 @@ instance NFData Ast where
   rnf (S s) = rnf s `seq` ()
   rnf (Var s) = rnf s `seq` ()
   rnf (a1 :@ a2) = rnf a1 `seq` rnf a2 `seq` ()
+  rnf (Super ss a) = rnf ss `seq` rnf a `seq` ()
   rnf (Lam s a) = rnf s `seq` rnf a `seq` ()
   rnf (Cas a as) = rnf a `seq` rnf as `seq` ()
   rnf (Placeholder s t) = rnf s `seq` rnf t `seq` ()
@@ -60,8 +62,7 @@ supercombinators = sc `sepBy` want ";" where
   sc = do
     (fun:args) <- many1 varStr
     void $ want "="
-    rhs <- expr
-    pure (fun, foldr (\s a -> Lam s a) rhs args)
+    (,) fun . Super args <$> expr
   expr = caseExpr <|>
     molecule `chainr1` chop "." `chainr1` chop "^"
       `chainl1` chop "*/" `chainl1` chop "+-"
@@ -109,7 +110,7 @@ supercombinators = sc `sepBy` want ";" where
     pure $ foldr (\a b -> Var ":" :@ a :@ b) (Var "[]") items
   varStr = try $ do
     s@(h:_) <- tok
-    when (not (isLetter h) || s `elem` words "case of _ call") $ fail ""
+    when (not (isLetter h) || s `elem` words "case of let where do in _ call") $ fail ""
     pure s
   var = Var <$> varStr
   qvar = try $ do
@@ -150,7 +151,7 @@ opTok = do
 tok :: Parser String
 tok = opTok <|> do
   s <- many1 (alphaNum <|> char '_') <|>
-       foldl1' (<|>) (string . pure <$> ";()[],")
+       foldl1' (<|>) (string . pure <$> ";()[]{},")
   filler
   pure s
 
@@ -219,6 +220,10 @@ gather findExport prelude env ast = case ast of
   Call c f -> case findExport c f of
     Left err -> bad err
     Right t -> (,) ast . (TC "String" :->) <$> instantiate t
+  Super args u -> do
+    ts <- mapM (const newTV) args
+    (a, tu) <- rec ((zip args ts) ++ env) u
+    pure (Super args a, foldr (:->) tu ts)
   Lam s u -> do
     t <- newTV
     (a, tu) <- rec ((s, t):env) u
@@ -300,6 +305,7 @@ typeClass x t m
 fillPlaceholders :: [(String, Type)] -> Ast -> Ast
 fillPlaceholders soln ast = case ast of
   u :@ v  -> rec u :@ rec v
+  Super ss a -> Super ss $ rec a
   Lam s a -> Lam s $ rec a
   Cas e alts -> Cas (rec e) $ (id *** rec) <$> alts
   Placeholder "==" t -> case typeSolve soln t of
@@ -372,7 +378,8 @@ inferType acc ds = do
 callees :: [(String, Ast)] -> String -> [String]
 callees ds f = deps f (fromJust $ lookup f ds) where
   deps name body = case body of
-    Lam s t | s /= name -> rec t
+    Super ss t | name `notElem` ss -> rec t
+    Lam s t | name /= s -> rec t
     -- TODO: Look for shadowed function name in case statement.
     Cas x as          -> rec x ++ concatMap rec (snd <$> as)
     x :@ y            -> rec x ++ rec y
@@ -394,4 +401,3 @@ topo suc vs = fst $ foldl' visit ([], []) vs where
     | v `elem` done || v `elem` doing = (done, doing)
     | otherwise = (\(xs, x:ys) -> (x:xs, ys)) $
       foldl' visit (done, v:doing) (suc v)
-

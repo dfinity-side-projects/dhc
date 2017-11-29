@@ -508,9 +508,9 @@ mk1 funs ast = case ast of
     pure $ case last mt of
       Copro _ _ -> mu ++ mt
       _ -> concat [mu, mt, [MkAp]]
-  Lam a b -> do
-    modify' $ \bs -> (a, length bs):bs
-    (++ [Slide 1]) <$> rec b
+  Super as b -> do
+    modify' $ \bs -> zip as [length bs..] ++ bs
+    (++ [Slide $ length as]) <$> rec b
   Var v -> do
     m <- get
     pure $ case lookup v m of
@@ -538,7 +538,7 @@ mk1 funs ast = case ast of
       put orig
       pure (f, b)
     pure $ me ++ [Eval, Casejump xs]
-  _ -> undefined
+  _ -> error $ "TODO: compile: " ++ show ast
   where
     rec = mk1 funs
     bump n = modify' $ map $ second (+n)
