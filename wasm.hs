@@ -6,7 +6,6 @@ import qualified Data.ByteString as B
 import Data.Int
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IM
-import Data.List
 import Data.Word
 
 import Parse
@@ -16,28 +15,36 @@ main = do
   s <- B.getContents
   case parseWasm s of
     Left err -> putStrLn $ "parse error: " ++ show err
-    Right out -> execute [fun0] out "e"
+    Right out -> execute [fun0] emptyMem putMem getMem out "e"
   where
     fun0 [I32_const x, I32_const y] = putStrLn $ show (y, x)
+    emptyMem = IM.empty
+    putMem = \a k v -> pure $ IM.insert k v a
+    getMem = \a k -> pure $ a IM.! k
 
-data VM = VM
+data VM a = VM
   { globs :: IntMap Op
   , stack :: [Op]
   , insts :: [[Op]]
-  , mem :: IntMap Word8
+  , mem   :: a
   } deriving Show
 
-putNum :: Integral a => Int -> Int32 -> a -> IntMap Word8 -> IntMap Word8
-putNum w addr n mem = foldl' f mem [0..w-1] where
-  f m k = IM.insert (fromIntegral addr + k) (getByte k) m
+getNum :: (Integral n, Monad m) =>
+  (a -> Int -> m Word8) -> Int -> Int32 -> a -> m n
+getNum get w addr mem = do
+  bs <- mapM (get mem) ((fromIntegral addr +) <$> [0..w-1])
+  pure $ sum $ zipWith (*) (fromIntegral <$> bs) ((256^) <$> [0..])
+
+putNum :: (Integral n, Monad m) =>
+  (a -> Int -> Word8 -> m a) -> Int -> Int32 -> n -> a -> m a
+putNum put w addr n mem = foldM f mem [0..w-1] where
+  f m k = put m (fromIntegral addr + k) $ getByte k
   getByte k = fromIntegral $ n `div` (256^k) `mod` 256
 
-getNum :: Int -> Int32 -> IntMap Word8 -> Integer
-getNum w addr m = sum
-  [fromIntegral (m IM.! (fromIntegral addr + k)) * 256^k | k <- [0..w-1]]
-
-execute :: Monad m => [[Op] -> m ()] -> Wasm -> [Char] -> m ()
-execute fns Wasm {imports, exports, code, globals} s = let
+execute :: Monad m =>
+  [[Op] -> m ()] -> a -> (a -> Int -> Word8 -> m a) -> (a -> Int -> m Word8)
+  -> Wasm -> [Char] -> m ()
+execute fns initMem put get Wasm {imports, exports, code, globals} s = let
   fCount = length fns
   run VM {insts} | null insts = pure ()
   run vm@VM {insts} | null $ head insts = case tail insts of
@@ -75,21 +82,21 @@ execute fns Wasm {imports, exports, code, globals} s = let
       c = I32_const $ fromIntegral a
       in run vm {stack = c:tail stack, insts = i1}
     I32_load _ _ -> do
-      let
-        I32_const addr = head stack
-        c = I32_const $ fromIntegral $ getNum 4 addr mem
+      let I32_const addr = head stack
+      c <- I32_const <$> getNum get 4 addr mem
       run vm {stack = c:tail stack, insts = i1}
-    I32_store _ _ -> let (I32_const n:I32_const addr:_) = stack in
-      run vm {stack = drop 2 stack, insts = i1, mem = putNum 4 addr n mem}
+    I32_store _ _ -> let (I32_const n:I32_const addr:_) = stack in do
+      mem' <- putNum put 4 addr n mem
+      run vm {stack = drop 2 stack, insts = i1, mem = mem'}
     I64_store _ _ -> do
       let
         I32_const addr = stack!!1
         I64_const n = head stack
-      run vm {stack = drop 2 stack, insts = i1, mem = putNum 8 addr n mem}
+      mem' <- putNum put 8 addr n mem
+      run vm {stack = drop 2 stack, insts = i1, mem = mem'}
     I64_load _ _ -> do
-      let
-        I32_const addr = head stack
-        c = I64_const $ fromIntegral $ getNum 8 addr mem
+      let I32_const addr = head stack
+      c <- I64_const <$> getNum get 8 addr mem
       run vm {stack = c:tail stack, insts = i1}
     Block _ bl -> run vm {insts = bl:i1}
     Loop _ bl -> run vm {insts = bl:insts}
@@ -111,4 +118,4 @@ execute fns Wasm {imports, exports, code, globals} s = let
   Just fI = lookup s exports
   in if fI < fCount then void $ fns!!fI $ [] else do
     run $ VM (IM.fromList $ zip [0..] $ head . snd <$> globals)
-      [] [snd $ code!!(fI - fCount)] IM.empty
+      [] [snd $ code!!(fI - fCount)] initMem
