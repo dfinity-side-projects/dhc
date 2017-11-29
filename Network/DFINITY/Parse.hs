@@ -1,3 +1,6 @@
+{-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE OverloadedStrings #-}
+
 module Network.DFINITY.Parse (parseWasm, Op(..), Wasm(..)) where
 
 import Control.Monad

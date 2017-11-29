@@ -18,9 +18,6 @@ library
     base,
     bytestring,
     parsec
-  default-extensions:
-    MultiWayIf
-    OverloadedStrings
   default-language:
     Haskell2010
   exposed-modules:
@@ -35,10 +32,6 @@ executable hero
     bytestring,
     containers,
     parsec
-  default-extensions:
-    MultiWayIf
-    NamedFieldPuns
-    OverloadedStrings
   default-language:
     Haskell2010
   ghc-options:
