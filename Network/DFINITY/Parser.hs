@@ -1,6 +1,5 @@
-{-# LANGUAGE MultiWayIf #-}
-{-# LANGUAGE OverloadedStrings #-}
-module Parse where
+module Network.DFINITY.Parser where
+
 import Control.Monad
 import qualified Data.ByteString.Char8 as B8
 import Data.Char

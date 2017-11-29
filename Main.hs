@@ -1,5 +1,5 @@
-{-# LANGUAGE MultiWayIf #-}
-{-# LANGUAGE NamedFieldPuns #-}
+module Main where
+
 import Control.Monad
 import Data.Bits
 import qualified Data.ByteString as B
@@ -9,7 +9,7 @@ import qualified Data.IntMap.Strict as IM
 import Data.List
 import Data.Word
 
-import Parse
+import Network.DFINITY.Parser
 
 main :: IO ()
 main = do

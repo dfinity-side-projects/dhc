@@ -1,0 +1,5 @@
+build:
+  copy-bins: true
+packages:
+- .
+resolver: nightly-2017-10-31
