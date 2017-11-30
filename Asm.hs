@@ -34,6 +34,8 @@ data WasmOp = GetGlobal Int | SetGlobal Int
 nPages :: Int
 nPages = 8
 
+data Tag = TagAp | TagInd | TagGlobal | TagInt | TagSum deriving Enum
+
 encWasmOp :: WasmOp -> [Int]
 encWasmOp op = case op of
   GetGlobal n -> 0x23 : leb128 n
@@ -123,7 +125,7 @@ wasm prog = do
       , Block
       , GetGlobal bp
       , I32Load
-      , BrTable [2, 2, 2, 0, 1, 2]
+      , BrTable [2, 2, 2, 0, 1, 2]  -- Branch on Tag.
       , End  -- Int.
       , GetGlobal bp  -- High bits.
       , I32Const 8
@@ -158,7 +160,7 @@ wasm prog = do
   encSig ins outs = 0x60 : lenc (encType <$> ins) ++ lenc (encType <$> outs)
   intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
     [ GetGlobal hp  -- [hp] = Int
-    , I32Const wInt
+    , I32Const $ fromEnum TagInt
     , I32Store
     -- [hp + 8] = [[sp + 4] + 8] `op` [[sp + 8] + 8]
     , GetGlobal hp  -- PUSH hp + 8
@@ -197,7 +199,7 @@ wasm prog = do
 
   cmpAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval ] ++
     [ GetGlobal hp  -- [hp] = Int
-    , I32Const wSum
+    , I32Const $ fromEnum TagSum
     , I32Store
     -- [hp + 4] = [[sp + 4] + 8] == [[sp + 8] + 8]
     , GetGlobal hp  -- PUSH hp + 4
@@ -246,7 +248,7 @@ wasm prog = do
     , Block
     , GetGlobal bp
     , I32Load8u
-    , BrTable [0, 1, 3, 4]  -- case [bp].8u
+    , BrTable [0, 1, 3, 4]  -- case [bp].8u; branch on Tag
     , End  -- 0: Ap
     , GetGlobal sp  -- [sp] = [bp + 8]
     , GetGlobal bp
@@ -337,16 +339,6 @@ varlen xs = leb128 $ length xs
 lenc :: [Int] -> [Int]
 lenc xs = varlen xs ++ xs
 
-wAp :: Int
-wAp = 0
-wInd :: Int
-wInd = 1
-wGlobal :: Int
-wGlobal = 2
-wInt :: Int
-wInt = 3
-wSum :: Int
-wSum = 4
 sp :: Int
 sp = 0
 hp :: Int
@@ -367,7 +359,7 @@ fromIns instruction = case instruction of
     , I32Sub
     , SetGlobal sp
     , GetGlobal hp  -- [hp] = Int
-    , I32Const wInt
+    , I32Const $ fromEnum TagInt
     , I32Store
     , GetGlobal hp  -- [hp + 8] = n
     , I32Const 8
@@ -393,7 +385,7 @@ fromIns instruction = case instruction of
     ]
   MkAp ->
     [ GetGlobal hp  -- [hp] = Ap
-    , I32Const wAp
+    , I32Const $ fromEnum TagAp
     , I32Store
     , GetGlobal hp  -- [hp + 8] = [sp + 4]
     , I32Const 8
@@ -434,7 +426,7 @@ fromIns instruction = case instruction of
     , I32Sub
     , SetGlobal sp
     , GetGlobal hp  -- [hp] = Global | (n << 8)
-    , I32Const $ wGlobal + 256*n
+    , I32Const $ fromEnum TagGlobal + 256*n
     , I32Store
     , GetGlobal hp  -- [hp + 4] = n
     , I32Const 4
@@ -475,7 +467,7 @@ fromIns instruction = case instruction of
     , I32Const 4
     , I32Add
     , I32Load
-    , I32Const wInd
+    , I32Const $ fromEnum TagInd
     , I32Store
     , GetGlobal sp  -- [[sp + 4] + 4] = bp
     , I32Const 4
@@ -488,7 +480,7 @@ fromIns instruction = case instruction of
     ]
   Copro m n ->
     [ GetGlobal hp  -- [hp] = Sum
-    , I32Const wSum
+    , I32Const $ fromEnum TagSum
     , I32Store
     , GetGlobal hp  -- [hp + 4] = m
     , I32Const 4
@@ -528,7 +520,7 @@ fromIns instruction = case instruction of
       tab = zip (fromJust . fst <$> alts) [0..]
       m = 1 + (maximum $ fromJust . fst <$> alts)
     -- [sp + 4] should be:
-    -- 0: wSum
+    -- 0: TagSum
     -- 4: "Enum"
     -- 8, 12, ...: fields
     in [ GetGlobal sp  -- bp = [sp + 4]

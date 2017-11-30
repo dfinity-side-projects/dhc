@@ -22,7 +22,7 @@ infixl 5 :@
 data Ast = RealWorld | Qual String String | Call String String
   | Pack Int Int | I Int64 | S ByteString | Var String
   | Ast :@ Ast | Lam String Ast | Cas Ast [(Ast, Ast)]
-  | Super [String] Ast
+  | Super [String] Ast | Let [(String, Ast)] Ast
   | Placeholder String Type deriving (Read, Show, Generic)
 
 infixr 5 :->
@@ -41,6 +41,7 @@ instance NFData Ast where
   rnf (Super ss a) = rnf ss `seq` rnf a `seq` ()
   rnf (Lam s a) = rnf s `seq` rnf a `seq` ()
   rnf (Cas a as) = rnf a `seq` rnf as `seq` ()
+  rnf (Let ds a) = rnf ds `seq` rnf a `seq` ()
   rnf (Placeholder s t) = rnf s `seq` rnf t `seq` ()
 
 instance NFData Type where
@@ -63,7 +64,7 @@ supercombinators = sc `sepBy` want ";" where
     (fun:args) <- many1 varStr
     void $ want "="
     (,) fun . Super args <$> expr
-  expr = caseExpr <|>
+  expr = caseExpr <|> letExpr <|>
     molecule `chainr1` chop "." `chainr1` chop "^"
       `chainl1` chop "*/" `chainl1` chop "+-"
       `chainr1` sop [":", "++"]
@@ -71,6 +72,15 @@ supercombinators = sc `sepBy` want ";" where
       `chainl1` sop ["&&"]
       `chainl1` sop ["||"]
       `chainl1` sop [">>", ">>="]
+  letDefn = do
+    s <- varStr
+    void $ want "="
+    ast <- expr
+    pure (s, ast)
+  letExpr = do
+    ds <- between (want "let") (want "in") $
+      between (want "{") (want "}") $ letDefn `sepBy` want ";"
+    Let ds <$> expr
   caseExpr = do
     x <- between (want "case") (want "of") expr
     as <- alt `sepBy` want ";"
@@ -245,6 +255,12 @@ gather findExport prelude env ast = case ast of
       addConstraint (x, ta)
       pure (astp, asta)
     pure (Cas aste astas, x)
+  Let ds body -> do
+    es <- forM (fst <$> ds) $ \s -> (,) s <$> newTV
+    ts <- forM (snd <$> ds) $ rec (es ++ env)
+    mapM_ addConstraint $ zip (snd <$> es) (snd <$> ts)
+    (body1, t) <- rec (es ++ env) body
+    pure (Let (zip (fst <$> ds) (fst <$> ts)) body1, t)
   Pack _ n -> do  -- Only tuples are pre`Pack`ed.
     xs <- replicateM n newTV
     let r = foldl' (TApp) (TC "()") xs
