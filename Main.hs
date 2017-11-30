@@ -35,13 +35,19 @@ getNum :: (Integral n, Monad m) =>
   (a -> Int -> m Word8) -> Int -> Int32 -> a -> m n
 getNum get w addr mem = do
   bs <- mapM (get mem) ((fromIntegral addr +) <$> [0..w-1])
-  pure $ sum $ zipWith (*) (fromIntegral <$> bs) ((256^) <$> [0..])
+  pure $ sum $ zipWith (*) (fromIntegral <$> bs) ((256^) <$> [(0 :: Int)..])
 
 putNum :: (Integral n, Monad m) =>
   (a -> Int -> Word8 -> m a) -> Int -> Int32 -> n -> a -> m a
 putNum put w addr n mem = foldM f mem [0..w-1] where
   f m k = put m (fromIntegral addr + k) $ getByte k
   getByte k = fromIntegral $ n `div` (256^k) `mod` 256
+
+shiftR32U :: Int32 -> Int32 -> Int32
+shiftR32U a b = fromIntegral $ shiftR ((fromIntegral a) :: Word32) $ fromIntegral ((fromIntegral b :: Word32) `mod` 32)
+
+shiftR64U :: Int64 -> Int64 -> Int64
+shiftR64U a b = fromIntegral $ shiftR ((fromIntegral a) :: Word64) $ fromIntegral ((fromIntegral b :: Word64) `mod` 64)
 
 execute :: Monad m =>
   [[Op] -> m ()] -> a -> (a -> Int -> Word8 -> m a) -> (a -> Int -> m Word8)
@@ -66,6 +72,8 @@ execute fns initMem put get Wasm {imports, exports, code, globals} s = let
     I32_add -> binOp32 (+)
     I32_sub -> binOp32 (-)
     I32_mul -> binOp32 (*)
+    I32_shr_u -> binOp32 shiftR32U
+    I32_ne -> binOp32 $ ((fromIntegral . fromEnum) .) . (/=)
     I64_gt_s -> let
       (I64_const b:I64_const a:_) = stack
       c = I32_const $ fromIntegral $ fromEnum $ a > b
@@ -77,12 +85,19 @@ execute fns initMem put get Wasm {imports, exports, code, globals} s = let
     I64_add -> binOp64 (+)
     I64_sub -> binOp64 (-)
     I64_mul -> binOp64 (*)
-    I64_shr_u -> binOp64 $ \a b -> fromIntegral $
-      shiftR (fromIntegral a :: Word64) (fromIntegral b)
+    I64_shr_u -> binOp64 shiftR64U
     I32_wrap_i64 -> let
       I64_const a = head stack
       c = I32_const $ fromIntegral a
       in run vm {stack = c:tail stack, insts = i1}
+    I32_load8_u _ _ -> do
+      let I32_const addr = head stack
+      c <- I32_const <$> getNum get 1 addr mem
+      run vm {stack = c:tail stack, insts = i1}
+    I32_load16_u _ _ -> do
+      let I32_const addr = head stack
+      c <- I32_const <$> getNum get 2 addr mem
+      run vm {stack = c:tail stack, insts = i1}
     I32_load _ _ -> do
       let I32_const addr = head stack
       c <- I32_const <$> getNum get 4 addr mem
@@ -100,6 +115,9 @@ execute fns initMem put get Wasm {imports, exports, code, globals} s = let
       let I32_const addr = head stack
       c <- I64_const <$> getNum get 8 addr mem
       run vm {stack = c:tail stack, insts = i1}
+    If _ bl -> let I32_const n = head stack in if n == 1
+      then run vm {stack = tail stack, insts = bl:i1}
+      else run vm {stack = tail stack, insts = i1}
     Block _ bl -> run vm {insts = bl:i1}
     Loop _ bl -> run vm {insts = bl:insts}
     Br k -> run vm {insts = drop (k + 1) insts}

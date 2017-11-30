@@ -54,9 +54,8 @@ data ByteParser a = ByteParser (ByteString -> Either String (a, ByteString))
 instance Functor     ByteParser where fmap = liftM
 instance Applicative ByteParser where {pure  = return; (<*>) = ap}
 instance Monad       ByteParser where
-  ByteParser f >>= g = ByteParser $ \s -> case f s of
-    Left err -> Left err
-    Right (r, t) -> let ByteParser gg = g r in gg t
+  ByteParser f >>= g = ByteParser $ (good =<<) . f
+    where good (r, t) = let ByteParser gg = g r in gg t
   return a = ByteParser $ \s -> Right (a, s)
 
 next :: ByteParser Char
@@ -76,9 +75,8 @@ bad :: String -> ByteParser a
 bad = ByteParser . const . Left
 
 byteParse :: ByteParser a -> ByteString -> Either String a
-byteParse (ByteParser f) s = case f s of
-  Left err     -> Left err
-  Right (w, t) -> if B8.null t then Right w else Left "expected EOF"
+byteParse (ByteParser f) s = f s >>= (\(w, t) ->
+  if B8.null t then Right w else Left "expected EOF")
 
 wasm :: ByteParser Wasm
 wasm = do
@@ -218,7 +216,7 @@ wasm = do
     codeBlock = do
       opcode <- varuint7
       s <- if
-        | Just s <- lookup opcode $ zeroOperandOps ++ [(0x00, Unreachable), (0x01, Nop), (0x05, Else), (0x0b, End), (0x0f, Return)] -> pure s
+        | Just s <- lookup opcode $ zeroOperandOps ++ [(0x00, Unreachable), (0x01, Nop), (0x0b, End), (0x0f, Return)] -> pure s
         | Just s <- lookup opcode [(0x02, Block), (0x03, Loop), (0x04, If)] -> do
           bt <- blockType
           bl <- codeBlock
