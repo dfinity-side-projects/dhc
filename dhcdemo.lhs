@@ -11,7 +11,7 @@ are 1.
 Only a tiny fragment of the language is supported. There is almost no syntax
 sugar.
 
-There is no garbage collection nor lazy evaluation.
+There is no garbage collection.
 
 https://github.com/dfinity/dhc[Source].
 
