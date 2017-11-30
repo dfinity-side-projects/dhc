@@ -1,9 +1,10 @@
+-- Wasm for UpdatePop, NInd, 
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE PackageImports #-}
-module Asm where
+module Asm (wasm) where
 import Control.Arrow
 import "mtl" Control.Monad.State
-import qualified Data.Bimap as BM
+import qualified Data.Map as M
 import Data.Char
 import Data.Int
 import Data.List
@@ -12,18 +13,21 @@ import Data.Maybe
 import DHC
 
 -- | G-Machine instructions.
-data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal Int
+data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal Int Int
   | MkAp | Slide Int | Split Int | Eval
+  | UpdatePop Int
   | Casejump [(Maybe Int64, [Ins])] | Trap deriving Show
 
 data WasmType = TypeI32 | TypeI64
 
 data WasmOp = GetGlobal Int | SetGlobal Int
   | I64Store | I64Load | I64Add | I64Sub | I64Mul | I64Const Int64
-  | I32Store | I32Load | I32Add | I32Sub | I32Const Int
+  | I32Store | I32Load | I32Load8u | I32Load16u
+  | I32ShrU | I32Mul | I32Add | I32Sub | I32Const Int | I32NE
   | I32WrapI64
   | I64Xor | I64Eqz | I64ShrU | I64DivS | I64RemS
   | I64Eq | I64Ne | I64LTS | I64GTS
+  | If
   | Block | Loop | Br Int | BrTable [Int] | WasmCall Int | Unreachable | End
   deriving Show
 
@@ -34,8 +38,12 @@ encWasmOp :: WasmOp -> [Int]
 encWasmOp op = case op of
   GetGlobal n -> 0x23 : leb128 n
   SetGlobal n -> 0x24 : leb128 n
+  If -> [0x4, 0x40]
+  I32NE -> [0x47]
   I32Add -> [0x6a]
   I32Sub -> [0x6b]
+  I32Mul -> [0x6c]
+  I32ShrU -> [0x76]
   I64Add -> [0x7c]
   I64Sub -> [0x7d]
   I64Mul -> [0x7e]
@@ -60,6 +68,8 @@ encWasmOp op = case op of
   I64Load -> [0x29, 3, 0]
   I64Store -> [0x37, 3, 0]
   I32Load -> [0x28, 2, 0]
+  I32Load8u -> [0x2d, 0, 0]
+  I32Load16u -> [0x2f, 1, 0]
   I32Store -> [0x36, 2, 0]
   BrTable bs -> 0xe : leb128 (length bs - 1) ++ concatMap leb128 bs
 
@@ -101,7 +111,9 @@ wasm prog = do
     -- [0, n] = external_kind Function, index n.
     , sect 7 [encStr "e" ++ [0, length fs + 1]]
     , sect 10 $ encProcedure <$> (fs ++  -- Code section.
-      [[ WasmCall $ 2 + length prims + (fromJust $ elemIndex "run" $ fst <$> m)
+      --[[ WasmCall $ 2 + length prims + (fromJust $ elemIndex "run" $ fst <$> m)
+      [fromIns (PushGlobal 0 $ length prims + (fromJust $ elemIndex "run" $ fst <$> m)) ++
+      [ WasmCall 1
       , GetGlobal sp
       , I32Const 4
       , I32Add
@@ -111,7 +123,7 @@ wasm prog = do
       , Block
       , GetGlobal bp
       , I32Load
-      , BrTable [2, 2, 0, 1, 2]
+      , BrTable [2, 2, 2, 0, 1, 2]
       , End  -- Int.
       , GetGlobal bp  -- High bits.
       , I32Const 8
@@ -181,7 +193,7 @@ wasm prog = do
     , I32Const 16
     , I32Add
     , SetGlobal hp
-    ] ++ fromIns (Slide 2) ++ [End]
+    ] ++ fromIns (UpdatePop 2) ++ [WasmCall 1, End]
 
   cmpAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval ] ++
     [ GetGlobal hp  -- [hp] = Int
@@ -220,7 +232,7 @@ wasm prog = do
     , I32Const 8
     , I32Add
     , SetGlobal hp
-    ] ++ fromIns (Slide 2) ++ [End]
+    ] ++ fromIns (UpdatePop 2) ++ [WasmCall 1, End]
 
   evalAsm n =
     [ Block
@@ -231,18 +243,11 @@ wasm prog = do
     , I32Load
     , SetGlobal bp
     , Block
+    , Block
     , GetGlobal bp
-    , I32Load
-    , BrTable [0, 2, 3]  -- case [bp]
+    , I32Load8u
+    , BrTable [0, 1, 3, 4]  -- case [bp].8u
     , End  -- 0: Ap
-    , GetGlobal sp   -- [sp + 4] = [bp + 12]
-    , I32Const 4
-    , I32Add
-    , GetGlobal bp
-    , I32Const 12
-    , I32Add
-    , I32Load
-    , I32Store
     , GetGlobal sp  -- [sp] = [bp + 8]
     , GetGlobal bp
     , I32Const 8
@@ -253,13 +258,58 @@ wasm prog = do
     , I32Const 4
     , I32Sub
     , SetGlobal sp
+    , Br 1
+    , End  -- 1: Ind.
+    , GetGlobal sp  -- [sp + 4] = [bp + 4]
+    , I32Const 4
+    , I32Add
+    , GetGlobal bp
+    , I32Const 4
+    , I32Add
+    , I32Load
+    , I32Store
     , Br 0
-    , End  -- 1: Ap loop.
-    , End  -- 2: Global
+    , End  -- 2: Eval loop.
+    , End  -- 3: Global
+
+    , GetGlobal bp  -- save bp, sp
+    , GetGlobal sp
+    , GetGlobal sp  -- bp = sp + 4 + 4 * ([bp].16u >> 8)
+    , I32Const 4
+    , I32Add
+    , GetGlobal bp
+    , I32Load16u
+    , I32Const 8
+    , I32ShrU
+    , I32Const 4
+    , I32Mul
+    , I32Add
+    , SetGlobal bp
+
+    , Loop
     , GetGlobal sp  -- sp = sp + 4
     , I32Const 4
     , I32Add
     , SetGlobal sp
+    , GetGlobal sp  -- if sp /= bp then
+    , GetGlobal bp
+    , I32NE
+    , If
+    , GetGlobal sp  -- [sp] = [[sp + 4] + 12]
+    , GetGlobal sp
+    , I32Const 4
+    , I32Add
+    , I32Load
+    , I32Const 12
+    , I32Add
+    , I32Load
+    , I32Store
+    , Br 1
+    , End  -- If
+    , End  -- Loop
+
+    , SetGlobal sp
+    , SetGlobal bp
     ] ++ replicate n Block ++
     [ GetGlobal bp  -- case [bp + 4]
     , I32Const 4
@@ -267,7 +317,7 @@ wasm prog = do
     , I32Load
     , BrTable [0..n]
     ] ++ concat [[End, WasmCall $ 1 + i, Br (n - i)] | i <- [1..n]] ++
-    [ End  -- 3: Other. It's already WHNF.
+    [ End  -- 4: Other. It's already WHNF.
     ]
 
 leb128 :: Int -> [Int]
@@ -289,12 +339,14 @@ lenc xs = varlen xs ++ xs
 
 wAp :: Int
 wAp = 0
+wInd :: Int
+wInd = 1
 wGlobal :: Int
-wGlobal = 1
+wGlobal = 2
 wInt :: Int
-wInt = 2
+wInt = 3
 wSum :: Int
-wSum = 3
+wSum = 4
 sp :: Int
 sp = 0
 hp :: Int
@@ -373,7 +425,7 @@ fromIns instruction = case instruction of
     , I32Add
     , SetGlobal hp
     ]
-  PushGlobal g ->
+  PushGlobal n g ->
     [ GetGlobal sp  -- [sp] = hp
     , GetGlobal hp
     , I32Store
@@ -381,8 +433,8 @@ fromIns instruction = case instruction of
     , I32Const 4
     , I32Sub
     , SetGlobal sp
-    , GetGlobal hp  -- [hp] = Global
-    , I32Const wGlobal
+    , GetGlobal hp  -- [hp] = Global | (n << 8)
+    , I32Const $ wGlobal + 256*n
     , I32Store
     , GetGlobal hp  -- [hp + 4] = n
     , I32Const 4
@@ -408,6 +460,31 @@ fromIns instruction = case instruction of
     , I32Const $ 4*fromIntegral n
     , I32Add
     , SetGlobal sp
+    ]
+  UpdatePop n ->
+    [ GetGlobal sp  -- bp = [sp + 4]
+    , I32Const 4
+    , I32Add
+    , I32Load
+    , SetGlobal bp
+    , GetGlobal sp  -- sp = sp + 4*(n + 1)
+    , I32Const $ 4*(n + 1)
+    , I32Add
+    , SetGlobal sp
+    , GetGlobal sp  -- [[sp + 4]] = Ind
+    , I32Const 4
+    , I32Add
+    , I32Load
+    , I32Const wInd
+    , I32Store
+    , GetGlobal sp  -- [[sp + 4] + 4] = bp
+    , I32Const 4
+    , I32Add
+    , I32Load
+    , I32Const 4
+    , I32Add
+    , GetGlobal bp
+    , I32Store
     ]
   Copro m n ->
     [ GetGlobal hp  -- [hp] = Sum
@@ -497,8 +574,11 @@ fromIns instruction = case instruction of
     , SetGlobal sp
     ]
 
-mk1 :: BM.Bimap String Int -> Ast -> State [(String, Int)] [Ins]
+mk1 :: M.Map String (Int, Int) -> Ast -> State [(String, Int)] [Ins]
 mk1 funs ast = case ast of
+  Super as b -> do
+    modify' $ \bs -> zip as [length bs..] ++ bs
+    (++ [UpdatePop $ length as, Eval]) <$> rec b
   I n -> pure [PushInt n]
   t :@ u -> do
     mu <- rec u
@@ -508,14 +588,11 @@ mk1 funs ast = case ast of
     pure $ case last mt of
       Copro _ _ -> mu ++ mt
       _ -> concat [mu, mt, [MkAp]]
-  Super as b -> do
-    modify' $ \bs -> zip as [length bs..] ++ bs
-    (++ [Slide $ length as]) <$> rec b
   Var v -> do
     m <- get
     pure $ case lookup v m of
       Just k -> [Push k]
-      Nothing -> [PushGlobal $ funs BM.! v]
+      Nothing -> [uncurry PushGlobal $ funs M.! v]
   Pack n m -> pure [Copro n m]
   Cas expr alts -> do
     me <- rec expr
@@ -547,65 +624,70 @@ fromApList :: Ast -> [Ast]
 fromApList (a :@ b) = fromApList a ++ [b]
 fromApList a = [a]
 
-data Node = NInt Int64 | NAp Int Int | NGlobal Int | NCon Int [Int] deriving Show
+data Node = NInt Int64 | NAp Int Int | NGlobal Int Int | NInd Int | NCon Int [Int] deriving Show
+
+primFuns :: [(String, (Int, Int))]
+primFuns = zip ["+", "-", "*", "div", "mod", "Int-==", "<", ">"]
+  $ (,) 2 <$> [0..]
 
 compileMk1 :: String -> Either String [(String, [Ins])]
 compileMk1 haskell = do
   ds <- compileMinimal haskell
-  let funs = BM.fromList $ zip (["+", "-", "*", "div", "mod", "Int-==", "<", ">"] ++ (fst <$> ds)) [0..]
-  pure $ map (\(s, (d, _)) -> (s, evalState (mk1 funs d) [] ++ [Eval])) ds
+  let funs = M.fromList $ primFuns ++ zipWith (\(name, (Super as _, _)) i -> (name, (length as, i))) ds [length primFuns..]
+  pure $ map (\(s, (d, _)) -> (s, evalState (mk1 funs d) [])) ds
 
 -- | Test that interprets G-Machine instructions.
 testmk1 :: IO ()
-testmk1 = go (Right <$> prog) [] [] where
+testmk1 = go (Right <$> [PushGlobal 0 runIndex, Eval]) [] M.empty where
   drop' n as | n > length as = error "BUG!"
              | otherwise     = drop n as
   Right m = compileMk1 "g n = (case n of 0 -> 1; n -> n * g(n - 1)); f x = x * x; run = f (f 3); run1 = case Just 3 of Just n -> n + 1"
-  Just prog = lookup "run" m
+  runIndex = fromJust (elemIndex "run" $ fst <$> m) + length primFuns
   go (fOrIns:rest) s h = either primFun exec fOrIns where
-    k = length h
-    intInt f = go rest (k:srest) ((k, NInt $ f x y):h) where
+    k = M.size h
+    heapAdd x = M.insert k x h
+    intInt f = go rest (k:srest) $ heapAdd $ NInt $ f x y where
       (s0:s1:srest) = s
-      Just (NInt x) = lookup s0 h
-      Just (NInt y) = lookup s1 h
+      NInt x = h M.! s0
+      NInt y = h M.! s1
     primFun 0 = intInt (+)
     primFun 1 = intInt (-)
     primFun 2 = intInt (*)
     primFun _ = error "unsupported"
     exec ins = case ins of
       Trap -> print "UNREACHABLE"
-      PushInt n -> go rest (k:s) ((k, NInt n):h)
+      PushInt n -> go rest (k:s) $ heapAdd $ NInt n
       Push n -> go rest (s!!n:s) h
-      PushGlobal g -> go rest (k:s) ((k, NGlobal g):h)
-      MkAp -> let (s0:s1:srest) = s in go rest (k:srest) ((k, NAp s0 s1):h)
+      PushGlobal a b -> go rest (k:s) $ heapAdd $ NGlobal a b
+      MkAp -> let (s0:s1:srest) = s in go rest (k:srest) $ heapAdd $ NAp s0 s1
+      UpdatePop n -> go rest (drop' (n + 1) s) $ M.insert (s!!(n + 1)) (NInd $ head s) h
       Slide n -> let (s0:srest) = s in go rest (s0:drop' n srest) h
-      Copro n l -> go rest (k:drop l s) ((k, NCon n $ take l s):h)
+      Copro n l -> go rest (k:drop' l s) $ heapAdd $ NCon n $ take l s
       Split _ -> let
         (s0:srest) = s
-        Just (NCon _ as) = lookup s0 h
+        NCon _ as = h M.! s0
         in go rest (as ++ srest) h
-      Eval -> do
-        let Just node = lookup (head s) h
-        case node of
-          NAp a b -> go (Right Eval:rest) (a:b:tail s) h
-          NGlobal g -> let
-            p = if g >= 8 then Right <$> snd (m!!(g - 8)) else
-              (Right <$> [Push 1, Eval, Push 1, Eval]) ++
-              [Left g, Right $ Slide 2]
-            in go (p ++ rest) (tail s) h
-          _ -> go rest s h
+      Eval -> case h M.! head s of
+        NInd i -> go (Right Eval:rest) (i:tail s) h
+        NAp a _ -> go (Right Eval:rest) (a:s) h
+        NGlobal n g -> let
+          p = if g >= 8 then Right <$> snd (m!!(g - 8)) else
+            (Right <$> [Push 1, Eval, Push 1, Eval]) ++
+            [Left g, Right $ UpdatePop 2, Right Eval]
+          debone i = r where NAp _ r = h M.! i
+          in go (p ++ rest) ((debone <$> take n (tail s)) ++ drop' n s) h
+        _ -> go rest s h
       Casejump alts -> let
-        x = case lookup (head s) h of
-          Just (NInt n) -> n
-          Just (NCon n _) -> fromIntegral n
+        x = case h M.! head s of
+          NInt n -> n
+          NCon n _ -> fromIntegral n
           _ -> undefined
         body = case lookup (Just x) alts of
           Just b -> b
           _ -> fromJust $ lookup Nothing alts
         in go ((Right <$> body) ++ rest) s h
-  go [] s h = do
-    let Just node = lookup (head s) h
-    case node of
-      NInt n -> print n
-      NCon n _ -> print ("PACK", n)
-      _ -> undefined
+  go [] [r] h = case h M.! r of
+    NInt n -> print n
+    NCon n _ -> print ("PACK", n)
+    _ -> error "expect NInt or NCon on stack"
+  go [] s _ = error $ "bad stack: " ++ show s
