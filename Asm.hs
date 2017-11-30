@@ -519,11 +519,12 @@ fromIns instruction = case instruction of
       catchall = if null underscore then [Trap] else snd $ head underscore
       tab = zip (fromJust . fst <$> alts) [0..]
       m = 1 + (maximum $ fromJust . fst <$> alts)
+    in if null alts then concatMap fromIns catchall else
     -- [sp + 4] should be:
     -- 0: TagSum
     -- 4: "Enum"
     -- 8, 12, ...: fields
-    in [ GetGlobal sp  -- bp = [sp + 4]
+    [ GetGlobal sp  -- bp = [sp + 4]
     , I32Const 4
     , I32Add
     , I32Load
@@ -589,14 +590,14 @@ mk1 funs ast = case ast of
   Cas expr alts -> do
     me <- rec expr
     xs <- forM alts $ \(p, body) -> do
-      orig <- get
+      orig <- get  -- Save state.
       (f, b) <- case fromApList p of
         [I n] -> do
           bump 1
           (,) (Just n) . (++ [Slide 1]) <$> rec body
         (Pack n _:vs) -> do
           bump $ length vs
-          modify' $ \bs -> zip (map (\(Var v) -> v) vs) [0..] ++ bs
+          modify' (zip (map (\(Var v) -> v) vs) [0..] ++)
           bod <- rec body
           pure (Just $ fromIntegral n, Split (length vs) : bod ++ [Slide (length vs)])
         [Var s] -> do
@@ -604,7 +605,7 @@ mk1 funs ast = case ast of
           modify' $ \bs -> (s, 0):bs
           (,) Nothing . (++ [Slide 1]) <$> rec body
         _ -> undefined
-      put orig
+      put orig  -- Restore state.
       pure (f, b)
     pure $ me ++ [Eval, Casejump xs]
   _ -> error $ "TODO: compile: " ++ show ast
