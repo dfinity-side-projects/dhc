@@ -15,7 +15,7 @@ import DHC
 -- | G-Machine instructions.
 data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal Int Int
   | MkAp | Slide Int | Split Int | Eval
-  | UpdatePop Int
+  | UpdatePop Int | UpdateInd Int | Alloc Int
   | Casejump [(Maybe Int64, [Ins])] | Trap deriving Show
 
 data WasmType = TypeI32 | TypeI64
@@ -453,6 +453,37 @@ fromIns instruction = case instruction of
     , I32Add
     , SetGlobal sp
     ]
+  Alloc n -> concat (replicate n
+    [ GetGlobal sp  -- [sp] = hp
+    , GetGlobal hp
+    , I32Store
+    , GetGlobal hp  -- [hp] = Ind
+    , I32Const $ fromEnum TagInd
+    , I32Store
+    , GetGlobal hp  -- hp = hp + 8
+    , I32Const 8
+    , I32Add
+    , SetGlobal hp
+    , GetGlobal sp  -- sp = sp - 4
+    , I32Const 4
+    , I32Sub
+    , SetGlobal sp
+    ])
+  UpdateInd n ->
+    [ GetGlobal sp  -- sp = sp + 4
+    , I32Const 4
+    , I32Add
+    , SetGlobal sp
+    , GetGlobal sp  -- [[sp + 4*(n + 1)] + 4] = [sp]
+    , I32Const $ 4*(n + 1)
+    , I32Add
+    , I32Load
+    , I32Const 4
+    , I32Add
+    , GetGlobal sp
+    , I32Load
+    , I32Store
+    ]
   UpdatePop n ->
     [ GetGlobal sp  -- bp = [sp + 4]
     , I32Const 4
@@ -608,6 +639,14 @@ mk1 funs ast = case ast of
       put orig  -- Restore state.
       pure (f, b)
     pure $ me ++ [Eval, Casejump xs]
+  Let ds body -> let n = length ds in do
+    orig <- get  -- Save state.
+    bump n
+    modify' (zip (fst <$> ds) [n-1,n-2..0] ++)
+    dsAsm <- mapM rec $ snd <$> ds
+    b <- rec body
+    put orig  -- Restore state.
+    pure $ Alloc n : concat (zipWith (++) dsAsm (pure . UpdateInd <$> [n-1,n-2..0])) ++ b ++ [Slide n]
   _ -> error $ "TODO: compile: " ++ show ast
   where
     rec = mk1 funs
@@ -653,7 +692,9 @@ testmk1 = go (Right <$> [PushGlobal 0 runIndex, Eval]) [] M.empty where
       Push n -> go rest (s!!n:s) h
       PushGlobal a b -> go rest (k:s) $ heapAdd $ NGlobal a b
       MkAp -> let (s0:s1:srest) = s in go rest (k:srest) $ heapAdd $ NAp s0 s1
+      UpdateInd n -> go rest (tail s) $ M.insert (s!!(n + 1)) (NInd $ head s) h
       UpdatePop n -> go rest (drop' (n + 1) s) $ M.insert (s!!(n + 1)) (NInd $ head s) h
+      Alloc n -> go rest ([k..k+n-1]++s) $ M.union h $ M.fromList $ zip [k..k+n-1] (repeat $ NInd 0)
       Slide n -> let (s0:srest) = s in go rest (s0:drop' n srest) h
       Copro n l -> go rest (k:drop' l s) $ heapAdd $ NCon n $ take l s
       Split _ -> let

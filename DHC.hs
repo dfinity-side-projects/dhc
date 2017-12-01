@@ -396,8 +396,10 @@ callees ds f = deps f (fromJust $ lookup f ds) where
   deps name body = case body of
     Super ss t | name `notElem` ss -> rec t
     Lam s t | name /= s -> rec t
-    -- TODO: Look for shadowed function name in case statement.
+    -- TODO: Look for shadowed function name in case and let statements.
+    -- Or add deshadowing phase.
     Cas x as          -> rec x ++ concatMap rec (snd <$> as)
+    Let as x          -> rec x ++ concatMap rec (snd <$> as)
     x :@ y            -> rec x ++ rec y
     Var v | v /= name -> case lookup v ds of
       Nothing -> []
