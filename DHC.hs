@@ -5,7 +5,8 @@ import Control.Arrow
 import Control.DeepSeq (NFData(..))
 import Control.Monad
 import Data.Binary (Binary)
-import Data.ByteString.Char8 (ByteString, pack)
+import Data.ByteString.Short (ShortByteString, pack)
+import Data.ByteString.Internal (c2w)
 import Data.Char
 import Data.Int
 import Data.List
@@ -20,7 +21,7 @@ instance Binary Type
 
 infixl 5 :@
 data Ast = RealWorld | Qual String String | Call String String
-  | Pack Int Int | I Int64 | S ByteString | Var String
+  | Pack Int Int | I Int64 | S ShortByteString | Var String
   | Ast :@ Ast | Lam String Ast | Cas Ast [(Ast, Ast)]
   | Super [String] Ast | Let [(String, Ast)] Ast
   | Placeholder String Type deriving (Read, Show, Generic)
@@ -144,7 +145,7 @@ supercombinators = sc `sepBy` want ";" where
     s <- try <$> between (char '"') (char '"') $ S . pack <$> many rune
     filler
     pure s
-  rune = (char '\\' >> oneOf "\\\"") <|> noneOf "\""
+  rune = c2w <$> ((char '\\' >> oneOf "\\\"") <|> noneOf "\"")
 
 want :: String -> Parser String
 want t = try $ do
