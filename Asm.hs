@@ -600,7 +600,7 @@ fromIns instruction = case instruction of
 
 mk1 :: M.Map String (Int, Int) -> Ast -> State [(String, Int)] [Ins]
 mk1 funs ast = case ast of
-  Super as b -> do
+  Lam as b -> do
     modify' $ \bs -> zip as [length bs..] ++ bs
     (++ [UpdatePop $ length as, Eval]) <$> rec b
   I n -> pure [PushInt n]
@@ -665,7 +665,7 @@ primFuns = zip ["+", "-", "*", "div", "mod", "Int-==", "<", ">"]
 compileMk1 :: String -> Either String [(String, [Ins])]
 compileMk1 haskell = do
   ds <- compileMinimal haskell
-  let funs = M.fromList $ primFuns ++ zipWith (\(name, (Super as _, _)) i -> (name, (length as, i))) ds [length primFuns..]
+  let funs = M.fromList $ primFuns ++ zipWith (\(name, (Lam as _, _)) i -> (name, (length as, i))) ds [length primFuns..]
   pure $ map (\(s, (d, _)) -> (s, evalState (mk1 funs d) [])) ds
 
 -- | Test that interprets G-Machine instructions.

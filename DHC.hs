@@ -20,10 +20,10 @@ instance Binary Ast
 instance Binary Type
 
 infixl 5 :@
-data Ast = RealWorld | Qual String String | Call String String
+data Ast = Qual String String | Call String String
   | Pack Int Int | I Int64 | S ShortByteString | Var String
-  | Ast :@ Ast | Lam String Ast | Cas Ast [(Ast, Ast)]
-  | Super [String] Ast | Let [(String, Ast)] Ast
+  | Ast :@ Ast | Cas Ast [(Ast, Ast)]
+  | Lam [String] Ast | Let [(String, Ast)] Ast
   | Placeholder String Type deriving (Read, Show, Generic)
 
 infixr 5 :->
@@ -31,7 +31,6 @@ data Type = TC String | TApp Type Type | Type :-> Type
   | TV String | GV String deriving (Read, Show, Eq, Generic)
 
 instance NFData Ast where
-  rnf (RealWorld) = ()
   rnf (Qual s1 s2) = rnf s1 `seq` rnf s2 `seq` ()
   rnf (Call s1 s2) = rnf s1 `seq` rnf s2 `seq` ()
   rnf (Pack i1 i2) = rnf i1 `seq` rnf i2 `seq` ()
@@ -39,8 +38,7 @@ instance NFData Ast where
   rnf (S s) = rnf s `seq` ()
   rnf (Var s) = rnf s `seq` ()
   rnf (a1 :@ a2) = rnf a1 `seq` rnf a2 `seq` ()
-  rnf (Super ss a) = rnf ss `seq` rnf a `seq` ()
-  rnf (Lam s a) = rnf s `seq` rnf a `seq` ()
+  rnf (Lam ss a) = rnf ss `seq` rnf a `seq` ()
   rnf (Cas a as) = rnf a `seq` rnf as `seq` ()
   rnf (Let ds a) = rnf ds `seq` rnf a `seq` ()
   rnf (Placeholder s t) = rnf s `seq` rnf t `seq` ()
@@ -64,7 +62,7 @@ supercombinators = sc `sepBy` want ";" where
   sc = do
     (fun:args) <- many1 varStr
     void $ want "="
-    (,) fun . Super args <$> expr
+    (,) fun . Lam args <$> expr
   expr = caseExpr <|> letExpr <|>
     molecule `chainr1` chop "." `chainr1` chop "^"
       `chainl1` chop "*/" `chainl1` chop "+-"
@@ -86,10 +84,7 @@ supercombinators = sc `sepBy` want ";" where
     x <- between (want "case") (want "of") expr
     as <- alt `sepBy` want ";"
     pure $ Cas x as
-  lambda = do
-    xs <- between (want "\\") (want "->") $ many1 var
-    t <- expr
-    pure $ foldr (\(Var a) b -> Lam a b) t xs
+  lambda = Lam <$> between (want "\\") (want "->") (many1 varStr) <*> expr
   alt = do
     p <- expr  -- TODO: Restrict to patterns.
     void $ want "->"
@@ -179,18 +174,16 @@ parseDefs = parse program ""
 data ConState = ConState Int [(Type, Type)] (Map String [String])
 data Constraints a = Constraints (ConState -> Either String (a, ConState))
 
-instance Functor Constraints where
-  fmap = liftM
-
+instance Functor Constraints where fmap = liftM
 instance Applicative Constraints where
-  pure a = Constraints $ \p -> Right (a, p)
   (<*>) = ap
+  pure = return
 
 instance Monad Constraints where
   Constraints c1 >>= fc2 = Constraints $ \cs -> case c1 cs of
     Left err -> Left err
     Right (r, cs2) -> let Constraints c2 = fc2 r in c2 cs2
-  return = pure
+  return a = Constraints $ \p -> Right (a, p)
 
 newTV :: Constraints Type
 newTV = Constraints $ \(ConState i cs m) -> Right (TV $ "_" ++ show i, ConState (i + 1) cs m)
@@ -231,14 +224,10 @@ gather findExport prelude env ast = case ast of
   Call c f -> case findExport c f of
     Left err -> bad err
     Right t -> (,) ast . (TC "String" :->) <$> instantiate t
-  Super args u -> do
+  Lam args u -> do
     ts <- mapM (const newTV) args
     (a, tu) <- rec ((zip args ts) ++ env) u
-    pure (Super args a, foldr (:->) tu ts)
-  Lam s u -> do
-    t <- newTV
-    (a, tu) <- rec ((s, t):env) u
-    pure (Lam s a, t :-> tu)
+    pure (Lam args a, foldr (:->) tu ts)
   Cas e as -> do
     (aste, te) <- rec env e
     x <- newTV
@@ -322,8 +311,7 @@ typeClass x t m
 fillPlaceholders :: [(String, Type)] -> Ast -> Ast
 fillPlaceholders soln ast = case ast of
   u :@ v  -> rec u :@ rec v
-  Super ss a -> Super ss $ rec a
-  Lam s a -> Lam s $ rec a
+  Lam ss a -> Lam ss $ rec a
   Cas e alts -> Cas (rec e) $ (id *** rec) <$> alts
   Placeholder "==" t -> case typeSolve soln t of
     TC "String" -> Var "String-=="
@@ -395,8 +383,7 @@ inferType acc ds = do
 callees :: [(String, Ast)] -> String -> [String]
 callees ds f = deps f (fromJust $ lookup f ds) where
   deps name body = case body of
-    Super ss t | name `notElem` ss -> rec t
-    Lam s t | name /= s -> rec t
+    Lam ss t | name `notElem` ss -> rec t
     -- TODO: Look for shadowed function name in case and let statements.
     -- Or add deshadowing phase.
     Cas x as          -> rec x ++ concatMap rec (snd <$> as)
