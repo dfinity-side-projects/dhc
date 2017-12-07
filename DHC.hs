@@ -1,9 +1,11 @@
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE PackageImports #-}
 module DHC where
 
 import Control.Arrow
 import Control.DeepSeq (NFData(..))
 import Control.Monad
+import "mtl" Control.Monad.State
 import Data.Binary (Binary)
 import Data.ByteString.Short (ShortByteString, pack)
 import Data.ByteString.Internal (c2w)
@@ -49,6 +51,16 @@ instance NFData Type where
   rnf (t1 :-> t2) = rnf t1 `seq` rnf t2 `seq` ()
   rnf (TV s) = rnf s `seq` ()
   rnf (GV s) = rnf s `seq` ()
+
+type AnnAst ann = (ann, AnnAst' ann)
+data AnnAst' ann
+  = AnnVar String | AnnQual String String | AnnCall String String
+  | AnnPack Int Int | AnnI Int64 | AnnS ShortByteString
+  | AnnAst ann :@@ AnnAst ann
+  | AnnCas (AnnAst ann) [(AnnAst ann, AnnAst ann)]
+  | AnnLam [String] (AnnAst ann) | AnnLet [(String, AnnAst ann)] (AnnAst ann)
+  | AnnPlaceholder String Type
+  deriving Show
 
 program :: Parser [(String, Ast)]
 program = do
@@ -407,3 +419,78 @@ topo suc vs = fst $ foldl' visit ([], []) vs where
     | v `elem` done || v `elem` doing = (done, doing)
     | otherwise = (\(xs, x:ys) -> (x:xs, ys)) $
       foldl' visit (done, v:doing) (suc v)
+
+freeV :: [(String, Ast)] -> [(String, AnnAst [String])]
+freeV scs = map f scs where
+  f (d, ast) = (d, g [] ast)
+  g :: [String] -> Ast -> AnnAst [String]
+  g cand (Lam ss a) = (vs \\ ss, AnnLam ss a1) where
+    a1@(vs, _) = g (union cand ss) a
+  g cand (x :@ y) = (fst x1 `union` fst y1, x1 :@@ y1) where
+    x1 = g cand x
+    y1 = g cand y
+  g cand (Var v) | v `elem` cand = ([v], AnnVar v)
+                 | otherwise     = ([],  AnnVar v)
+  g cand (Cas x as) = (foldl' union (fst x1) $ fst <$> as1, AnnCas x1 $ snd <$> as1) where
+    x1 = g cand x
+    as1 = map h as
+    h (p, e) = (vs1, (g [] p, (vs, e1))) where
+      (vs, e1) = g (cand `union` caseVars p) e
+      vs1 = vs \\ caseVars p
+  g cand (Let ds e) = (fst e1 \\ binders, AnnLet ds1 e1) where
+    e1 = g (cand `union` binders) e
+    binders = fst <$> ds
+    ds1 = map h ds
+    h (s, x) = (s, g (cand `union` binders) x)
+  g _    (I i) = ([], AnnI i)
+  g _    (S s) = ([], AnnS s)
+  g _    (Pack m n) = ([], AnnPack m n)
+  g _    (Qual x y) = ([], AnnQual x y)
+  g _    (Call x y) = ([], AnnCall x y)
+  g _    (Placeholder x y) = ([], AnnPlaceholder x y)
+
+caseVars :: Ast -> [String]
+caseVars (Var v) = [v]
+caseVars (x :@ y) = caseVars x `union` caseVars y
+caseVars _ = []
+
+liftLambdas :: [(String, AnnAst [String])] -> [(String, Ast)]
+liftLambdas scs = existingDefs ++ newDefs where
+  (existingDefs, (_, newDefs)) = runState (mapM f scs) ([], [])
+  f (s, (_, AnnLam args body)) = do
+    modify $ first $ const [s]
+    body1 <- g body
+    pure (s, Lam args body1)
+  f _ = error "bad top-level definition"
+  genName :: State ([String], [(String, Ast)]) String
+  genName = do
+    (names, ys) <- get
+    let
+      n = head $ filter (`notElem` names) $
+        (++ ('$':last names)) . show <$> [(0::Int)..]
+    put (n:names, ys)
+    pure n
+  g (_, x :@@ y) = (:@) <$> g x <*> g y
+  g (_, AnnLet ds t) = Let <$> mapM noLamb ds <*> g t where
+    noLamb (name, (fvs, AnnLam ss body)) = do
+      n <- genName
+      body1 <- g body
+      modify $ second ((n, Lam (fvs ++ ss) body1):)
+      pure (name, foldl' (:@) (Var n) $ Var <$> fvs)
+    noLamb (name, a) = (,) name <$> g a
+  g (fvs, lam@(AnnLam _ _)) = do
+    n <- genName
+    g (fvs, AnnLet [(n, (fvs, lam))] ([n], AnnVar n))
+  g (_, AnnCas expr as) =
+    Cas <$> g expr <*> mapM (\(p, t) -> (,) <$> g p <*> g t) as
+  g (_, ann) = pure $ deAnn ann
+
+deAnn :: AnnAst' a -> Ast
+deAnn (AnnS s) = S s
+deAnn (AnnI i) = I i
+deAnn (AnnVar v) = Var v
+deAnn (AnnCall x y) = Call x y
+deAnn (AnnQual x y) = Qual x y
+deAnn (AnnPack x y) = Pack x y
+deAnn (AnnPlaceholder x y) = Placeholder x y
+deAnn _ = error "BUG"

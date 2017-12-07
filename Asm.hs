@@ -664,9 +664,10 @@ primFuns = zip ["+", "-", "*", "div", "mod", "Int-==", "<", ">"]
 
 compileMk1 :: String -> Either String [(String, [Ins])]
 compileMk1 haskell = do
-  ds <- compileMinimal haskell
-  let funs = M.fromList $ primFuns ++ zipWith (\(name, (Lam as _, _)) i -> (name, (length as, i))) ds [length primFuns..]
-  pure $ map (\(s, (d, _)) -> (s, evalState (mk1 funs d) [])) ds
+  scs <- compileMinimal haskell
+  let ds = liftLambdas $ freeV $ second fst <$> scs
+  let funs = M.fromList $ primFuns ++ zipWith (\(name, Lam as _) i -> (name, (length as, i))) ds [length primFuns..]
+  pure $ map (\(s, d) -> (s, evalState (mk1 funs d) [])) ds
 
 -- | Test that interprets G-Machine instructions.
 testmk1 :: IO ()
