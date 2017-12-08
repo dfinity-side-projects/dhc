@@ -1,4 +1,3 @@
--- Wasm for UpdatePop, NInd, 
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE PackageImports #-}
 module Asm (wasm) where
@@ -75,25 +74,114 @@ encWasmOp op = case op of
   I32Store -> [0x36, 2, 0]
   BrTable bs -> 0xe : leb128 (length bs - 1) ++ concatMap leb128 bs
 
+intAsm :: WasmOp -> [WasmOp]
+intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
+  [ GetGlobal hp  -- [hp] = Int
+  , I32Const $ fromEnum TagInt
+  , I32Store
+  -- [hp + 8] = [[sp + 4] + 8] `op` [[sp + 8] + 8]
+  , GetGlobal hp  -- PUSH hp + 8
+  , I32Const 8
+  , I32Add
+  , GetGlobal sp  -- PUSH [[sp + 4] + 8]
+  , I32Const 4
+  , I32Add
+  , I32Load
+  , I32Const 8
+  , I32Add
+  , I64Load
+  , GetGlobal sp  -- PUSH [[sp + 8] + 8]
+  , I32Const 8
+  , I32Add
+  , I32Load
+  , I32Const 8
+  , I32Add
+  , I64Load
+  , op
+  , I64Store
+  , GetGlobal sp  -- [sp + 8] = hp
+  , I32Const 8
+  , I32Add
+  , GetGlobal hp
+  , I32Store
+  , GetGlobal sp  -- sp = sp + 4
+  , I32Const 4
+  , I32Add
+  , SetGlobal sp
+  , GetGlobal hp  -- hp = hp + 16
+  , I32Const 16
+  , I32Add
+  , SetGlobal hp
+  ] ++ fromIns (UpdatePop 2) ++ [WasmCall 1, End]
+
+cmpAsm :: WasmOp -> [WasmOp]
+cmpAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval ] ++
+  [ GetGlobal hp  -- [hp] = Int
+  , I32Const $ fromEnum TagSum
+  , I32Store
+  -- [hp + 4] = [[sp + 4] + 8] == [[sp + 8] + 8]
+  , GetGlobal hp  -- PUSH hp + 4
+  , I32Const 4
+  , I32Add
+  , GetGlobal sp  -- PUSH [[sp + 4] + 8]
+  , I32Const 4
+  , I32Add
+  , I32Load
+  , I32Const 8
+  , I32Add
+  , I64Load
+  , GetGlobal sp  -- PUSH [[sp + 8] + 8]
+  , I32Const 8
+  , I32Add
+  , I32Load
+  , I32Const 8
+  , I32Add
+  , I64Load
+  , op
+  , I32Store
+  , GetGlobal sp  -- [sp + 8] = hp
+  , I32Const 8
+  , I32Add
+  , GetGlobal hp
+  , I32Store
+  , GetGlobal sp  -- sp = sp + 4
+  , I32Const 4
+  , I32Add
+  , SetGlobal sp
+  , GetGlobal hp  -- hp = hp + 8
+  , I32Const 8
+  , I32Add
+  , SetGlobal hp
+  ] ++ fromIns (UpdatePop 2) ++ [WasmCall 1, End]
+
+-- Primitive functions.
+data Prim = Prim
+  { primName :: String
+  , arity :: Int
+  , primAsm :: [WasmOp]
+  }
+
+prims :: [Prim]
+prims = mkPrim <$>
+  [ ("+", intAsm I64Add)
+  , ("-", intAsm I64Sub)
+  , ("*", intAsm I64Mul)
+  , ("div", intAsm I64DivS)
+  , ("mod", intAsm I64RemS)
+  , ("Int-==", cmpAsm I64Eq)
+  , ("<", cmpAsm I64LTS)
+  , (">", cmpAsm I64GTS)
+  ]
+  where mkPrim (s, as) = Prim { primName = s, arity = 2, primAsm = as }
+
 wasm :: String -> Either String [Int]
 wasm prog = do
   m <- compileMk1 prog
   let
-    -- Primitive functions. Must be kept in sync with `funs` table below.
-    prims =
-      [ intAsm I64Add
-      , intAsm I64Sub
-      , intAsm I64Mul
-      , intAsm I64DivS
-      , intAsm I64RemS
-      , cmpAsm I64Eq
-      , cmpAsm I64LTS
-      , cmpAsm I64GTS
-      ]
     -- Function 0: import function which we send our outputs.
     -- Function 1: Eval.
     -- Afterwards, the primitive functions, then the functions in the program.
-    fs = evalAsm (length prims + length m) : prims
+    fs = evalAsm (length prims + length m) : (primAsm <$> prims)
       ++ ((++ [End]) . concatMap fromIns . snd <$> m)
     sect t xs = t : lenc (varlen xs ++ concat xs)
   pure $ concat
@@ -158,84 +246,6 @@ wasm prog = do
   encType TypeI64 = 0x7e
   -- | Encodes function signature.
   encSig ins outs = 0x60 : lenc (encType <$> ins) ++ lenc (encType <$> outs)
-  intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
-    [ GetGlobal hp  -- [hp] = Int
-    , I32Const $ fromEnum TagInt
-    , I32Store
-    -- [hp + 8] = [[sp + 4] + 8] `op` [[sp + 8] + 8]
-    , GetGlobal hp  -- PUSH hp + 8
-    , I32Const 8
-    , I32Add
-    , GetGlobal sp  -- PUSH [[sp + 4] + 8]
-    , I32Const 4
-    , I32Add
-    , I32Load
-    , I32Const 8
-    , I32Add
-    , I64Load
-    , GetGlobal sp  -- PUSH [[sp + 8] + 8]
-    , I32Const 8
-    , I32Add
-    , I32Load
-    , I32Const 8
-    , I32Add
-    , I64Load
-    , op
-    , I64Store
-    , GetGlobal sp  -- [sp + 8] = hp
-    , I32Const 8
-    , I32Add
-    , GetGlobal hp
-    , I32Store
-    , GetGlobal sp  -- sp = sp + 4
-    , I32Const 4
-    , I32Add
-    , SetGlobal sp
-    , GetGlobal hp  -- hp = hp + 16
-    , I32Const 16
-    , I32Add
-    , SetGlobal hp
-    ] ++ fromIns (UpdatePop 2) ++ [WasmCall 1, End]
-
-  cmpAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval ] ++
-    [ GetGlobal hp  -- [hp] = Int
-    , I32Const $ fromEnum TagSum
-    , I32Store
-    -- [hp + 4] = [[sp + 4] + 8] == [[sp + 8] + 8]
-    , GetGlobal hp  -- PUSH hp + 4
-    , I32Const 4
-    , I32Add
-    , GetGlobal sp  -- PUSH [[sp + 4] + 8]
-    , I32Const 4
-    , I32Add
-    , I32Load
-    , I32Const 8
-    , I32Add
-    , I64Load
-    , GetGlobal sp  -- PUSH [[sp + 8] + 8]
-    , I32Const 8
-    , I32Add
-    , I32Load
-    , I32Const 8
-    , I32Add
-    , I64Load
-    , op
-    , I32Store
-    , GetGlobal sp  -- [sp + 8] = hp
-    , I32Const 8
-    , I32Add
-    , GetGlobal hp
-    , I32Store
-    , GetGlobal sp  -- sp = sp + 4
-    , I32Const 4
-    , I32Add
-    , SetGlobal sp
-    , GetGlobal hp  -- hp = hp + 8
-    , I32Const 8
-    , I32Add
-    , SetGlobal hp
-    ] ++ fromIns (UpdatePop 2) ++ [WasmCall 1, End]
-
   evalAsm n =
     [ Block
     , Loop
@@ -658,15 +668,13 @@ fromApList a = [a]
 
 data Node = NInt Int64 | NAp Int Int | NGlobal Int Int | NInd Int | NCon Int [Int] deriving Show
 
-primFuns :: [(String, (Int, Int))]
-primFuns = zip ["+", "-", "*", "div", "mod", "Int-==", "<", ">"]
-  $ (,) 2 <$> [0..]
-
 compileMk1 :: String -> Either String [(String, [Ins])]
 compileMk1 haskell = do
   scs <- compileMinimal haskell
-  let ds = liftLambdas $ freeV $ second fst <$> scs
-  let funs = M.fromList $ primFuns ++ zipWith (\(name, Lam as _) i -> (name, (length as, i))) ds [length primFuns..]
+  let
+    ds = liftLambdas $ freeV $ second fst <$> scs
+    f p i = (primName p, (arity p, i))
+    funs = M.fromList $ zipWith f prims [0..] ++ zipWith (\(name, Lam as _) i -> (name, (length as, i))) ds [length prims..]
   pure $ map (\(s, d) -> (s, evalState (mk1 funs d) [])) ds
 
 -- | Test that interprets G-Machine instructions.
@@ -675,7 +683,7 @@ testmk1 = go (Right <$> [PushGlobal 0 runIndex, Eval]) [] M.empty where
   drop' n as | n > length as = error "BUG!"
              | otherwise     = drop n as
   Right m = compileMk1 "g n = (case n of 0 -> 1; n -> n * g(n - 1)); f x = x * x; run = f (f 3); run1 = case Just 3 of Just n -> n + 1"
-  runIndex = fromJust (elemIndex "run" $ fst <$> m) + length primFuns
+  runIndex = fromJust (elemIndex "run" $ fst <$> m) + length prims
   go (fOrIns:rest) s h = either primFun exec fOrIns where
     k = M.size h
     heapAdd x = M.insert k x h

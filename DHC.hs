@@ -206,12 +206,15 @@ addConstraint c = Constraints $ \(ConState i cs m) -> Right ((), ConState i (c:c
 addContext :: String -> String -> Constraints ()
 addContext s x = Constraints $ \(ConState i cs m) -> Right ((), ConState i cs $ M.insertWith union x [s] m)
 
+type Globals = Map String (Maybe Ast, Type)
+
 -- | Gathers constraints.
 -- Replaces '==' with Placeholder.
 -- Replaces data constructors with Pack.
-gather ::
-  (String -> String -> Either String Type)
-  -> Map String (Maybe Ast, Type) -> [(String, Type)]
+gather
+  :: (String -> String -> Either String Type)
+  -> Globals
+  -> [(String, Type)]
   -> Ast
   -> Constraints (Ast, Type)
 gather findExport prelude env ast = case ast of
@@ -376,21 +379,26 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
 compileMinimal :: String -> Either String [(String, (Ast, Type))]
 compileMinimal s = case parseDefs s of
   Left err -> Left $ "parse error: " ++ show err
-  Right ds -> foldM inferType [] $ map (map (\k -> (k, fromJust $ lookup k ds))) $ reverse $ scc (callees ds) $ fst <$> ds
+  Right ds -> inferType (\_ _ -> Left "no exports") preludeMinimal ds
 
-inferType :: [(String, (Ast, Type))] -> [(String, Ast)] -> Either String [(String, (Ast, Type))]
-inferType acc ds = do
-  let
-    tvs = TV . ('*':) . fst <$> ds
-    env = zip (fst <$> ds) tvs ++ map (second snd) acc
-  (bs, ConState _ cs m) <- buildConstraints $ do
-    ts <- mapM (gather (\_ _ -> Left "no exports") preludeMinimal env) $
-      snd <$> ds
-    mapM_ addConstraint $ zip tvs $ snd <$> ts
-    pure $ fst <$> ts
-  soln <- unify cs m
-  pure $ (++ acc) $ zip (fst <$> ds) $ zip (fillPlaceholders soln <$> bs) $ generalize [] . typeSolve soln <$> tvs
-  where buildConstraints (Constraints f) = f $ ConState 0 [] M.empty
+inferType
+  :: (String -> String -> Either String Type)
+  -> Globals
+  -> [(String, Ast)]
+  -> Either String [(String, (Ast, Type))]
+inferType findExport globs ds = foldM inferMutual [] $ map (map (\k -> (k, fromJust $ lookup k ds))) $ reverse $ scc (callees ds) $ fst <$> ds where
+  inferMutual :: [(String, (Ast, Type))] -> [(String, Ast)] -> Either String [(String, (Ast, Type))]
+  inferMutual acc grp = do
+    (bs, ConState _ cs m) <- buildConstraints $ do
+      ts <- mapM (gather findExport globs env) $ snd <$> grp
+      mapM_ addConstraint $ zip tvs $ snd <$> ts
+      pure $ fst <$> ts
+    soln <- unify cs m
+    pure $ (++ acc) $ zip (fst <$> grp) $ zip (fillPlaceholders soln <$> bs) $ generalize [] . typeSolve soln <$> tvs
+    where
+      buildConstraints (Constraints f) = f $ ConState 0 [] M.empty
+      tvs = TV . ('*':) . fst <$> grp
+      env = zip (fst <$> grp) tvs ++ map (second snd) acc
 
 callees :: [(String, Ast)] -> String -> [String]
 callees ds f = deps f (fromJust $ lookup f ds) where
