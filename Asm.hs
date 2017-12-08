@@ -670,9 +670,8 @@ data Node = NInt Int64 | NAp Int Int | NGlobal Int Int | NInd Int | NCon Int [In
 
 compileMk1 :: String -> Either String [(String, [Ins])]
 compileMk1 haskell = do
-  scs <- compileMinimal haskell
+  ds <- compileMinimal haskell
   let
-    ds = liftLambdas $ freeV $ second fst <$> scs
     f p i = (primName p, (arity p, i))
     funs = M.fromList $ zipWith f prims [0..] ++ zipWith (\(name, Lam as _) i -> (name, (length as, i))) ds [length prims..]
   pure $ map (\(s, d) -> (s, evalState (mk1 funs d) [])) ds

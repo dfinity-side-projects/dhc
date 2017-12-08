@@ -1,6 +1,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE PackageImports #-}
-module DHC where
+module DHC (parseContract, Ast(..), Type(..), inferType,
+  preludeMinimal, compileMinimal) where
 
 import Control.Arrow
 import Control.DeepSeq (NFData(..))
@@ -126,10 +127,6 @@ supercombinators = sc `sepBy` want ";" where
   lis = try $ do
     items <- between (want "[") (want "]") $ expr `sepBy` want ","
     pure $ foldr (\a b -> Var ":" :@ a :@ b) (Var "[]") items
-  varStr = try $ do
-    s@(h:_) <- tok
-    when (not (isLetter h) || s `elem` words "case of let where do in _ call") $ fail ""
-    pure s
   var = Var <$> varStr
   qvar = try $ do
     s <- many1 alphaNum
@@ -154,6 +151,12 @@ supercombinators = sc `sepBy` want ";" where
     pure s
   rune = c2w <$> ((char '\\' >> oneOf "\\\"") <|> noneOf "\"")
 
+varStr :: Parser String
+varStr = try $ do
+  s@(h:_) <- tok
+  when (not (isLetter h) || s `elem` words "case of let where do in _ call") $ fail ""
+  pure s
+
 want :: String -> Parser String
 want t = try $ do
   s <- tok
@@ -177,8 +180,23 @@ filler :: Parser ()
 filler = void $ many $ many1 space <|>
   (between (try $ string "--") (char '\n') $ many $ noneOf "\n")
 
+contract :: Parser ([String], [String], [(String, Ast)])
+contract = do
+  filler
+  es <- option [] $ try $ want "contract" >>
+    (between (want "(") (want ")") $ varStr `sepBy` want ",")
+  ms <- option [] $ try $ want "storage" >>
+    (between (want "(") (want ")") $ varStr `sepBy` want ",")
+  ds <- supercombinators
+  eof
+  when (isNothing $ mapM (`lookup` ds) es) $ fail "bad exports"
+  pure (es, ms, ds)
+
 parseDefs :: String -> Either ParseError [(String, Ast)]
 parseDefs = parse program ""
+
+parseContract :: String -> Either ParseError ([String], [String], [(String, Ast)])
+parseContract = parse contract "" where
 
 -- The Constraints monad combines a State monad and an Either monad.
 -- The state consists of the set of constraints and next integer available
@@ -376,10 +394,11 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
     a = GV "a"
     b = GV "b"
 
-compileMinimal :: String -> Either String [(String, (Ast, Type))]
+compileMinimal :: String -> Either String [(String, Ast)]
 compileMinimal s = case parseDefs s of
   Left err -> Left $ "parse error: " ++ show err
-  Right ds -> inferType (\_ _ -> Left "no exports") preludeMinimal ds
+  Right ds -> liftLambdas . freeV . (second fst <$>) <$>
+    inferType (\_ _ -> Left "no exports") preludeMinimal ds
 
 inferType
   :: (String -> String -> Either String Type)
@@ -406,6 +425,7 @@ callees ds f = deps f (fromJust $ lookup f ds) where
     Lam ss t | name `notElem` ss -> rec t
     -- TODO: Look for shadowed function name in case and let statements.
     -- Or add deshadowing phase.
+    Call "" v         -> [v]
     Cas x as          -> rec x ++ concatMap rec (snd <$> as)
     Let as x          -> rec x ++ concatMap rec (snd <$> as)
     x :@ y            -> rec x ++ rec y
