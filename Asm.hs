@@ -1,6 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE PackageImports #-}
-module Asm (wasm) where
+module Asm (wasm, typedAstToBin) where
 import Control.Arrow
 import "mtl" Control.Monad.State
 import qualified Data.Map as M
@@ -175,71 +175,81 @@ prims = mkPrim <$>
   where mkPrim (s, as) = Prim { primName = s, arity = 2, primAsm = as }
 
 wasm :: String -> Either String [Int]
-wasm prog = do
-  m <- compileMk1 prog
-  let
-    -- Function 0: import function which we send our outputs.
-    -- Function 1: Eval.
-    -- Afterwards, the primitive functions, then the functions in the program.
-    fs = evalAsm (length prims + length m) : (primAsm <$> prims)
-      ++ ((++ [End]) . concatMap fromIns . snd <$> m)
-    sect t xs = t : lenc (varlen xs ++ concat xs)
-  pure $ concat
-    [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
-    , sect 1 [encSig [TypeI32, TypeI32] [], encSig [] []]  -- Type section.
-    -- Import section.
-    -- [0, 0] = external_kind Function, index 0.
-    , sect 2 [encStr "i" ++ encStr "f" ++ [0, 0]]
-    , sect 3 $ replicate (length fs + 1) [1]  -- Function section.
-    , sect 5 [[0, nPages]]  -- Memory section (0 = no-maximum).
-    , sect 6  -- Global section (1 = mutable).
-      [ [encType TypeI32, 1, 0x41] ++ leb128 (65536*nPages - 4) ++ [0xb]  -- SP
-      , [encType TypeI32, 1, 0x41, 0, 0xb]  -- HP
-      , [encType TypeI32, 1, 0x41, 0, 0xb]  -- BP
-      ]
-    -- Export section.
-    -- [0, n] = external_kind Function, index n.
-    , sect 7 [encStr "e" ++ [0, length fs + 1]]
-    , sect 10 $ encProcedure <$> (fs ++  -- Code section.
-      --[[ WasmCall $ 2 + length prims + (fromJust $ elemIndex "run" $ fst <$> m)
-      [fromIns (PushGlobal 0 $ length prims + (fromJust $ elemIndex "run" $ fst <$> m)) ++
-      [ WasmCall 1
-      , GetGlobal sp
-      , I32Const 4
-      , I32Add
-      , I32Load
-      , SetGlobal bp
-      , Block
-      , Block
-      , GetGlobal bp
-      , I32Load
-      , BrTable [2, 2, 2, 0, 1, 2]  -- Branch on Tag.
-      , End  -- Int.
-      , GetGlobal bp  -- High bits.
-      , I32Const 8
-      , I32Add
-      , I64Load
-      , I64Const 32
-      , I64ShrU
-      , I32WrapI64
-      , GetGlobal bp  -- Low bits.
-      , I32Const 8
-      , I32Add
-      , I64Load
-      , I32WrapI64
-      , WasmCall 0
-      , Br 1
-      , End  -- Sum (enum).
-      , I32Const 0
-      , GetGlobal bp
-      , I32Const 4
-      , I32Add
-      , I32Load
-      , WasmCall 0
-      , End
-      ]])
+wasm prog = insToBin <$> compileMk1 prog
+
+compileMk1 :: String -> Either String [(String, [Ins])]
+compileMk1 haskell = astToIns <$> compileMinimal haskell
+
+astToIns :: [(String, Ast)] -> [(String, [Ins])]
+astToIns ds = map (\(s, d) -> (s, evalState (mk1 funs d) [])) ds where
+  ps = zipWith (\p i -> (primName p, (arity p, i))) prims [0..]
+  funs = M.fromList $ ps ++ zipWith (\(name, Lam as _) i -> (name, (length as, i))) ds [length prims..]
+
+typedAstToBin :: [(String, (Ast, Type))] -> [Int]
+typedAstToBin = insToBin . astToIns . liftLambdas . (second fst <$>)
+
+insToBin :: [(String, [Ins])] -> [Int]
+insToBin m = concat
+  [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
+  , sect 1 [encSig [TypeI32, TypeI32] [], encSig [] []]  -- Type section.
+  -- Import section.
+  -- [0, 0] = external_kind Function, index 0.
+  , sect 2 [encStr "i" ++ encStr "f" ++ [0, 0]]
+  , sect 3 $ replicate (length fs + 1) [1]  -- Function section.
+  , sect 5 [[0, nPages]]  -- Memory section (0 = no-maximum).
+  , sect 6  -- Global section (1 = mutable).
+    [ [encType TypeI32, 1, 0x41] ++ leb128 (65536*nPages - 4) ++ [0xb]  -- SP
+    , [encType TypeI32, 1, 0x41, 0, 0xb]  -- HP
+    , [encType TypeI32, 1, 0x41, 0, 0xb]  -- BP
     ]
-  where
+  -- Export section.
+  -- [0, n] = external_kind Function, index n.
+  , sect 7 [encStr "e" ++ [0, length fs + 1]]
+  , sect 10 $ encProcedure <$> (fs ++  -- Code section.
+    --[[ WasmCall $ 2 + length prims + (fromJust $ elemIndex "run" $ fst <$> m)
+    [fromIns (PushGlobal 0 $ length prims + (fromJust $ elemIndex "run" $ fst <$> m)) ++
+    [ WasmCall 1
+    , GetGlobal sp
+    , I32Const 4
+    , I32Add
+    , I32Load
+    , SetGlobal bp
+    , Block
+    , Block
+    , GetGlobal bp
+    , I32Load
+    , BrTable [2, 2, 2, 0, 1, 2]  -- Branch on Tag.
+    , End  -- Int.
+    , GetGlobal bp  -- High bits.
+    , I32Const 8
+    , I32Add
+    , I64Load
+    , I64Const 32
+    , I64ShrU
+    , I32WrapI64
+    , GetGlobal bp  -- Low bits.
+    , I32Const 8
+    , I32Add
+    , I64Load
+    , I32WrapI64
+    , WasmCall 0
+    , Br 1
+    , End  -- Sum (enum).
+    , I32Const 0
+    , GetGlobal bp
+    , I32Const 4
+    , I32Add
+    , I32Load
+    , WasmCall 0
+    , End
+    ]])
+  ] where
+  -- Function 0: import function which we send our outputs.
+  -- Function 1: Eval.
+  -- Afterwards, the primitive functions, then the functions in the program.
+  fs = evalAsm (length prims + length m) : (primAsm <$> prims)
+    ++ ((++ [End]) . concatMap fromIns . snd <$> m)
+  sect t xs = t : lenc (varlen xs ++ concat xs)
   encStr s = lenc $ ord <$> s
   encProcedure = lenc . (0:) . concatMap encWasmOp
   encType TypeI32 = 0x7f
@@ -667,14 +677,6 @@ fromApList (a :@ b) = fromApList a ++ [b]
 fromApList a = [a]
 
 data Node = NInt Int64 | NAp Int Int | NGlobal Int Int | NInd Int | NCon Int [Int] deriving Show
-
-compileMk1 :: String -> Either String [(String, [Ins])]
-compileMk1 haskell = do
-  ds <- compileMinimal haskell
-  let
-    f p i = (primName p, (arity p, i))
-    funs = M.fromList $ zipWith f prims [0..] ++ zipWith (\(name, Lam as _) i -> (name, (length as, i))) ds [length prims..]
-  pure $ map (\(s, d) -> (s, evalState (mk1 funs d) [])) ds
 
 -- | Test that interprets G-Machine instructions.
 testmk1 :: IO ()

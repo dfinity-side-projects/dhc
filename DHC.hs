@@ -1,7 +1,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE PackageImports #-}
 module DHC (parseContract, Ast(..), Type(..), inferType,
-  preludeMinimal, compileMinimal) where
+  preludeMinimal, compileMinimal, liftLambdas) where
 
 import Control.Arrow
 import Control.DeepSeq (NFData(..))
@@ -397,7 +397,7 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
 compileMinimal :: String -> Either String [(String, Ast)]
 compileMinimal s = case parseDefs s of
   Left err -> Left $ "parse error: " ++ show err
-  Right ds -> liftLambdas . freeV . (second fst <$>) <$>
+  Right ds -> liftLambdas . (second fst <$>) <$>
     inferType (\_ _ -> Left "no exports") preludeMinimal ds
 
 inferType
@@ -482,9 +482,9 @@ caseVars (Var v) = [v]
 caseVars (x :@ y) = caseVars x `union` caseVars y
 caseVars _ = []
 
-liftLambdas :: [(String, AnnAst [String])] -> [(String, Ast)]
+liftLambdas :: [(String, Ast)] -> [(String, Ast)]
 liftLambdas scs = existingDefs ++ newDefs where
-  (existingDefs, (_, newDefs)) = runState (mapM f scs) ([], [])
+  (existingDefs, (_, newDefs)) = runState (mapM f $ freeV scs) ([], [])
   f (s, (_, AnnLam args body)) = do
     modify $ first $ const [s]
     body1 <- g body
