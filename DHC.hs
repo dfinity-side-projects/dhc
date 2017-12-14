@@ -379,6 +379,10 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
   , ("mod", TC "Int" :-> TC "Int" :-> TC "Int")
   , ("<", TC "Int" :-> TC "Int" :-> TC "Bool")
   , (">", TC "Int" :-> TC "Int" :-> TC "Bool")
+  , ("<=", TC "Int" :-> TC "Int" :-> TC "Bool")
+  , (">=", TC "Int" :-> TC "Int" :-> TC "Bool")
+  , ("&&", TC "Bool" :-> TC "Bool" :-> TC "Bool")
+  , ("||", TC "Bool" :-> TC "Bool" :-> TC "Bool")
   ]) ++
   [ ("False",   (jp 0 0, TC "Bool"))
   , ("True",    (jp 1 0, TC "Bool"))

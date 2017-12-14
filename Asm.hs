@@ -21,6 +21,44 @@ data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal String
 nPages :: Int
 nPages = 8
 
+-- | Data on the heap is 64-bit aligned. The first 8 bits hold a tag.
+--
+-- The following tables describe the field at a given offset of an object
+-- on the heap. All fields are 32 bits wide except the value field of a 64-bit
+-- integer type.
+--
+-- Int64s:
+--    0 TagInt
+--    8 64-bit value
+--
+-- Coproduct (sum) types:
+--    0 TagSum
+--    4 Enum
+--    8, 12.. Heap addresses of components.
+--
+-- Application `f x`.
+--    0 TagAp
+--    4 Unused
+--    8 f
+--   12 x
+--
+-- Global function:
+--    0 TagGlobal | (arity << 8)
+--    4 Function index
+--
+-- Indirection:
+--    0 TagInd
+--    4 Heap address of target
+--
+-- For example, `Just 42` is represented by:
+--
+--   [TagSum, 1, p], where p points to [TagInt, 0, 42]
+--
+-- where each list item is a 32-bit integer.
+--
+-- Globals are resolved in a giant `br_table`. This avoids the run-time type
+-- checking of the table, but ugly.
+
 data Tag = TagAp | TagInd | TagGlobal | TagInt | TagSum deriving Enum
 
 type WasmOp = Op
@@ -86,8 +124,8 @@ intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
   ] ++ fromIns (UpdatePop 2) ++ [Call 1, End]
 
 cmpAsm :: WasmOp -> [WasmOp]
-cmpAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval ] ++
-  [ Get_global hp  -- [hp] = Int
+cmpAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
+  [ Get_global hp  -- [hp] = Sum
   , I32_const $ fromIntegral $ fromEnum TagSum
   , I32_store 2 0
   -- [hp + 4] = [[sp + 4] + 8] == [[sp + 8] + 8]
@@ -125,6 +163,46 @@ cmpAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval ] ++
   , Set_global hp
   ] ++ fromIns (UpdatePop 2) ++ [Call 1, End]
 
+boolAsm :: WasmOp -> [WasmOp]
+boolAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
+  [ Get_global hp  -- [hp] = Sum
+  , I32_const $ fromIntegral $ fromEnum TagSum
+  , I32_store 2 0
+  -- [hp + 4] = [[sp + 4] + 4] `op` [[sp + 8] + 4]
+  , Get_global hp
+  , I32_const 4
+  , I32_add
+  , Get_global sp
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , Get_global sp
+  , I32_const 8
+  , I32_add
+  , I32_load 2 0
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , op
+  , I32_store 2 0
+  , Get_global sp  -- [sp + 8] = hp
+  , I32_const 8
+  , I32_add
+  , Get_global hp
+  , I32_store 2 0
+  , Get_global sp  -- sp = sp + 4
+  , I32_const 4
+  , I32_add
+  , Set_global sp
+  , Get_global hp  -- hp = hp + 8
+  , I32_const 8
+  , I32_add
+  , Set_global hp
+  ] ++ fromIns (UpdatePop 2) ++ [Call 1, End]
+
 -- Primitive functions.
 data Prim = Prim
   { primName :: String
@@ -142,6 +220,10 @@ prims = mkPrim <$>
   , ("Int-==", cmpAsm I64_eq)
   , ("<", cmpAsm I64_lt_s)
   , (">", cmpAsm I64_gt_s)
+  , ("<=", cmpAsm I64_le_s)
+  , (">=", cmpAsm I64_ge_s)
+  , ("&&", boolAsm I32_and)
+  , ("||", boolAsm I32_or)
   ]
   where mkPrim (s, as) = Prim { primName = s, arity = 2, primAsm = as }
 
