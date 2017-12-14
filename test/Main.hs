@@ -1,20 +1,19 @@
 import Data.Int
-import Data.List
 import qualified Data.Map as M
 import Data.Maybe
 import Test.HUnit
 import Asm
 
-data Node = NInt Int64 | NAp Int Int | NGlobal Int Int | NInd Int | NCon Int [Int] deriving Show
+data Node = NInt Int64 | NAp Int Int | NGlobal Int String | NInd Int | NCon Int [Int] deriving Show
 
 -- | Interprets G-Machine instructions.
 gmachine :: String -> String
-gmachine prog = go (Right <$> [PushGlobal 0 runIndex, Eval]) [] M.empty where
+gmachine prog = go (Right <$> [PushGlobal "main", Eval]) [] M.empty where
   drop' n as | n > length as = error "BUG!"
              | otherwise     = drop n as
-  Right m = compileMk1 prog
-  runIndex = fromJust (elemIndex "main" $ fst <$> m) + primCount
-  go (fOrIns:rest) s h = either primFun exec fOrIns where
+  Right (funs, m) = compileMk1 prog
+  arity v = fst $ funs M.! v
+  go (fOrIns:rest) s h = either prim exec fOrIns where
     k = M.size h
     heapAdd x = M.insert k x h
     intInt f = go rest (k:srest) $ heapAdd $ NInt $ f x y where
@@ -25,20 +24,20 @@ gmachine prog = go (Right <$> [PushGlobal 0 runIndex, Eval]) [] M.empty where
       (s0:s1:srest) = s
       NInt x = h M.! s0
       NInt y = h M.! s1
-    primFun 0 = intInt (+)
-    primFun 1 = intInt (-)
-    primFun 2 = intInt (*)
-    primFun 3 = intInt div
-    primFun 4 = intInt mod
-    primFun 5 = intCmp (==)
-    primFun 6 = intCmp (<)
-    primFun 7 = intCmp (>)
-    primFun _ = error "unsupported"
+    prim "+" = intInt (+)
+    prim "-" = intInt (-)
+    prim "*" = intInt (*)
+    prim "div" = intInt div
+    prim "mod" = intInt mod
+    prim "Int-==" = intCmp (==)
+    prim "<" = intCmp (<)
+    prim ">" = intCmp (>)
+    prim g   = error $ "unsupported: " ++ g
     exec ins = case ins of
       Trap -> "UNREACHABLE"
       PushInt n -> go rest (k:s) $ heapAdd $ NInt n
       Push n -> go rest (s!!n:s) h
-      PushGlobal a b -> go rest (k:s) $ heapAdd $ NGlobal a b
+      PushGlobal v -> go rest (k:s) $ heapAdd $ NGlobal (arity v) v
       MkAp -> let (s0:s1:srest) = s in go rest (k:srest) $ heapAdd $ NAp s0 s1
       UpdateInd n -> go rest (tail s) $ M.insert (s!!(n + 1)) (NInd $ head s) h
       UpdatePop n -> go rest (drop' (n + 1) s) $ M.insert (s!!(n + 1)) (NInd $ head s) h
@@ -53,15 +52,15 @@ gmachine prog = go (Right <$> [PushGlobal 0 runIndex, Eval]) [] M.empty where
         NInd i -> go (Right Eval:rest) (i:tail s) h
         NAp a _ -> go (Right Eval:rest) (a:s) h
         NGlobal n g -> let
-          p = if g >= 8 then Right <$> snd (m!!(g - 8)) else
-            (Right <$> [Push 1, Eval, Push 1, Eval]) ++
-            [Left g, Right $ UpdatePop 2, Right Eval]
+          p = case lookup g m of
+            Just is -> Right <$> is
+            Nothing -> (Right <$> [Push 1, Eval, Push 1, Eval]) ++
+              [Left g, Right $ UpdatePop 2, Right Eval]
           debone i = r where NAp _ r = h M.! i
           in go (p ++ rest) ((debone <$> take n (tail s)) ++ drop' n s) h
         _ -> go rest s h
       Casejump alts -> let
         x = case h M.! head s of
-          NInt n -> n
           NCon n _ -> fromIntegral n
           _ -> undefined
         body = case lookup (Just x) alts of

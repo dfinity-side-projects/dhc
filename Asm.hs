@@ -1,6 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE PackageImports #-}
-module Asm (wasm, typedAstToBin, compileMk1, Ins(..), primCount) where
+module Asm (wasm, typedAstToBin, compileMk1, Ins(..)) where
 import Control.Arrow
 import "mtl" Control.Monad.State
 import qualified Data.Map as M
@@ -13,7 +13,7 @@ import DHC hiding (Call, Type)
 import WasmOp
 
 -- | G-Machine instructions.
-data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal Int Int
+data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal String
   | MkAp | Slide Int | Split Int | Eval
   | UpdatePop Int | UpdateInd Int | Alloc Int
   | Casejump [(Maybe Int, [Ins])] | Trap deriving Show
@@ -145,28 +145,33 @@ prims = mkPrim <$>
   ]
   where mkPrim (s, as) = Prim { primName = s, arity = 2, primAsm = as }
 
-primCount :: Int
-primCount = length prims
-
 wasm :: String -> Either String [Int]
-wasm prog = insToBin <$> compileMk1 prog
+wasm prog = uncurry insToBin <$> compileMk1 prog
 
-compileMk1 :: String -> Either String [(String, [Ins])]
+compileMk1 :: String -> Either String (GlobalTable, [(String, [Ins])])
 compileMk1 haskell = astToIns <$> compileMinimal haskell
 
-astToIns :: [(String, Ast)] -> [(String, [Ins])]
-astToIns ds = map (\(s, d) -> (s, evalState (mk1 funs d) [])) ds where
+type GlobalTable = M.Map String (Int, Int)
+
+astToIns :: [(String, Ast)] -> (GlobalTable, [(String, [Ins])])
+astToIns ds = (funs, map (\(s, d) -> (s, evalState (mk1 d) [])) ds) where
   ps = zipWith (\p i -> (primName p, (arity p, i))) prims [0..]
-  funs = M.fromList $ ps ++ zipWith (\(name, Lam as _) i -> (name, (length as, i))) ds [primCount..]
+  funs = M.fromList $ ps ++ zipWith (\(name, Lam as _) i -> (name, (length as, i))) ds [length prims..]
 
 typedAstToBin :: [(String, (Ast, Type))] -> [Int]
-typedAstToBin = insToBin . astToIns . liftLambdas . (second fst <$>)
+typedAstToBin = uncurry insToBin . astToIns . liftLambdas . (second fst <$>)
 
 tag_const :: Tag -> Op
 tag_const = I32_const . fromIntegral . fromEnum
 
-insToBin :: [(String, [Ins])] -> [Int]
-insToBin m = concat
+-- | Returns arity and index of given global function.
+getGlobal :: GlobalTable -> String -> (Int, Int)
+getGlobal funs v = case M.lookup v funs of
+  Nothing -> error $ "no such global: " ++ v
+  Just (i, j) -> (i, j)
+
+insToBin :: GlobalTable -> [(String, [Ins])] -> [Int]
+insToBin funs m = concat
   [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
   , sect 1 [encSig [I32, I32] [], encSig [] []]  -- Type section.
   -- Import section.
@@ -183,7 +188,7 @@ insToBin m = concat
   -- [0, n] = external_kind Function, index n.
   , sect 7 [encStr "e" ++ [0, length fs + 1]]
   , sect 10 $ encProcedure <$> (fs ++  -- Code section.
-    [fromIns (PushGlobal 0 $ primCount + (fromJust $ elemIndex "run" $ fst <$> m)) ++
+    [fromInsWith (getGlobal funs) (PushGlobal "run") ++
     [ Call 1
     , Get_global sp
     , I32_const 4
@@ -223,8 +228,8 @@ insToBin m = concat
   -- Function 0: import function which we send our outputs.
   -- Function 1: Eval.
   -- Afterwards, the primitive functions, then the functions in the program.
-  fs = evalAsm (primCount + length m) : (primAsm <$> prims)
-    ++ ((++ [End]) . concatMap fromIns . snd <$> m)
+  fs = evalAsm (length prims + length m) : (primAsm <$> prims)
+    ++ ((++ [End]) . concatMap (fromInsWith $ getGlobal funs) . snd <$> m)
   sect t xs = t : lenc (varlen xs ++ concat xs)
   encStr s = lenc $ ord <$> s
   encProcedure = lenc . (0:) . concatMap encWasmOp
@@ -342,7 +347,10 @@ bp :: Int
 bp = 2
 
 fromIns :: Ins -> [WasmOp]
-fromIns instruction = case instruction of
+fromIns = fromInsWith (error . show)
+
+fromInsWith :: (String -> (Int, Int)) -> Ins -> [WasmOp]
+fromInsWith lookupGlobal instruction = case instruction of
   Trap -> [ Unreachable ]
   Eval -> [ Call 1 ]  -- (Tail call.)
   PushInt n ->
@@ -412,7 +420,7 @@ fromIns instruction = case instruction of
     , I32_add
     , Set_global hp
     ]
-  PushGlobal n g ->
+  PushGlobal fun | (n, g) <- lookupGlobal fun ->
     [ Get_global sp  -- [sp] = hp
     , Get_global hp
     , I32_store 2 0
@@ -545,7 +553,7 @@ fromIns instruction = case instruction of
       catchall = if null underscore then [Trap] else snd $ head underscore
       tab = zip (fromJust . fst <$> alts) [0..]
       m = maximum $ fromJust . fst <$> alts
-      nest j (ins:rest) = pure $ Block Nada $ nest (j + 1) rest ++ concatMap fromIns ins ++ [Br j]
+      nest j (ins:rest) = pure $ Block Nada $ nest (j + 1) rest ++ concatMap (fromInsWith lookupGlobal) ins ++ [Br j]
       nest _ [] = pure $ Block Nada
         [ Get_global bp  -- [bp + 4]
         , I32_const 4
@@ -553,7 +561,7 @@ fromIns instruction = case instruction of
         , I32_load 2 0
         , Br_table [fromIntegral $ fromMaybe (length alts) $ lookup i tab | i <- [0..m]] $ m + 1
         ]
-    in if null alts then concatMap fromIns catchall else
+    in if null alts then concatMap (fromInsWith lookupGlobal) catchall else
     -- [sp + 4] should be:
     -- 0: TagSum
     -- 4: "Enum"
@@ -563,7 +571,7 @@ fromIns instruction = case instruction of
     , I32_add
     , I32_load 2 0
     , Set_global bp
-    , Block Nada $ nest 1 (reverse $ snd <$> alts) ++ concatMap fromIns catchall
+    , Block Nada $ nest 1 (reverse $ snd <$> alts) ++ concatMap (fromInsWith lookupGlobal) catchall
     ]
 
   Split 0 -> [Get_global sp, I32_const 4, I32_add, Set_global sp]
@@ -593,16 +601,16 @@ fromIns instruction = case instruction of
     , Set_global sp
     ]
 
-mk1 :: M.Map String (Int, Int) -> Ast -> State [(String, Int)] [Ins]
-mk1 funs ast = case ast of
+mk1 :: Ast -> State [(String, Int)] [Ins]
+mk1 ast = case ast of
   Lam as b -> do
     modify' $ \bs -> zip as [length bs..] ++ bs
-    (++ [UpdatePop $ length as, Eval]) <$> rec b
+    (++ [UpdatePop $ length as, Eval]) <$> mk1 b
   I n -> pure [PushInt n]
   t :@ u -> do
-    mu <- rec u
+    mu <- mk1 u
     bump 1
-    mt <- rec t
+    mt <- mk1 t
     bump (-1)
     pure $ case last mt of
       Copro _ _ -> mu ++ mt
@@ -611,27 +619,25 @@ mk1 funs ast = case ast of
     m <- get
     pure $ case lookup v m of
       Just k -> [Push k]
-      Nothing -> case M.lookup v funs of
-        Nothing -> error $ "no such global: " ++ v
-        Just (i, j) -> [PushGlobal i j]
+      Nothing -> [PushGlobal v]
   Pack n m -> pure [Copro n m]
   Cas expr alts -> do
-    me <- rec expr
+    me <- mk1 expr
     xs <- forM alts $ \(p, body) -> do
       orig <- get  -- Save state.
       (f, b) <- case fromApList p of
         [I n] -> do  -- TODO: Rewrite as equality check.
           bump 1
-          (,) (Just $ fromIntegral n) . (++ [Slide 1]) <$> rec body
+          (,) (Just $ fromIntegral n) . (++ [Slide 1]) <$> mk1 body
         (Pack n _:vs) -> do
           bump $ length vs
           modify' (zip (map (\(Var v) -> v) vs) [0..] ++)
-          bod <- rec body
+          bod <- mk1 body
           pure (Just $ fromIntegral n, Split (length vs) : bod ++ [Slide (length vs)])
         [Var s] -> do
           bump 1
           modify' $ \bs -> (s, 0):bs
-          (,) Nothing . (++ [Slide 1]) <$> rec body
+          (,) Nothing . (++ [Slide 1]) <$> mk1 body
         _ -> undefined
       put orig  -- Restore state.
       pure (f, b)
@@ -640,13 +646,12 @@ mk1 funs ast = case ast of
     orig <- get  -- Save state.
     bump n
     modify' (zip (fst <$> ds) [n-1,n-2..0] ++)
-    dsAsm <- mapM rec $ snd <$> ds
-    b <- rec body
+    dsAsm <- mapM mk1 $ snd <$> ds
+    b <- mk1 body
     put orig  -- Restore state.
     pure $ Alloc n : concat (zipWith (++) dsAsm (pure . UpdateInd <$> [n-1,n-2..0])) ++ b ++ [Slide n]
   _ -> error $ "TODO: compile: " ++ show ast
   where
-    rec = mk1 funs
     bump n = modify' $ map $ second (+n)
 
 fromApList :: Ast -> [Ast]
