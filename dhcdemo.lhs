@@ -35,8 +35,9 @@ enumFromTo a b = (case a > b of True -> []; False -> a : enumFromTo (a + 1) b);
 map f = foldr (\x xs -> f x:xs) [];
 tenTimes x = 10 * x;
 f rec n = (case n == 0 of True -> 0; False -> rec (n - 1) + 2*n - 1);
+f $ x = f x;
 run = let {fixedf = f fixedf} in fixedf 100 +
-  uncurry (+) (factorial 5, sum (map tenTimes [1..5]))
+  uncurry (+) (factorial 5, sum $ map tenTimes [1..5])
 </textarea></p>
 <button id="go">Compile & Run!</button>
 <p><textarea id="asm" readonly rows="5" cols="80">

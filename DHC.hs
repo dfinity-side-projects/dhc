@@ -70,20 +70,61 @@ program = do
   eof
   pure defs
 
+data Associativity = LAssoc | RAssoc | NAssoc deriving (Eq, Show)
+
+standardFixities :: Map String (Associativity, Int)
+standardFixities = M.fromList $ concatMap (f . words)
+  [ "infixl 9 !!"
+  , "infixr 9 ."
+  , "infixr 8 ^ ^^ **"
+  , "infixl 7 * / div mod rem quot"
+  , "infixl 6 + -"
+  , "infixr 5 : ++"
+  , "infix 4 == /= < <= > >= elem notElem"
+  , "infixr 3 &&"
+  , "infixr 2 ||"
+  , "infixl 1 >> >>="
+  , "infixr 0 $ $! seq"
+  ]
+  where
+    f (assoc:prec:ops) = flip (,) (parseAssoc assoc, read prec) <$> ops
+    f _ = undefined
+    parseAssoc "infix"  = NAssoc
+    parseAssoc "infixl" = LAssoc
+    parseAssoc "infixr" = RAssoc
+    parseAssoc _ = error "BUG! bad associativity"
+
+fixity :: String -> (Associativity, Int)
+fixity o = fromMaybe (LAssoc, 9) $ M.lookup o standardFixities
+
 supercombinators :: Parser [(String, Ast)]
 supercombinators = sc `sepBy` want ";" where
   sc = do
-    (fun:args) <- many1 varStr
+    (fun:args) <- scOp <|> many1 varStr
     void $ want "="
     (,) fun . Lam args <$> expr
-  expr = caseExpr <|> letExpr <|>
-    molecule `chainr1` chop "." `chainr1` chop "^"
-      `chainl1` chop "*/" `chainl1` chop "+-"
-      `chainr1` sop [":", "++"]
-      `chainl1` sop ["<", ">", "<=", ">=", "==", "/="]
-      `chainl1` sop ["&&"]
-      `chainl1` sop ["||"]
-      `chainl1` sop [">>", ">>="]
+  scOp = try $ do
+    l <- varStr
+    op <- opTok
+    r <- varStr
+    pure [op, l, r]
+  expr = caseExpr <|> letExpr <|> bin 0 False
+  bin 10 _ = molecule
+  bin prec isR = rec False =<< bin (prec + 1) False where
+    rec isL m = (try $ do
+      o <- opTok <|> between (char '`') (want "`") varStr
+      let (a, p) = fixity o
+      when (p /= prec) $ fail ""
+      case a of
+        LAssoc -> do
+          when isR $ fail "same precedence, mixed associativity"
+          n <- bin (prec + 1) False
+          rec True $ Var o :@ m :@ n
+        NAssoc -> (Var o :@ m :@) <$> bin (prec + 1) False
+        RAssoc -> do
+          when isL $ fail "same precedence, mixed associativity"
+          (Var o :@ m :@) <$> bin prec True
+      ) <|> pure m
   letDefn = do
     s <- varStr
     void $ want "="
@@ -103,12 +144,6 @@ supercombinators = sc `sepBy` want ";" where
     void $ want "->"
     x <- expr
     pure $ (p, x)
-  chop xs = try $ do
-    s <- foldl1' (<|>) $ map (want . pure) xs
-    pure $ \x y -> Var s :@ x :@ y
-  sop xs = try $ do
-    s <- foldl1' (<|>) $ want <$> xs
-    pure $ \x y -> Var s :@ x :@ y
   molecule = lambda <|> foldl1' (:@) <$> many1 atom
   atom = preOp <|> tup <|> call <|> qvar <|> var <|> num <|> str
     <|> lis <|> enumLis
@@ -145,10 +180,7 @@ supercombinators = sc `sepBy` want ";" where
     s <- tok
     unless (all isDigit s) $ fail ""
     pure $ I $ read s
-  str = do
-    s <- try <$> between (char '"') (char '"') $ S . pack <$> many rune
-    filler
-    pure s
+  str = eatFiller $ try <$> between (char '"') (char '"') $ S . pack <$> many rune
   rune = c2w <$> ((char '\\' >> oneOf "\\\"") <|> noneOf "\"")
 
 varStr :: Parser String
@@ -163,18 +195,22 @@ want t = try $ do
   unless (s == t) $ fail $ "expected " ++ t
   pure s
 
+rawOpTok :: Parser String
+rawOpTok = eatFiller $ many1 (oneOf "\\:!+-/*^><=.&|@#$%")
+
 opTok :: Parser String
 opTok = do
-  s <- many1 (oneOf "\\:!+-/*^><=$.&|")
-  filler
+  s <- rawOpTok
+  when (s `elem` ["->", "="]) $ fail ""
   pure s
 
 tok :: Parser String
-tok = opTok <|> do
-  s <- many1 (alphaNum <|> char '_') <|>
-       foldl1' (<|>) (string . pure <$> ";()[]{},")
-  filler
-  pure s
+tok = rawOpTok <|> eatFiller (many1 (alphaNum <|> char '_') <|>
+       foldl1' (<|>) (string . pure <$> ";()[]{},"))
+
+-- | Eats trailing whitespace and comments.
+eatFiller :: Parser a -> Parser a
+eatFiller = (>>= (filler >>) . pure)
 
 filler :: Parser ()
 filler = void $ many $ many1 space <|>
