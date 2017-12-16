@@ -368,14 +368,22 @@ subst (x, t) ty = case ty of
   TV y | x == y -> t
   _             -> ty
 
+-- | The second line of the `instantiateTyvar` function of
+-- "Implementing type classes".
 typeClass :: String -> Type -> Map String [String] -> Either String (Map String [String])
-typeClass x (TV y) m = Right $
-  M.insertWith union y (fromMaybe [] $ M.lookup x m) m
-typeClass x t m
-  | Just ["Eq"] <- M.lookup x m = if t == TC "Int" || t == TC "String"
-    then Right m
-    else Left $ "no Eq instance: " ++ show t
-  | otherwise = Right m
+typeClass x t m = execStateT (propagate cs t) m where
+  cs = fromMaybe [] $ M.lookup x m
+
+-- | The `propagateClasses` and `propagateClassTyCon` functions,
+propagate :: [String] -> Type -> StateT (Map String [String]) (Either String) ()
+propagate cs (TV y) = modify' $ M.insertWith union y cs
+propagate cs t = mapM_ propagateTyCon cs where
+  propagateTyCon "Eq" = case t of
+    TC "Int" -> pure ()
+    TC "String" -> pure ()
+    (TApp (TC "List") a) -> propagate ["Eq"] a
+    _ -> lift $ Left $ "no Eq instance: " ++ show t
+  propagateTyCon c = error $ "TODO: " ++ c
 
 fillPlaceholders :: [(String, Type)] -> Ast -> Ast
 fillPlaceholders soln ast = case ast of
@@ -385,7 +393,7 @@ fillPlaceholders soln ast = case ast of
   Placeholder "==" t -> case typeSolve soln t of
     TC "String" -> Var "String-=="
     TC "Int"    -> Var "Int-=="
-    e -> error $ "want String or Int; got " ++ show e
+    e -> error $ "BUG! no Eq for " ++ show e
   _       -> ast
   where rec = fillPlaceholders soln
 
