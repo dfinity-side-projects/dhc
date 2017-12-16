@@ -368,23 +368,6 @@ subst (x, t) ty = case ty of
   TV y | x == y -> t
   _             -> ty
 
--- | The second line of the `instantiateTyvar` function of
--- "Implementing type classes".
-typeClass :: String -> Type -> Map String [String] -> Either String (Map String [String])
-typeClass x t m = execStateT (propagate cs t) m where
-  cs = fromMaybe [] $ M.lookup x m
-
--- | The `propagateClasses` and `propagateClassTyCon` functions,
-propagate :: [String] -> Type -> StateT (Map String [String]) (Either String) ()
-propagate cs (TV y) = modify' $ M.insertWith union y cs
-propagate cs t = mapM_ propagateTyCon cs where
-  propagateTyCon "Eq" = case t of
-    TC "Int" -> pure ()
-    TC "String" -> pure ()
-    (TApp (TC "List") a) -> propagate ["Eq"] a
-    _ -> lift $ Left $ "no Eq instance: " ++ show t
-  propagateTyCon c = error $ "TODO: " ++ c
-
 fillPlaceholders :: [(String, Type)] -> Ast -> Ast
 fillPlaceholders soln ast = case ast of
   u :@ v  -> rec u :@ rec v
@@ -400,19 +383,34 @@ fillPlaceholders soln ast = case ast of
 typeSolve :: [(String, Type)] -> Type -> Type
 typeSolve soln t = foldl' (flip subst) t soln
 
+-- | The `propagateClasses` and `propagateClassTyCon` functions,
+propagate :: [String] -> Type -> StateT (Map String [String]) (Either String) ()
+propagate cs (TV y) = modify' $ M.insertWith union y cs
+propagate cs t = mapM_ propagateTyCon cs where
+  propagateTyCon "Eq" = case t of
+    TC "Int" -> pure ()
+    TC "String" -> pure ()
+    (TApp (TC "List") a) -> propagate ["Eq"] a
+    _ -> lift $ Left $ "no Eq instance: " ++ show t
+  propagateTyCon c = error $ "TODO: " ++ c
+
 -- TODO: Apply substitutions for friendlier messages.
-unify :: [(Type, Type)] -> Map String [String] -> Either String [(String, Type)]
-unify [] _ = Right []
-unify ((GV _, _):_) _ = Left "BUG! generalized variable in constraint"
-unify ((_, GV _):_) _ = Left "BUG! generalized variable in constraint"
-unify ((s, t):cs) m | s == t = unify cs m
-unify ((TV x, t):cs) m
-  | x `elem` freeTV t = Left $ "infinite: " ++ x ++ " = " ++ show t
-  | otherwise         = typeClass x t m >>= (\m1 -> ((x, t):) <$> unify (join (***) (subst (x, t)) <$> cs) m1)
-unify ((s, t@(TV _)):cs) m = unify ((t, s):cs) m
-unify ((TApp s1 s2, TApp t1 t2):cs) m = unify ((s1, t1):(s2, t2):cs) m
-unify (( s1 :-> s2, t1 :-> t2):cs)  m = unify ((s1, t1):(s2, t2):cs) m
-unify ((s, t):_) _    = Left $ "mismatch: " ++ show s ++ " /= " ++ show t
+unify :: [(Type, Type)] -> StateT (Map String [String]) (Either String) [(String, Type)]
+unify [] = pure []
+unify ((GV _, _):_) = lift $ Left "BUG! generalized variable in constraint"
+unify ((_, GV _):_) = lift $ Left "BUG! generalized variable in constraint"
+unify ((s, t):cs) | s == t = unify cs
+unify ((TV x, t):cs)
+  | x `elem` freeTV t = lift $ Left $ "infinite: " ++ x ++ " = " ++ show t
+  | otherwise         = do
+    -- | The `instantiateTyvar` function of "Implementing type classes".
+    m <- get
+    propagate (fromMaybe [] $ M.lookup x m) t
+    fmap ((x, t):) $ unify $ join (***) (subst (x, t)) <$> cs
+unify ((s, t@(TV _)):cs) = unify ((t, s):cs)
+unify ((TApp s1 s2, TApp t1 t2):cs) = unify ((s1, t1):(s2, t2):cs)
+unify (( s1 :-> s2, t1 :-> t2):cs)  = unify ((s1, t1):(s2, t2):cs)
+unify ((s, t):_) = lift $ Left $ "mismatch: " ++ show s ++ " /= " ++ show t
 
 preludeMinimal :: Map String (Maybe Ast, Type)
 preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
@@ -460,7 +458,7 @@ inferType findExport globs ds = foldM inferMutual [] $ map (map (\k -> (k, fromJ
       ts <- mapM (gather findExport globs env) $ snd <$> grp
       mapM_ addConstraint $ zip tvs $ snd <$> ts
       pure $ fst <$> ts
-    soln <- unify cs m
+    soln <- evalStateT (unify cs) m
     pure $ (++ acc) $ zip (fst <$> grp) $ zip (fillPlaceholders soln <$> bs) $ generalize [] . typeSolve soln <$> tvs
     where
       buildConstraints (Constraints f) = f $ ConState 0 [] M.empty
