@@ -260,7 +260,7 @@ addConstraint c = Constraints $ \(ConState i cs m) -> Right ((), ConState i (c:c
 addContext :: String -> String -> Constraints ()
 addContext s x = Constraints $ \(ConState i cs m) -> Right ((), ConState i cs $ M.insertWith union x [s] m)
 
-type Globals = Map String (Maybe Ast, Type)
+type Globals = Map String (Maybe (Int, Int), Type)
 
 -- | Gathers constraints.
 -- Replaces '==' with Placeholder.
@@ -270,35 +270,35 @@ gather
   -> Globals
   -> [(String, Type)]
   -> Ast
-  -> Constraints (Ast, Type)
+  -> Constraints (AnnAst Type)
 gather findExport prelude env ast = case ast of
-  I _ -> pure (ast, TC "Int")
-  S _ -> pure (ast, TC "String")
+  I i -> pure (TC "Int", AnnI i)
+  S s -> pure (TC "String", AnnS s)
   Var v -> case lookup v env of
     Just t  -> if v `M.member` prelude then bad $ "ambiguous: " ++ v
-      else (,) ast <$> instantiate t
+      else flip (,) (AnnVar v) <$> instantiate t
     Nothing -> if v == "==" then do
         TV x <- newTV
         addContext "Eq" x
-        pure (Placeholder "==" $ TV x, TV x :-> TV x :-> TC "Bool")
+        pure (TV x :-> TV x :-> TC "Bool", AnnPlaceholder "==" $ TV x)
       else case M.lookup v prelude of
-        Just (ma, t) -> (,) (fromMaybe ast ma) <$> instantiate t
+        Just (ma, t) -> flip (,) (maybe (AnnVar v) (uncurry AnnPack) ma) <$> instantiate t
         Nothing      -> bad $ "undefined: " ++ v
   t :@ u -> do
-    (a, tt) <- rec env t
-    (b, uu) <- rec env u
+    a@(tt, _) <- rec env t
+    b@(uu, _) <- rec env u
     x <- newTV
     addConstraint (tt, uu :-> x)
-    pure (a :@ b, x)
+    pure (x, a :@@ b)
   Call c f -> case findExport c f of
     Left err -> bad err
-    Right t -> (,) ast . (TC "String" :->) <$> instantiate t
+    Right t -> flip (,) (AnnCall c f) . (TC "String" :->) <$> instantiate t
   Lam args u -> do
     ts <- mapM (const newTV) args
-    (a, tu) <- rec ((zip args ts) ++ env) u
-    pure (Lam args a, foldr (:->) tu ts)
+    a@(tu, _) <- rec ((zip args ts) ++ env) u
+    pure (foldr (:->) tu ts, AnnLam args a)
   Cas e as -> do
-    (aste, te) <- rec env e
+    aste@(te, _) <- rec env e
     x <- newTV
     astas <- forM as $ \(p, a) -> do
       let
@@ -308,25 +308,25 @@ gather findExport prelude env ast = case ast of
       when (varsOf p /= nub (varsOf p)) $ bad "multiple binding in pattern"
       envp <- forM (varsOf p) $ \s -> (,) s <$> newTV
       -- TODO: Check p is a pattern.
-      (astp, tp) <- rec (envp ++ env) p
+      astp@(tp, _) <- rec (envp ++ env) p
       addConstraint (te, tp)
-      (asta, ta) <- rec (envp ++ env) a
+      asta@(ta, _) <- rec (envp ++ env) a
       addConstraint (x, ta)
       pure (astp, asta)
-    pure (Cas aste astas, x)
+    pure (x, AnnCas aste astas)
   Let ds body -> do
     es <- forM (fst <$> ds) $ \s -> (,) s <$> newTV
     ts <- forM (snd <$> ds) $ rec (es ++ env)
-    mapM_ addConstraint $ zip (snd <$> es) (snd <$> ts)
-    (body1, t) <- rec (es ++ env) body
-    pure (Let (zip (fst <$> ds) (fst <$> ts)) body1, t)
-  Pack _ n -> do  -- Only tuples are pre`Pack`ed.
+    mapM_ addConstraint $ zip (snd <$> es) (fst <$> ts)
+    body1@(t, _) <- rec (es ++ env) body
+    pure (t, AnnLet (zip (fst <$> ds) ts) body1)
+  Pack m n -> do  -- Only tuples are pre`Pack`ed.
     xs <- replicateM n newTV
     let r = foldl' (TApp) (TC "()") xs
-    pure (ast, foldr (:->) r xs)
+    pure (foldr (:->) r xs, AnnPack m n)
   Qual c f -> case findExport c f of
     Left err -> bad err
-    Right t -> (,) ast <$> instantiate t
+    Right t -> flip (,) (AnnQual c f) <$> instantiate t
   _ -> fail $ "BUG! unhandled: " ++ show ast
   where
     bad = Constraints . const . Left
@@ -368,14 +368,14 @@ subst (x, t) ty = case ty of
   TV y | x == y -> t
   _             -> ty
 
-fillPlaceholders :: [(String, Type)] -> Ast -> Ast
-fillPlaceholders soln ast = case ast of
-  u :@ v  -> rec u :@ rec v
-  Lam ss a -> Lam ss $ rec a
-  Cas e alts -> Cas (rec e) $ (id *** rec) <$> alts
-  Placeholder "==" t -> case typeSolve soln t of
-    TC "String" -> Var "String-=="
-    TC "Int"    -> Var "Int-=="
+fillPlaceholders :: [(String, Type)] -> AnnAst Type -> AnnAst Type
+fillPlaceholders soln (t, ast) = (,) t $ case ast of
+  u :@@ v  -> rec u :@@ rec v
+  AnnLam ss a -> AnnLam ss $ rec a
+  AnnCas e alts -> AnnCas (rec e) $ (id *** rec) <$> alts
+  AnnPlaceholder "==" t -> case typeSolve soln t of
+    TC "String" -> AnnVar "String-=="
+    TC "Int"    -> AnnVar "Int-=="
     e -> error $ "BUG! no Eq for " ++ show e
   _       -> ast
   where rec = fillPlaceholders soln
@@ -412,7 +412,7 @@ unify ((TApp s1 s2, TApp t1 t2):cs) = unify ((s1, t1):(s2, t2):cs)
 unify (( s1 :-> s2, t1 :-> t2):cs)  = unify ((s1, t1):(s2, t2):cs)
 unify ((s, t):_) = lift $ Left $ "mismatch: " ++ show s ++ " /= " ++ show t
 
-preludeMinimal :: Map String (Maybe Ast, Type)
+preludeMinimal :: Map String (Maybe (Int, Int), Type)
 preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
   [ ("+", TC "Int" :-> TC "Int" :-> TC "Int")
   , ("-", TC "Int" :-> TC "Int" :-> TC "Int")
@@ -436,34 +436,34 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
   , (":",       (jp 1 2, a :-> TApp (TC "List") a :-> TApp (TC "List") a))
   ]
   where
-    jp = (Just .) . Pack
+    jp m n = Just (m, n)
     a = GV "a"
     b = GV "b"
 
 compileMinimal :: String -> Either String [(String, Ast)]
 compileMinimal s = case parseDefs s of
   Left err -> Left $ "parse error: " ++ show err
-  Right ds -> liftLambdas . (second fst <$>) <$>
+  Right ds -> liftLambdas . (second (deAnn . snd) <$>) <$>
     inferType (\_ _ -> Left "no exports") preludeMinimal ds
 
 inferType
   :: (String -> String -> Either String Type)
   -> Globals
   -> [(String, Ast)]
-  -> Either String [(String, (Ast, Type))]
+  -> Either String [(String, AnnAst Type)]
 inferType findExport globs ds = foldM inferMutual [] $ map (map (\k -> (k, fromJust $ lookup k ds))) $ reverse $ scc (callees ds) $ fst <$> ds where
-  inferMutual :: [(String, (Ast, Type))] -> [(String, Ast)] -> Either String [(String, (Ast, Type))]
+  inferMutual :: [(String, AnnAst Type)] -> [(String, Ast)] -> Either String [(String, AnnAst Type)]
   inferMutual acc grp = do
     (bs, ConState _ cs m) <- buildConstraints $ do
       ts <- mapM (gather findExport globs env) $ snd <$> grp
-      mapM_ addConstraint $ zip tvs $ snd <$> ts
-      pure $ fst <$> ts
+      mapM_ addConstraint $ zip tvs $ fst <$> ts
+      pure ts
     soln <- evalStateT (unify cs) m
-    pure $ (++ acc) $ zip (fst <$> grp) $ zip (fillPlaceholders soln <$> bs) $ generalize [] . typeSolve soln <$> tvs
+    pure $ (++ acc) $ zip (fst <$> grp) $ (first (generalize [] . typeSolve soln) <$>) $ fillPlaceholders soln <$> bs
     where
       buildConstraints (Constraints f) = f $ ConState 0 [] M.empty
       tvs = TV . ('*':) . fst <$> grp
-      env = zip (fst <$> grp) tvs ++ map (second snd) acc
+      env = zip (fst <$> grp) tvs ++ map (second fst) acc
 
 callees :: [(String, Ast)] -> String -> [String]
 callees ds f = deps f (fromJust $ lookup f ds) where
@@ -567,4 +567,8 @@ deAnn (AnnCall x y) = Call x y
 deAnn (AnnQual x y) = Qual x y
 deAnn (AnnPack x y) = Pack x y
 deAnn (AnnPlaceholder x y) = Placeholder x y
-deAnn _ = error "BUG"
+deAnn (AnnCas (_, x) as) = Cas (deAnn x) $ (join (***) $ deAnn . snd) <$> as
+deAnn (AnnLam as (_, x)) = Lam as $ deAnn x
+deAnn (AnnLet as (_, x)) = Let (second (deAnn . snd) <$> as) $ deAnn x
+deAnn ((_, x) :@@ (_, y)) = deAnn x :@ deAnn y
+-- deAnn _ = error "BUG"
