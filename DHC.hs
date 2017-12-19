@@ -369,13 +369,15 @@ subst (x, t) ty = case ty of
   _             -> ty
 
 fillPlaceholders :: [(String, Type)] -> AnnAst Type -> AnnAst Type
-fillPlaceholders soln (t, ast) = (,) t $ case ast of
+fillPlaceholders soln (ty, ast) = (,) ty $ case ast of
   u :@@ v  -> rec u :@@ rec v
   AnnLam ss a -> AnnLam ss $ rec a
   AnnCas e alts -> AnnCas (rec e) $ (id *** rec) <$> alts
   AnnPlaceholder "==" t -> case typeSolve soln t of
     TC "String" -> AnnVar "String-=="
     TC "Int"    -> AnnVar "Int-=="
+    (TApp (TC "List") a) -> ((a :-> a:-> TC "Bool") :-> t, AnnVar "list_eq_instance") :@@
+      rec ((a :-> a :-> TC "Bool"), AnnPlaceholder "==" a)
     e -> error $ "BUG! no Eq for " ++ show e
   _       -> ast
   where rec = fillPlaceholders soln
@@ -383,7 +385,8 @@ fillPlaceholders soln (t, ast) = (,) t $ case ast of
 typeSolve :: [(String, Type)] -> Type -> Type
 typeSolve soln t = foldl' (flip subst) t soln
 
--- | The `propagateClasses` and `propagateClassTyCon` functions,
+-- | The `propagateClasses` and `propagateClassTyCon` functions of
+-- "Implementing type classes".
 propagate :: [String] -> Type -> StateT (Map String [String]) (Either String) ()
 propagate cs (TV y) = modify' $ M.insertWith union y cs
 propagate cs t = mapM_ propagateTyCon cs where
@@ -440,11 +443,14 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
     a = GV "a"
     b = GV "b"
 
+listEqHack :: (String, Ast)
+listEqHack = r where Right [r] = parseDefs "list_eq_instance d a b = case a of [] -> (case b of [] -> True; w -> False); (x:xs) -> (case b of [] -> False; (y:ys)-> (d x y) && list_eq_instance d xs ys)"
+
 compileMinimal :: String -> Either String [(String, Ast)]
 compileMinimal s = case parseDefs s of
   Left err -> Left $ "parse error: " ++ show err
   Right ds -> liftLambdas . (second (deAnn . snd) <$>) <$>
-    inferType (\_ _ -> Left "no exports") preludeMinimal ds
+    inferType (\_ _ -> Left "no exports") preludeMinimal (listEqHack : ds)
 
 inferType
   :: (String -> String -> Either String Type)

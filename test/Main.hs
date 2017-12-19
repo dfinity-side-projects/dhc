@@ -24,6 +24,10 @@ gmachine prog = go (Right <$> [PushGlobal "main", Eval]) [] M.empty where
       (s0:s1:srest) = s
       NInt x = h M.! s0
       NInt y = h M.! s1
+    boolOp f = go rest (k:srest) $ heapAdd $ NCon (f x y) [] where
+      (s0:s1:srest) = s
+      NCon x [] = h M.! s0
+      NCon y [] = h M.! s1
     prim "+" = intInt (+)
     prim "-" = intInt (-)
     prim "*" = intInt (*)
@@ -32,6 +36,8 @@ gmachine prog = go (Right <$> [PushGlobal "main", Eval]) [] M.empty where
     prim "Int-==" = intCmp (==)
     prim "<" = intCmp (<)
     prim ">" = intCmp (>)
+    prim "&&" = boolOp min
+    prim "||" = boolOp max
     prim g   = error $ "unsupported: " ++ g
     exec ins = case ins of
       Trap -> "UNREACHABLE"
@@ -106,4 +112,8 @@ main = runTestTT $ TestList $ (\(result, source) -> TestCase $
     , ("2", "gcd a b = (case a == b of True -> a; False -> (case a < b of"
       ++ " True -> gcd b a; False -> gcd b (a - b))); main = gcd 6 10")
     , ("9", "nfib n = (case n < 2 of True -> 1; False -> 1 + nfib (n - 1) + nfib (n - 2)); main = nfib 4")
+    , ("Pack 1", "main = (==) [1,1,2] [1,1,2]")
+    , ("Pack 1", "main = (==) [[1,1],[2]] [[1,1],[2]]")
+    , ("Pack 0", "main = (==) [[1],[2]] [[1,1],[2]]")
+    , ("Pack 0", "main = (==) [[1,1],[2]] [[1,3],[2]]")
     ]
