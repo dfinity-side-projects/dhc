@@ -196,7 +196,10 @@ want t = try $ do
   pure s
 
 rawOpTok :: Parser String
-rawOpTok = eatFiller $ many1 (oneOf "\\:!+-/*^><=.&|@#$%")
+rawOpTok = do
+  s <- eatFiller $ many1 (oneOf "\\:!+-/*^><=.&|@#$%")
+  when (s == "..") $ fail ""
+  pure s
 
 opTok :: Parser String
 opTok = do
@@ -205,7 +208,7 @@ opTok = do
   pure s
 
 tok :: Parser String
-tok = rawOpTok <|> eatFiller (many1 (alphaNum <|> char '_') <|>
+tok = string ".." <|> rawOpTok <|> eatFiller (many1 (alphaNum <|> char '_') <|>
        foldl1' (<|>) (string . pure <$> ";()[]{},"))
 
 -- | Eats trailing whitespace and comments.
