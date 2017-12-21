@@ -452,23 +452,23 @@ listEqHack = r where Right [r] = parseDefs "list_eq_instance d a b = case a of [
 compileMinimal :: String -> Either String [(String, Ast)]
 compileMinimal s = case parseDefs s of
   Left err -> Left $ "parse error: " ++ show err
-  Right ds -> liftLambdas . (second (deAnn . snd) <$>) <$>
+  Right ds -> liftLambdas . (second snd <$>) <$>
     inferType (\_ _ -> Left "no exports") preludeMinimal (listEqHack : ds)
 
 inferType
   :: (String -> String -> Either String Type)
   -> Globals
   -> [(String, Ast)]
-  -> Either String [(String, AnnAst Type)]
+  -> Either String [(String, (Type, Ast))]
 inferType findExport globs ds = foldM inferMutual [] $ map (map (\k -> (k, fromJust $ lookup k ds))) $ reverse $ scc (callees ds) $ fst <$> ds where
-  inferMutual :: [(String, AnnAst Type)] -> [(String, Ast)] -> Either String [(String, AnnAst Type)]
+  -- inferMutual :: [(String, AnnAst Type)] -> [(String, Ast)] -> Either String [(String, AnnAst Type)]
   inferMutual acc grp = do
     (bs, ConState _ cs m) <- buildConstraints $ do
       ts <- mapM (gather findExport globs env) $ snd <$> grp
       mapM_ addConstraint $ zip tvs $ fst <$> ts
       pure ts
     soln <- evalStateT (unify cs) m
-    pure $ (++ acc) $ zip (fst <$> grp) $ (first (generalize [] . typeSolve soln) <$>) $ fillPlaceholders soln <$> bs
+    pure $ (++ acc) $ zip (fst <$> grp) $ ((generalize [] . typeSolve soln) *** deAnn) . fillPlaceholders soln <$> bs
     where
       buildConstraints (Constraints f) = f $ ConState 0 [] M.empty
       tvs = TV . ('*':) . fst <$> grp
