@@ -206,12 +206,12 @@ boolAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
 -- Primitive functions.
 data Prim = Prim
   { primName :: String
-  , arity :: Int
+  , primArity :: Int
   , primAsm :: [WasmOp]
   }
 
 prims :: [Prim]
-prims = mkPrim <$>
+prims = (Prim "putHello" 0 [End]:) $ mkPrim <$>
   [ ("+", intAsm I64_add)
   , ("-", intAsm I64_sub)
   , ("*", intAsm I64_mul)
@@ -225,7 +225,7 @@ prims = mkPrim <$>
   , ("&&", boolAsm I32_and)
   , ("||", boolAsm I32_or)
   ]
-  where mkPrim (s, as) = Prim { primName = s, arity = 2, primAsm = as }
+  where mkPrim (s, as) = Prim { primName = s, primArity = 2, primAsm = as }
 
 wasm :: String -> Either String [Int]
 wasm prog = uncurry insToBin <$> compileMk1 prog
@@ -233,11 +233,13 @@ wasm prog = uncurry insToBin <$> compileMk1 prog
 compileMk1 :: String -> Either String (GlobalTable, [(String, [Ins])])
 compileMk1 haskell = astToIns <$> compileMinimal haskell
 
+-- | Arity and index of each global, both predefined primitives and
+-- user-defined functions.
 type GlobalTable = M.Map String (Int, Int)
 
 astToIns :: [(String, Ast)] -> (GlobalTable, [(String, [Ins])])
 astToIns ds = (funs, map (\(s, d) -> (s, evalState (mk1 d) [])) ds) where
-  ps = zipWith (\p i -> (primName p, (arity p, i))) prims [0..]
+  ps = zipWith (\p i -> (primName p, (primArity p, i))) prims [0..]
   funs = M.fromList $ ps ++ zipWith (\(name, Lam as _) i -> (name, (length as, i))) ds [length prims..]
 
 typedAstToBin :: [(String, (Ast, Type))] -> [Int]

@@ -264,6 +264,7 @@ addContext :: String -> String -> Constraints ()
 addContext s x = Constraints $ \(ConState i cs m) -> Right ((), ConState i cs $ M.insertWith union x [s] m)
 
 type Globals = Map String (Maybe (Int, Int), Type)
+type QualType = (Type, [(String, String)])
 
 -- | Gathers constraints.
 -- Replaces '==' with Placeholder.
@@ -271,34 +272,33 @@ type Globals = Map String (Maybe (Int, Int), Type)
 gather
   :: (String -> String -> Either String Type)
   -> Globals
-  -> [(String, Type)]
+  -> [(String, QualType)]
   -> Ast
   -> Constraints (AnnAst Type)
 gather findExport prelude env ast = case ast of
   I i -> pure (TC "Int", AnnI i)
   S s -> pure (TC "String", AnnS s)
   Var v -> case lookup v env of
-    Just t  -> if v `M.member` prelude then bad $ "ambiguous: " ++ v
-      else flip (,) (AnnVar v) <$> instantiate t
-    Nothing -> if v == "==" then do
-        TV x <- newTV
-        addContext "Eq" x
-        pure (TV x :-> TV x :-> TC "Bool", AnnPlaceholder "==" $ TV x)
-      else case M.lookup v prelude of
-        Just (ma, t) -> flip (,) (maybe (AnnVar v) (uncurry AnnPack) ma) <$> instantiate t
-        Nothing      -> bad $ "undefined: " ++ v
+    Just qt  -> if v `M.member` prelude then bad $ "ambiguous: " ++ v
+      else do
+        (t1, qs1) <- instantiate qt
+        pure $ foldl' (((,) t1 .) .  (:@@)) (t1, AnnVar v) $ (\(a, b) -> (TC $ "Dict-" ++ a, AnnPlaceholder a (TV b))) <$> qs1
+    Nothing -> case M.lookup v methods of
+      Just qt -> do
+        (t1, [(_, x)]) <- instantiate qt
+        pure (t1, AnnPlaceholder v $ TV x)
+      Nothing -> case M.lookup v prelude of
+        Just (ma, gt) -> flip (,) (maybe (AnnVar v) (uncurry AnnPack) ma) . fst <$> instantiate (gt, [])
+        Nothing       -> bad $ "undefined: " ++ v ++ show (prelude, env)
   t :@ u -> do
     a@(tt, _) <- rec env t
     b@(uu, _) <- rec env u
     x <- newTV
     addConstraint (tt, uu :-> x)
     pure (x, a :@@ b)
-  Call c f -> case findExport c f of
-    Left err -> bad err
-    Right t -> flip (,) (AnnCall c f) . (TC "String" :->) <$> instantiate t
   Lam args u -> do
     ts <- mapM (const newTV) args
-    a@(tu, _) <- rec ((zip args ts) ++ env) u
+    a@(tu, _) <- rec ((zip args $ zip ts $ repeat []) ++ env) u
     pure (foldr (:->) tu ts, AnnLam args a)
   Cas e as -> do
     aste@(te, _) <- rec env e
@@ -309,7 +309,7 @@ gather findExport prelude env ast = case ast of
         varsOf (Var v) | isLower (head v) = [v]
         varsOf _ = []
       when (varsOf p /= nub (varsOf p)) $ bad "multiple binding in pattern"
-      envp <- forM (varsOf p) $ \s -> (,) s <$> newTV
+      envp <- forM (varsOf p) $ \s -> (,) s . flip (,) [] <$> newTV
       -- TODO: Check p is a pattern.
       astp@(tp, _) <- rec (envp ++ env) p
       addConstraint (te, tp)
@@ -319,44 +319,72 @@ gather findExport prelude env ast = case ast of
     pure (x, AnnCas aste astas)
   Let ds body -> do
     es <- forM (fst <$> ds) $ \s -> (,) s <$> newTV
-    ts <- forM (snd <$> ds) $ rec (es ++ env)
+    let envLet = (second (flip (,) []) <$> es) ++ env
+    ts <- forM (snd <$> ds) $ rec envLet
     mapM_ addConstraint $ zip (snd <$> es) (fst <$> ts)
-    body1@(t, _) <- rec (es ++ env) body
+    body1@(t, _) <- rec envLet body
     pure (t, AnnLet (zip (fst <$> ds) ts) body1)
   Pack m n -> do  -- Only tuples are pre`Pack`ed.
     xs <- replicateM n newTV
     let r = foldl' (TApp) (TC "()") xs
     pure (foldr (:->) r xs, AnnPack m n)
+-- TODO: Type classes for Call and Qual.
+  Call c f -> case findExport c f of
+    Left err -> bad err
+    Right t -> flip (,) (AnnCall c f) . (TC "String" :->) .fst <$> instantiate (t, [])
   Qual c f -> case findExport c f of
     Left err -> bad err
-    Right t -> flip (,) (AnnQual c f) <$> instantiate t
+    Right t -> flip (,) (AnnQual c f) . fst <$> instantiate (t, [])
   _ -> fail $ "BUG! unhandled: " ++ show ast
   where
     bad = Constraints . const . Left
     rec = gather findExport prelude
-    instantiate ty = do  -- Instantiate generalized variables.
-      let
-        f m (GV s) | Just t <- lookup s m = pure (m, t)
-                   | otherwise = do
-                     x <- newTV
-                     pure ((s, x):m, x)
-        f m (t :-> u) = do
-          (m1, t') <- f m t
-          (m2, u') <- f m1 u
-          pure $ (m2, t' :-> u')
-        f m (t `TApp` u) = do
-          (m1, t') <- f m t
-          (m2, u') <- f m1 u
-          pure $ (m2, t' `TApp` u')
-        f m t = pure (m, t)
-      snd <$> f [] ty
 
-generalize :: [String] -> Type -> Type
-generalize fvs ty = case ty of
-  TV s | s `notElem` fvs -> GV s
-  u :-> v  -> generalize fvs u :-> generalize fvs v
-  TApp u v -> generalize fvs u `TApp` generalize fvs v
-  _        -> ty
+-- | Instantiate generalized variables.
+-- Returns type where all generalized variables have been instantiated along
+-- with the list of type constraints where each generalized variable has
+-- been instantiated with the same generated names.
+instantiate :: QualType -> Constraints (Type, [(String, String)])
+instantiate (ty, qs) = do
+  (gvmap, result) <- f [] ty
+  let qInstances = second (getVar gvmap) <$> qs
+  forM_ qInstances $ uncurry addContext
+  pure (result, qInstances)
+  where
+  getVar m v = x where Just (TV x) = lookup v m
+  f m (GV s) | Just t <- lookup s m = pure (m, t)
+             | otherwise = do
+               x <- newTV
+               pure ((s, x):m, x)
+  f m (t :-> u) = do
+    (m1, t') <- f m t
+    (m2, u') <- f m1 u
+    pure $ (m2, t' :-> u')
+  f m (t `TApp` u) = do
+    (m1, t') <- f m t
+    (m2, u') <- f m1 u
+    pure $ (m2, t' `TApp` u')
+  f m t = pure (m, t)
+
+generalize :: [(String, Type)] -> Map String [String] -> AnnAst Type -> (QualType, Ast)
+generalize soln ctx (t0, a0) = ((t, qs), dictSolve dsoln soln ast) where
+  (t, qs) = runState (generalize' ctx $ typeSolve soln t0) []
+  dsoln = zip qs $ ("#d" ++) . show <$> [(0::Int)..]
+  ast = case deAnn a0 of
+    Lam ss body -> Lam (dvars ++ ss) body
+    body -> Lam dvars body
+    where dvars = snd <$> dsoln
+
+generalize' :: Map String [String] -> Type -> State [(String, String)] Type
+generalize' ctx ty = case ty of
+  TV s -> do
+    case M.lookup s ctx of
+      Just cs -> modify' $ union $ flip (,) s <$> cs
+      Nothing -> pure ()
+    pure $ GV s
+  u :-> v  -> (:->) <$> generalize' ctx u <*> generalize' ctx v
+  TApp u v -> TApp  <$> generalize' ctx u <*> generalize' ctx v
+  _        -> pure ty
 
 freeTV :: Type -> [String]
 freeTV (TApp a b) = freeTV a ++ freeTV b
@@ -371,19 +399,70 @@ subst (x, t) ty = case ty of
   TV y | x == y -> t
   _             -> ty
 
-fillPlaceholders :: [(String, Type)] -> AnnAst Type -> AnnAst Type
-fillPlaceholders soln (ty, ast) = (,) ty $ case ast of
-  u :@@ v  -> rec u :@@ rec v
-  AnnLam ss a -> AnnLam ss $ rec a
-  AnnCas e alts -> AnnCas (rec e) $ (id *** rec) <$> alts
-  AnnPlaceholder "==" t -> case typeSolve soln t of
-    TC "String" -> AnnVar "String-=="
-    TC "Int"    -> AnnVar "Int-=="
-    (TApp (TC "List") a) -> ((a :-> a:-> TC "Bool") :-> t, AnnVar "list_eq_instance") :@@
-      rec ((a :-> a :-> TC "Bool"), AnnPlaceholder "==" a)
-    e -> error $ "BUG! no Eq for " ++ show e
+methods :: Map String (Type, [(String, String)])
+methods = M.fromList
+  [ ("==", (a :-> a :-> TC "Bool", [("Eq", "a")]))
+  , (">>=", (TApp m a :-> (a :-> TApp m b)  :-> TApp m b, [("Monad", "m")]))
+  , ("pure", (a :-> TApp m a, [("Monad", "m")]))
+  , ("save", (a :-> TC "String", [("Save", "a")]))
+  , ("load", (TC "String" :-> a, [("Save", "a")]))
+  ] where
+    a = GV "a"
+    b = GV "b"
+    m = GV "m"
+
+listEqHack :: (String, Ast)
+listEqHack = r where Right [r] = parseDefs "list_eq_instance d a b = case a of [] -> (case b of [] -> True; w -> False); (x:xs) -> (case b of [] -> False; (y:ys)-> (d x y) && list_eq_instance d xs ys)"
+
+maybePureHack :: (String, Ast)
+maybePureHack = r where Right [r] = parseDefs "maybe_pure x = Just x"
+
+maybeMonadHack :: (String, Ast)
+maybeMonadHack = r where Right [r] = parseDefs "maybe_monad x f = (case x of Nothing -> Nothing; Just a -> f a)"
+
+-- This works because it's post-type-checking.
+ioPureHack :: (String, Ast)
+ioPureHack = r where Right [r] = parseDefs "io_pure x rw = (x, rw)"
+
+ioMonadHack :: (String, Ast)
+ioMonadHack = r where Right [r] = parseDefs "io_monad f g rw = let {p = f rw} in case p of (a, rw1) -> g a rw1"
+
+fstHack :: (String, Ast)
+fstHack = r where Right [r] = parseDefs "fst p = case p of (x, y) -> x"
+
+sndHack :: (String, Ast)
+sndHack = r where Right [r] = parseDefs "snd p = case p of (x, y) -> y"
+
+dictSolve :: [((String, String), String)] -> [(String, Type)] -> Ast -> Ast
+dictSolve dsoln soln ast = case ast of
+  u :@ v  -> rec u :@ rec v
+  Lam ss a -> Lam ss $ rec a
+  Cas e alts -> Cas (rec e) $ (id *** rec) <$> alts
+
+  Placeholder ">>=" t -> Var "snd" :@ rec (Placeholder "Monad" $ typeSolve soln t)
+  Placeholder "pure" t -> Var "fst" :@ rec (Placeholder "Monad" $ typeSolve soln t)
+
+  Placeholder "==" t -> rec $ Placeholder "Eq" $ typeSolve soln t
+  Placeholder "save" t -> Var "fst" :@ rec (Placeholder "Save" $ typeSolve soln t)
+  Placeholder "load" t -> Var "snd" :@ rec (Placeholder "Save" $ typeSolve soln t)
+  Placeholder d t -> case typeSolve soln t of
+    TV v -> Var $ fromJust $ lookup (d, v) dsoln
+    u -> findInstance d u
   _       -> ast
-  where rec = fillPlaceholders soln
+  where
+    rec = dictSolve dsoln soln
+    findInstance "Eq" t = case t of
+      TC "String"        -> Var "String-=="
+      TC "Int"           -> Var "Int-=="
+      TApp (TC "List") a -> Var "list_eq_instance" :@ rec (Placeholder "Eq" a)
+      e -> error $ "BUG! no Eq for " ++ show e
+    findInstance "Save" t = case t of
+      TC "String" -> Pack 0 2 :@ Var "String-save" :@ Var "String-load"
+      TC "Int" -> Pack 0 2 :@ Var "Int-save" :@ Var "Int-load"
+    findInstance "Monad" t = case t of
+      TC "Maybe" -> Pack 0 2 :@ Var "maybe_pure" :@ Var "maybe_monad"
+      TC "IO" -> Pack 0 2 :@ Var "io_pure" :@ Var "io_monad"
+    findInstance d _ = error $ "BUG! bad class: " ++ show d
 
 typeSolve :: [(String, Type)] -> Type -> Type
 typeSolve soln t = foldl' (flip subst) t soln
@@ -396,8 +475,12 @@ propagate cs t = mapM_ propagateTyCon cs where
   propagateTyCon "Eq" = case t of
     TC "Int" -> pure ()
     TC "String" -> pure ()
-    (TApp (TC "List") a) -> propagate ["Eq"] a
+    TApp (TC "List") a -> propagate ["Eq"] a
     _ -> lift $ Left $ "no Eq instance: " ++ show t
+  propagateTyCon "Monad" = case t of
+    TC "Maybe" -> pure ()
+    TC "IO" -> pure ()
+    _ -> lift $ Left $ "no Monad instance: " ++ show t
   propagateTyCon c = error $ "TODO: " ++ c
 
 -- TODO: Apply substitutions for friendlier messages.
@@ -431,6 +514,8 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
   , (">=", TC "Int" :-> TC "Int" :-> TC "Bool")
   , ("&&", TC "Bool" :-> TC "Bool" :-> TC "Bool")
   , ("||", TC "Bool" :-> TC "Bool" :-> TC "Bool")
+  , ("undefined", a)
+  , ("putHello", io $ TC "()")
   ]) ++
   [ ("False",   (jp 0 0, TC "Bool"))
   , ("True",    (jp 1 0, TC "Bool"))
@@ -445,34 +530,35 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
     jp m n = Just (m, n)
     a = GV "a"
     b = GV "b"
-
-listEqHack :: (String, Ast)
-listEqHack = r where Right [r] = parseDefs "list_eq_instance d a b = case a of [] -> (case b of [] -> True; w -> False); (x:xs) -> (case b of [] -> False; (y:ys)-> (d x y) && list_eq_instance d xs ys)"
+    io = TApp (TC "IO")
 
 compileMinimal :: String -> Either String [(String, Ast)]
 compileMinimal s = case parseDefs s of
   Left err -> Left $ "parse error: " ++ show err
   Right ds -> liftLambdas . (second snd <$>) <$>
-    inferType (\_ _ -> Left "no exports") preludeMinimal (listEqHack : ds)
+    inferType (\_ _ -> Left "no exports") preludeMinimal (fstHack : sndHack : maybePureHack : maybeMonadHack : ioPureHack : ioMonadHack : listEqHack : ds)
 
 inferType
   :: (String -> String -> Either String Type)
   -> Globals
   -> [(String, Ast)]
-  -> Either String [(String, (Type, Ast))]
+  -> Either String [(String, (QualType, Ast))]
 inferType findExport globs ds = foldM inferMutual [] $ map (map (\k -> (k, fromJust $ lookup k ds))) $ reverse $ scc (callees ds) $ fst <$> ds where
   -- inferMutual :: [(String, AnnAst Type)] -> [(String, Ast)] -> Either String [(String, AnnAst Type)]
   inferMutual acc grp = do
     (bs, ConState _ cs m) <- buildConstraints $ do
       ts <- mapM (gather findExport globs env) $ snd <$> grp
+      when ("main" `elem` (fst <$> grp)) $ do
+        r <- newTV
+        addConstraint (TV "*main", TApp (TC "IO") r)
       mapM_ addConstraint $ zip tvs $ fst <$> ts
       pure ts
-    soln <- evalStateT (unify cs) m
-    pure $ (++ acc) $ zip (fst <$> grp) $ ((generalize [] . typeSolve soln) *** deAnn) . fillPlaceholders soln <$> bs
+    (soln, ctx) <- runStateT (unify cs) m
+    pure $ (++ acc) $ zip (fst <$> grp) $ generalize soln ctx <$> bs
     where
       buildConstraints (Constraints f) = f $ ConState 0 [] M.empty
       tvs = TV . ('*':) . fst <$> grp
-      env = zip (fst <$> grp) tvs ++ map (second fst) acc
+      env = zip (fst <$> grp) (zip tvs $ repeat $ []) ++ map (second fst) acc
 
 callees :: [(String, Ast)] -> String -> [String]
 callees ds f = deps f (fromJust $ lookup f ds) where
@@ -580,4 +666,3 @@ deAnn (AnnCas (_, x) as) = Cas (deAnn x) $ (join (***) $ deAnn . snd) <$> as
 deAnn (AnnLam as (_, x)) = Lam as $ deAnn x
 deAnn (AnnLet as (_, x)) = Let (second (deAnn . snd) <$> as) $ deAnn x
 deAnn ((_, x) :@@ (_, y)) = deAnn x :@ deAnn y
--- deAnn _ = error "BUG"
