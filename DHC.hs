@@ -107,14 +107,14 @@ supercombinators = sc `sepBy` want ";" where
     (,) fun . Lam args <$> expr
   scOp = try $ do
     l <- varStr
-    op <- varsym
+    op <- varSym
     r <- varStr
     pure [op, l, r]
   expr = caseExpr <|> letExpr <|> bin 0 False
   bin 10 _ = molecule
   bin prec isR = rec False =<< bin (prec + 1) False where
     rec isL m = (try $ do
-      o <- varsym <|> between (want "`") (want "`") varStr
+      o <- varSym <|> between (want "`") (want "`") varStr
       let (a, p) = fixity o
       when (p /= prec) $ fail ""
       case a of
@@ -149,7 +149,7 @@ supercombinators = sc `sepBy` want ";" where
   molecule = lambda <|> foldl1' (:@) <$> many1 atom
   atom = preOp <|> tup <|> call <|> qvar <|> var <|> num <|> str
     <|> lis <|> enumLis
-  preOp = try $ Var <$> between (want "(") (want ")") varsym
+  preOp = try $ Var <$> between (want "(") (want ")") varSym
   tup = do
     xs <- between (want "(") (want ")") $ expr `sepBy` want ","
     pure $ case xs of  -- Abuse Pack to represent tuples.
@@ -179,50 +179,48 @@ supercombinators = sc `sepBy` want ";" where
     v <- varStr
     pure $ Call s v
   num = try $ do
-    s <- tok
-    unless (all isDigit s) $ fail ""
+    (t, s) <- tok
+    when (t /= LexNumber) $ fail ""
     pure $ I $ read s
   str = try $ do
-    (h:t) <- tok
-    when (h /= '"') $ fail ""
-    pure $ S $ pack $ c2w <$> t
+    (t, s) <- tok
+    when (t /= LexString) $ fail ""
+    pure $ S $ pack $ c2w <$> s
+  varSym = do
+    (t, s) <- tok
+    when (t /= LexSymbol || s `elem` ["..", "->", "="]) $ fail ""
+    pure s
 
 varStr :: Parser String
 varStr = try $ do
-  s@(h:_) <- tok
-  when (not (isLetter h) || s `elem` words "case of let where do in _ call") $ fail ""
+  (t, s) <- tok
+  when (t /= LexVar || s `elem` words "case of let where do in _ call") $ fail ""
   pure s
 
 want :: String -> Parser String
 want t = try $ do
-  s <- tok
-  unless (s == t) $ fail $ "expected " ++ t
+  (ty, s) <- tok
+  unless (ty /= LexString && s == t) $ fail $ "expected " ++ t
   pure s
 
-symbol :: Parser String
-symbol = many1 (oneOf "!#$%&*+./<=>?@\\^|-~:")
+data LexemeType = LexString | LexNumber | LexVar | LexSpecial | LexSymbol deriving (Eq, Show)
+type Lexeme = (LexemeType, String)
 
-varsym :: Parser String
-varsym = do
-  s <- symbol
-  when (s `elem` ["..", "->", "="]) $ fail ""
-  filler
-  pure s
-
--- TODO: We abuse String as a poor man's coproduct type.
--- Double quotes at the beginning mean the rest is a string constant.
-tok :: Parser String
+tok :: Parser Lexeme
 tok = do
-  r <- symbol <|> many1 (alphaNum <|> char '_') <|>
-    foldl1' (<|>) (string . pure <$> "(),;[]`{}") <|> strTok
+  r <- symbol <|> number <|> ((,) LexVar <$> many1 (alphaNum <|> char '_')) <|>
+    special <|> str
   filler
   pure r
   where
-  strTok = do
+  special = (,) LexSpecial <$> foldl1' (<|>) (string . pure <$> "(),;[]`{}")
+  number = (,) LexNumber <$> many1 digit
+  symbol = (,) LexSymbol <$> many1 (oneOf "!#$%&*+./<=>?@\\^|-~:")
+  str = do
     void $ char '"'
     s <- many $ (char '\\' >> oneOf "\\\"") <|> noneOf "\""
     void $ char '"'
-    pure $ '"' : s
+    pure (LexString, s)
 
 filler :: Parser ()
 filler = void $ many $ many1 space <|>
