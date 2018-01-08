@@ -17,7 +17,7 @@ import qualified Data.Map.Strict as M
 import Data.Map.Strict (Map)
 import Data.Maybe
 import GHC.Generics (Generic)
-import Text.ParserCombinators.Parsec hiding (State)
+import Text.Parsec hiding (State)
 
 instance Binary Ast
 instance Binary Type
@@ -63,6 +63,8 @@ data AnnAst' ann
   | AnnPlaceholder String Type
   deriving Show
 
+type Parser = Parsec String ()
+
 program :: Parser [(String, Ast)]
 program = do
   filler
@@ -105,14 +107,14 @@ supercombinators = sc `sepBy` want ";" where
     (,) fun . Lam args <$> expr
   scOp = try $ do
     l <- varStr
-    op <- opTok
+    op <- varsym
     r <- varStr
     pure [op, l, r]
   expr = caseExpr <|> letExpr <|> bin 0 False
   bin 10 _ = molecule
   bin prec isR = rec False =<< bin (prec + 1) False where
     rec isL m = (try $ do
-      o <- opTok <|> between (char '`') (want "`") varStr
+      o <- varsym <|> between (want "`") (want "`") varStr
       let (a, p) = fixity o
       when (p /= prec) $ fail ""
       case a of
@@ -147,7 +149,7 @@ supercombinators = sc `sepBy` want ";" where
   molecule = lambda <|> foldl1' (:@) <$> many1 atom
   atom = preOp <|> tup <|> call <|> qvar <|> var <|> num <|> str
     <|> lis <|> enumLis
-  preOp = try $ Var <$> between (want "(") (want ")") opTok
+  preOp = try $ Var <$> between (want "(") (want ")") varsym
   tup = do
     xs <- between (want "(") (want ")") $ expr `sepBy` want ","
     pure $ case xs of  -- Abuse Pack to represent tuples.
@@ -180,8 +182,10 @@ supercombinators = sc `sepBy` want ";" where
     s <- tok
     unless (all isDigit s) $ fail ""
     pure $ I $ read s
-  str = eatFiller $ try <$> between (char '"') (char '"') $ S . pack <$> many rune
-  rune = c2w <$> ((char '\\' >> oneOf "\\\"") <|> noneOf "\"")
+  str = try $ do
+    (h:t) <- tok
+    when (h /= '"') $ fail ""
+    pure $ S $ pack $ c2w <$> t
 
 varStr :: Parser String
 varStr = try $ do
@@ -195,25 +199,30 @@ want t = try $ do
   unless (s == t) $ fail $ "expected " ++ t
   pure s
 
-rawOpTok :: Parser String
-rawOpTok = do
-  s <- eatFiller $ many1 (oneOf "\\:!+-/*^><=.&|@#$%")
-  when (s == "..") $ fail ""
+symbol :: Parser String
+symbol = many1 (oneOf "!#$%&*+./<=>?@\\^|-~:")
+
+varsym :: Parser String
+varsym = do
+  s <- symbol
+  when (s `elem` ["..", "->", "="]) $ fail ""
+  filler
   pure s
 
-opTok :: Parser String
-opTok = do
-  s <- rawOpTok
-  when (s `elem` ["->", "="]) $ fail ""
-  pure s
-
+-- TODO: We abuse String as a poor man's coproduct type.
+-- Double quotes at the beginning mean the rest is a string constant.
 tok :: Parser String
-tok = string ".." <|> rawOpTok <|> eatFiller (many1 (alphaNum <|> char '_') <|>
-       foldl1' (<|>) (string . pure <$> ";()[]{},"))
-
--- | Eats trailing whitespace and comments.
-eatFiller :: Parser a -> Parser a
-eatFiller = (>>= (filler >>) . pure)
+tok = do
+  r <- symbol <|> many1 (alphaNum <|> char '_') <|>
+    foldl1' (<|>) (string . pure <$> "(),;[]`{}") <|> strTok
+  filler
+  pure r
+  where
+  strTok = do
+    void $ char '"'
+    s <- many $ (char '\\' >> oneOf "\\\"") <|> noneOf "\""
+    void $ char '"'
+    pure $ '"' : s
 
 filler :: Parser ()
 filler = void $ many $ many1 space <|>
