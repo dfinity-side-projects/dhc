@@ -111,7 +111,7 @@ supercombinators = between (want "{") (want "}") $ sc `sepBy` want ";" where
     op <- varSym
     r <- varStr
     pure [op, l, r]
-  expr = caseExpr <|> letExpr <|> bin 0 False
+  expr = caseExpr <|> letExpr <|> doExpr <|> bin 0 False
   bin 10 _ = molecule
   bin prec isR = rec False =<< bin (prec + 1) False where
     rec isL m = (try $ do
@@ -133,6 +133,26 @@ supercombinators = between (want "{") (want "}") $ sc `sepBy` want ";" where
     void $ want "="
     ast <- expr
     pure (s, ast)
+  doExpr = do
+    void $ want "do"
+    ss <- between (want "{") (want "}") $ stmt `sepBy` want ";"
+    case ss of
+      [] -> fail "empty do block"
+      ((mv, x):t) -> desugarDo x mv t
+  desugarDo x Nothing [] = pure x
+  desugarDo _ _ [] = fail "do block ends with (<-) statement"
+  desugarDo x (Just v) ((mv1, x1):rest) =
+    desugarDo (Var ">>=" :@ x :@ Lam [v] x1) mv1 rest
+  desugarDo x Nothing ((mv1, x1):rest) =
+    desugarDo (Var ">>=" :@ x :@ Lam ["_"] x1) mv1 rest
+  stmt = do
+    v <- expr
+    lArrStmt v <|> pure (Nothing, v)
+  lArrStmt v = want "<-" >> case v of
+    Var s -> do
+      x <- expr
+      pure (Just s, x)
+    _ -> fail "want variable on left of (<-)"
   letExpr = do
     ds <- between (want "let") (want "in") $
       between (want "{") (want "}") $ letDefn `sepBy` want ";"
@@ -186,13 +206,13 @@ supercombinators = between (want "{") (want "}") $ sc `sepBy` want ";" where
     pure $ S $ pack $ c2w <$> s
   varSym = do
     (t, s) <- tok
-    when (t /= LexSymbol || s `elem` ["..", "->", "="]) $ fail ""
+    when (t /= LexSymbol || s `elem` ["..", "::", "=", "|", "<-", "->", "=>"]) $ fail ""
     pure s
 
 varStr :: Parser String
 varStr = try $ do
   (t, s) <- tok
-  when (t /= LexVar || s `elem` words "case of let where do in _ call") $ fail ""
+  when (t /= LexVar || s `elem` words "case of let where do in call") $ fail ""
   pure s
 
 want :: String -> Parser String
@@ -390,7 +410,7 @@ gather findExport prelude env ast = case ast of
     pure (x, a :@@ b)
   Lam args u -> do
     ts <- mapM (const newTV) args
-    a@(tu, _) <- rec ((zip args $ zip ts $ repeat []) ++ env) u
+    a@(tu, _) <- rec ((zip (filter (/= "_") args) $ zip ts $ repeat []) ++ env) u
     pure (foldr (:->) tu ts, AnnLam args a)
   Cas e as -> do
     aste@(te, _) <- rec env e

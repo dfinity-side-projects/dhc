@@ -3,6 +3,7 @@ import qualified Data.Map as M
 import Data.Maybe
 import Test.HUnit
 import Asm
+import DHC
 
 data Node = NInt Int64 | NAp Int Int | NGlobal Int String | NInd Int | NCon Int [Int] | RealWorld [String] deriving Show
 
@@ -32,7 +33,9 @@ gmachine prog = if "main" `M.member` funs then
       (s0:s1:srest) = s
       NCon x [] = h M.! s0
       NCon y [] = h M.! s1
-    rwAdd msg m | RealWorld ms <- m M.! 0 = M.insert 0 (RealWorld $ msg:ms) m
+    rwAdd msg heap | RealWorld ms <- heap M.! 0 =
+      M.insert 0 (RealWorld $ msg:ms) heap
+    rwAdd _ _ = error "BUG! Expect RealWorld at 0 on heap"
     prim "+" = intInt (+)
     prim "-" = intInt (-)
     prim "*" = intInt (*)
@@ -89,7 +92,10 @@ gmachine prog = if "main" `M.member` funs then
   go [] s h = error $ "bad stack: " ++ show (s, h)
 
 main :: IO Counts
-main = runTestTT $ TestList $ (\(result, source) -> TestCase $
+main = runTestTT $ TestList $ lexOffsideTests ++ gmachineTests
+
+gmachineTests :: [Test]
+gmachineTests = (\(result, source) -> TestCase $
   assertEqual source result $ gmachine source) <$>
     -- Test cases from Peyton Jones and Lester,
     -- "Implementing Functional Languages; a tutorial".
@@ -132,4 +138,27 @@ main = runTestTT $ TestList $ (\(result, source) -> TestCase $
     , ("Pack 1", "f x = x == x; main_ = f [1,2,3]")
     , (show ["hello"], "main = putHello")
     , (show ["hello", "hello"], "main = putHello >>= (\\x -> putHello)")
+    , (show ["hello", "hello"], "main = putHello >>= (\\_ -> putHello)")
+    , (show ["hello", "hello"], unlines
+      [ "main = do"
+      , "  putHello"
+      , "  putHello"
+      ])
+    ]
+
+lexOffsideTests :: [Test]
+lexOffsideTests = (\(result, source) -> TestCase $
+  assertEqual source (Right result) $ lexOffside source) <$>
+    [ (["{", "main", "=", "foo", "}"], "main = foo")
+    , (["{", "x", "=", "1", ";", "y", "=", "2", "}"], "x = 1\ny = 2")
+    , (["{", "main", "=", "do", "{", "foo", ";", "bar", "}", "}"], unlines
+      [ "main = do"
+      , "  foo"
+      , "  bar"
+      ])
+    -- The following lexes "incorrectly" (the parentheses and curly braces
+    -- are improperly nested), but is fixed in the parser. See Note 5 of
+    -- https://www.haskell.org/onlinereport/haskell2010/haskellch10.html
+    , (words "{ f x = ( case x of { True -> 1 ; False -> 0 ) } }",
+      "f x = (case x of True -> 1; False -> 0)")
     ]
