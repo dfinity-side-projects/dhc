@@ -1,6 +1,6 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE PackageImports #-}
-module DHC (parseContract, Ast(..), Type(..), inferType,
+module DHC (parseContract, Ast(..), Type(..), inferType, parseDefs, lexOffside,
   preludeMinimal, compileMinimal, liftLambdas) where
 
 import Control.Arrow
@@ -63,7 +63,8 @@ data AnnAst' ann
   | AnnPlaceholder String Type
   deriving Show
 
-type Parser = Parsec String ()
+data LayoutState = IndentAgain Int | LineStart | LineMiddle | AwaitBrace deriving (Eq, Show)
+type Parser = Parsec String (LayoutState, [Int])
 
 program :: Parser [(String, Ast)]
 program = do
@@ -100,7 +101,7 @@ fixity :: String -> (Associativity, Int)
 fixity o = fromMaybe (LAssoc, 9) $ M.lookup o standardFixities
 
 supercombinators :: Parser [(String, Ast)]
-supercombinators = sc `sepBy` want ";" where
+supercombinators = between (want "{") (want "}") $ sc `sepBy` want ";" where
   sc = do
     (fun:args) <- scOp <|> many1 varStr
     void $ want "="
@@ -138,7 +139,7 @@ supercombinators = sc `sepBy` want ";" where
     Let ds <$> expr
   caseExpr = do
     x <- between (want "case") (want "of") expr
-    as <- alt `sepBy` want ";"
+    as <- between (want "{") (want "}") $ alt `sepBy` want ";"
     pure $ Cas x as
   lambda = Lam <$> between (want "\\") (want "->") (many1 varStr) <*> expr
   alt = do
@@ -165,19 +166,16 @@ supercombinators = sc `sepBy` want ";" where
     items <- between (want "[") (want "]") $ expr `sepBy` want ","
     pure $ foldr (\a b -> Var ":" :@ a :@ b) (Var "[]") items
   var = Var <$> varStr
+  splitDot s = second tail $ splitAt (fromJust $ elemIndex '.' s) s
   qvar = try $ do
-    s <- many1 alphaNum
-    void $ char '.'
-    v <- varStr
-    pure $ Qual s v
+    (t, s) <- tok
+    when (t /= LexQual) $ fail""
+    pure $ uncurry Qual $ splitDot s
   call = try $ do
     void $ want "call"
-    s <- (try $ do
-      q <- many1 alphaNum
-      void $ char '.'
-      pure q) <|> pure ""
-    v <- varStr
-    pure $ Call s v
+    (t, s) <- tok
+    when (t /= LexQual) $ fail""
+    pure $ uncurry Call $ splitDot s
   num = try $ do
     (t, s) <- tok
     when (t /= LexNumber) $ fail ""
@@ -198,21 +196,89 @@ varStr = try $ do
   pure s
 
 want :: String -> Parser String
-want t = try $ do
-  (ty, s) <- tok
-  unless (ty /= LexString && s == t) $ fail $ "expected " ++ t
-  pure s
+want t = expect <|> autoCloseBrace where
+  autoCloseBrace = if t /= "}" then fail "" else do
+    (st, is) <- getState
+    case is of
+      (m:ms) | m /= 0 -> do
+        putState (st, ms)
+        pure "}"
+      _ -> fail ""
+  expect = try $ do
+    (ty, s) <- tok
+    unless (ty /= LexString && s == t) $ fail $ "expected " ++ t
+    pure s
 
-data LexemeType = LexString | LexNumber | LexVar | LexSpecial | LexSymbol deriving (Eq, Show)
+data LexemeType = LexString | LexNumber | LexVar | LexSpecial | LexSymbol | LexQual | LexEOF deriving (Eq, Show)
 type Lexeme = (LexemeType, String)
 
+-- | Layout-aware lexer. Assumes `filler` has just been called.
+-- See https://www.haskell.org/onlinereport/haskell2010/haskellch10.html
 tok :: Parser Lexeme
 tok = do
-  r <- symbol <|> number <|> ((,) LexVar <$> many1 (alphaNum <|> char '_')) <|>
-    special <|> str
+  (st, is) <- getState
+  let
+    autoContinueBrace n = case is of
+      (m : _)  | m == n -> pure (LexSpecial, ";")
+      (m : ms) | n < m -> do
+        putState (IndentAgain n, ms)
+        pure (LexSpecial, "}")
+      _ -> rawTok
+    explicitBrace = try $ do
+      r <- rawTok
+      when (r /= (LexSpecial, "{")) $ fail ""
+      putState (LineMiddle, 0:is)
+      pure r
+    end = do
+      eof
+      case is of
+        0:_ -> fail "unmatched '{'"
+        [] -> pure (LexEOF, "")
+        _:ms -> do
+          putState (st, ms)
+          pure (LexSpecial, "}")
+  end <|> case st of
+    IndentAgain col -> do
+      putState (LineMiddle, is)
+      autoContinueBrace col
+    LineStart -> do
+      col <- sourceColumn <$> getPosition
+      putState (LineMiddle, is)
+      autoContinueBrace col
+    AwaitBrace -> explicitBrace <|> do
+      n <- sourceColumn <$> getPosition
+      case is of
+        (m : _) | n > m -> do
+          putState (LineMiddle, n : is)
+          pure (LexSpecial, "{")
+        [] | n > 0 -> do
+          putState (LineMiddle, [n])
+          pure (LexSpecial, "{")
+        -- Empty blocks unsupported (see Note 2 in above link).
+        _ -> fail "TODO"
+    _ -> do
+      r <- rawTok
+      when (r == (LexSpecial, "}")) $ case is of
+        (0 : _) -> modifyState $ second tail
+        _ -> fail "unmatched }"
+      pure r
+
+rawTok :: Parser Lexeme
+rawTok = do
+  r <- symbol <|> number <|> ident <|> special <|> str
   filler
   pure r
   where
+  ident = do
+    s <- many1 (alphaNum <|> char '_')
+    (try $ do
+      void $ char '.'
+      v <- many1 (alphaNum <|> char '_')
+      pure (LexQual, s ++ '.':v)) <|> do
+      when (s `elem` ["let", "where", "do", "of"]) $ do
+        (_, is) <- getState
+        putState (AwaitBrace, is)
+      pure (LexVar, s)
   special = (,) LexSpecial <$> foldl1' (<|>) (string . pure <$> "(),;[]`{}")
   number = (,) LexNumber <$> many1 digit
   symbol = (,) LexSymbol <$> many1 (oneOf "!#$%&*+./<=>?@\\^|-~:")
@@ -223,8 +289,16 @@ tok = do
     pure (LexString, s)
 
 filler :: Parser ()
-filler = void $ many $ many1 space <|>
-  (between (try $ string "--") (char '\n') $ many $ noneOf "\n")
+filler = void $ many $ void (char ' ') <|> nl <|> com
+  where
+  com = do
+    void $ between (try $ string "--") (char '\n') $ many $ noneOf "\n"
+    (st, is) <- getState
+    when (st /= AwaitBrace) $ putState (LineStart, is)
+  nl = do
+    void $ char '\n'
+    (st, is) <- getState
+    when (st /= AwaitBrace) $ putState (LineStart, is)
 
 contract :: Parser ([String], [String], [(String, Ast)])
 contract = do
@@ -238,11 +312,22 @@ contract = do
   when (isNothing $ mapM (`lookup` ds) es) $ fail "bad exports"
   pure (es, ms, ds)
 
+initParserState :: (LayoutState, [Int])
+initParserState = (AwaitBrace, [])
+
+lexOffside :: String -> Either ParseError [String]
+lexOffside = runParser (filler >> tokUntilEOF) initParserState "" where
+  tokUntilEOF = do
+    t <- tok
+    case fst t of
+      LexEOF -> pure []
+      _ -> (snd t:) <$> tokUntilEOF
+
 parseDefs :: String -> Either ParseError [(String, Ast)]
-parseDefs = parse program ""
+parseDefs = runParser program initParserState ""
 
 parseContract :: String -> Either ParseError ([String], [String], [(String, Ast)])
-parseContract = parse contract "" where
+parseContract = runParser contract initParserState "" where
 
 -- The Constraints monad combines a State monad and an Either monad.
 -- The state consists of the set of constraints and next integer available
@@ -419,13 +504,13 @@ methods = M.fromList
     m = GV "m"
 
 listEqHack :: (String, Ast)
-listEqHack = r where Right [r] = parseDefs "list_eq_instance d a b = case a of [] -> (case b of [] -> True; w -> False); (x:xs) -> (case b of [] -> False; (y:ys)-> (d x y) && list_eq_instance d xs ys)"
+listEqHack = r where Right [r] = parseDefs "list_eq_instance d a b = case a of { [] -> case b of {[] -> True; w -> False}; (x:xs) -> case b of { [] -> False; (y:ys)-> (d x y) && list_eq_instance d xs ys } }"
 
 maybePureHack :: (String, Ast)
 maybePureHack = r where Right [r] = parseDefs "maybe_pure x = Just x"
 
 maybeMonadHack :: (String, Ast)
-maybeMonadHack = r where Right [r] = parseDefs "maybe_monad x f = (case x of Nothing -> Nothing; Just a -> f a)"
+maybeMonadHack = r where Right [r] = parseDefs "maybe_monad x f = case x of { Nothing -> Nothing; Just a -> f a }"
 
 -- This works because it's post-type-checking.
 ioPureHack :: (String, Ast)
@@ -466,9 +551,11 @@ dictSolve dsoln soln ast = case ast of
     findInstance "Save" t = case t of
       TC "String" -> Pack 0 2 :@ Var "String-save" :@ Var "String-load"
       TC "Int" -> Pack 0 2 :@ Var "Int-save" :@ Var "Int-load"
+      e -> error $ "BUG! no Save for " ++ show e
     findInstance "Monad" t = case t of
       TC "Maybe" -> Pack 0 2 :@ Var "maybe_pure" :@ Var "maybe_monad"
       TC "IO" -> Pack 0 2 :@ Var "io_pure" :@ Var "io_monad"
+      e -> error $ "BUG! no Monad for " ++ show e
     findInstance d _ = error $ "BUG! bad class: " ++ show d
 
 typeSolve :: [(String, Type)] -> Type -> Type

@@ -119,10 +119,10 @@ main = runTestTT $ TestList $ (\(result, source) -> TestCase $
       , "cons h t c n = c h(t c n); nil c n = n;"
       , "main_ = length (cons 3 (cons 3 (cons 3 nil)))"
       ])
-    , ("120", "fac n = (case n == 0 of True -> 1; False -> (n * fac (n - 1))); main_ = fac 5")
-    , ("2", "gcd a b = (case a == b of True -> a; False -> (case a < b of"
-      ++ " True -> gcd b a; False -> gcd b (a - b))); main_ = gcd 6 10")
-    , ("9", "nfib n = (case n < 2 of True -> 1; False -> 1 + nfib (n - 1) + nfib (n - 2)); main_ = nfib 4")
+    , ("120", "fac n = case n == 0 of { True -> 1; False -> (n * fac (n - 1)) }\nmain_ = fac 5")
+    , ("2", "gcd a b = case a == b of { True -> a; False -> case a < b of"
+      ++ " { True -> gcd b a; False -> gcd b (a - b) } }; main_ = gcd 6 10")
+    , ("9", "nfib n = case n < 2 of { True -> 1; False -> 1 + nfib (n - 1) + nfib (n - 2) }; main_ = nfib 4")
     , ("Pack 1", "main_ = 2 + 2 == 4")
     , ("Pack 0", "main_ = 2 + 2 == 5")
     , ("Pack 1", "main_ = [1,1,2] == [1,1,2]")

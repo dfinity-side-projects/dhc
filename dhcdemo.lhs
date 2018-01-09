@@ -25,26 +25,30 @@ function runWasmInts(a){WebAssembly.instantiate(new Uint8Array(a),
 </script>
 <p><textarea id="src" rows="25" cols="80">
 -- Gratuitous mutual recursion.
-factorial n = (case n == 0 of True -> 1; False -> n * factorial2 (n - 1));
-factorial2 n = (case n == 0 of True -> 1; False -> n * factorial (n - 1));
-foldr f n xs = (case xs of [] -> n; 
-                           (a:as) -> f a (foldr f n as));
-uncurry f p = (case p of (a, b) -> f a b);
-sum = foldr (+) 0;
-enumFromTo a b = (case a > b of True -> []; False -> a : enumFromTo (a + 1) b);
-map f = foldr (\x xs -> f x:xs) [];
-tenTimes x = 10 * x;
-f rec n = (case n == 0 of True -> 0; False -> rec (n - 1) + 2*n - 1);
-f $ x = f x;
+factorial n = case n == 0 of True  -> 1
+                             False -> n * factorial2 (n - 1)
+factorial2 n = case n == 0 of True  -> 1
+                              False -> n * factorial (n - 1)
+foldr f n xs = case xs of [] -> n
+                          (a:as) -> f a (foldr f n as)
+uncurry f p = case p of (a, b) -> f a b
+sum = foldr (+) 0
+enumFromTo a b = case a > b of True  -> []
+                               False -> a : enumFromTo (a + 1) b
+map f = foldr (\x xs -> f x:xs) []
+tenTimes x = 10 * x
+f rec n = case n == 0 of True -> 0
+                         False -> rec (n - 1) + 2*n - 1
+f $ x = f x
 run = let {fixedf = f fixedf} in fixedf 100 +
   uncurry (+) (factorial 5, sum $ map tenTimes [1..5])
+
 </textarea></p>
 <button id="go">Compile & Run!</button>
 <p><textarea id="asm" readonly rows="5" cols="80">
 </textarea></p>
 <div id="out"></div>
 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-
 //////////////////////////////////////////////////////////////////////////////
 \begin{code}
 {-# LANGUAGE OverloadedStrings #-}
