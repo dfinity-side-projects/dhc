@@ -63,7 +63,7 @@ data AnnAst' ann
   | AnnPlaceholder String Type
   deriving Show
 
-data LayoutState = IndentAgain Int | LineStart | LineMiddle | AwaitBrace deriving (Eq, Show)
+data LayoutState = IndentAgain Int | LineStart | LineMiddle | AwaitBrace | Boilerplate deriving (Eq, Show)
 type Parser = Parsec String (LayoutState, [Int])
 
 program :: Parser [(String, Ast)]
@@ -101,11 +101,11 @@ fixity :: String -> (Associativity, Int)
 fixity o = fromMaybe (LAssoc, 9) $ M.lookup o standardFixities
 
 supercombinators :: Parser [(String, Ast)]
-supercombinators = between (want "{") (want "}") $ sc `sepBy` want ";" where
-  sc = do
+supercombinators = catMaybes <$> between (want "{") (want "}") (sc `sepBy` want ";") where
+  sc = try (do
     (fun:args) <- scOp <|> many1 varStr
     void $ want "="
-    (,) fun . Lam args <$> expr
+    Just . (,) fun . Lam args <$> expr) <|> pure Nothing
   scOp = try $ do
     l <- varStr
     op <- varSym
@@ -159,14 +159,15 @@ supercombinators = between (want "{") (want "}") $ sc `sepBy` want ";" where
     Let ds <$> expr
   caseExpr = do
     x <- between (want "case") (want "of") expr
-    as <- between (want "{") (want "}") $ alt `sepBy` want ";"
+    as <- catMaybes <$> between (want "{") (want "}") (alt `sepBy` want ";")
+    when (null as) $ fail "empty case"
     pure $ Cas x as
   lambda = Lam <$> between (want "\\") (want "->") (many1 varStr) <*> expr
-  alt = do
+  alt = try (do
     p <- expr  -- TODO: Restrict to patterns.
     void $ want "->"
     x <- expr
-    pure $ (p, x)
+    pure $ Just (p, x)) <|> pure Nothing
   molecule = lambda <|> foldl1' (:@) <$> many1 atom
   atom = preOp <|> tup <|> call <|> qvar <|> var <|> num <|> str
     <|> lis <|> enumLis
@@ -189,13 +190,15 @@ supercombinators = between (want "{") (want "}") $ sc `sepBy` want ";" where
   splitDot s = second tail $ splitAt (fromJust $ elemIndex '.' s) s
   qvar = try $ do
     (t, s) <- tok
-    when (t /= LexQual) $ fail""
+    when (t /= LexQual) $ fail ""
     pure $ uncurry Qual $ splitDot s
-  call = try $ do
+  call = do
     void $ want "call"
     (t, s) <- tok
-    when (t /= LexQual) $ fail""
-    pure $ uncurry Call $ splitDot s
+    case t of
+      LexQual -> pure $ uncurry Call $ splitDot s
+      LexVar  -> pure $ Call "" s
+      _ -> fail "bad call"
   num = try $ do
     (t, s) <- tok
     when (t /= LexNumber) $ fail ""
@@ -218,12 +221,15 @@ varStr = try $ do
 want :: String -> Parser String
 want t = expect <|> autoCloseBrace where
   autoCloseBrace = if t /= "}" then fail "" else do
-    (st, is) <- getState
-    case is of
-      (m:ms) | m /= 0 -> do
-        putState (st, ms)
-        pure "}"
-      _ -> fail ""
+    (ty, x) <- lookAhead tok
+    if ty == LexSpecial && x == ")" || x == "]" then do
+      (st, is) <- getState
+      case is of
+        (m:ms) | m /= 0 -> do
+          putState (st, ms)
+          pure "}"
+        _ -> fail "missing }"
+    else fail "missing }"
   expect = try $ do
     (ty, s) <- tok
     unless (ty /= LexString && s == t) $ fail $ "expected " ++ t
@@ -232,10 +238,11 @@ want t = expect <|> autoCloseBrace where
 data LexemeType = LexString | LexNumber | LexVar | LexSpecial | LexSymbol | LexQual | LexEOF deriving (Eq, Show)
 type Lexeme = (LexemeType, String)
 
--- | Layout-aware lexer. Assumes `filler` has just been called.
+-- | Layout-aware lexer.
 -- See https://www.haskell.org/onlinereport/haskell2010/haskellch10.html
 tok :: Parser Lexeme
 tok = do
+  filler
   (st, is) <- getState
   let
     autoContinueBrace n = case is of
@@ -246,7 +253,7 @@ tok = do
       _ -> rawTok
     explicitBrace = try $ do
       r <- rawTok
-      when (r /= (LexSpecial, "{")) $ fail ""
+      when (r /= (LexSpecial, "{")) $ fail "bad indentation"
       putState (LineMiddle, 0:is)
       pure r
     end = do
@@ -285,8 +292,7 @@ tok = do
 
 rawTok :: Parser Lexeme
 rawTok = do
-  r <- symbol <|> number <|> ident <|> special <|> str
-  filler
+  r <- symbol <|> ident <|> special <|> str
   pure r
   where
   ident = do
@@ -298,9 +304,12 @@ rawTok = do
       when (s `elem` ["let", "where", "do", "of"]) $ do
         (_, is) <- getState
         putState (AwaitBrace, is)
-      pure (LexVar, s)
+      -- Allowing hashes to refer to contracts means identifiers can start
+      -- with digits. We may want to change this.
+      if all isDigit s
+      then pure (LexNumber, s)
+      else pure (LexVar, s)
   special = (,) LexSpecial <$> foldl1' (<|>) (string . pure <$> "(),;[]`{}")
-  number = (,) LexNumber <$> many1 digit
   symbol = (,) LexSymbol <$> many1 (oneOf "!#$%&*+./<=>?@\\^|-~:")
   str = do
     void $ char '"'
@@ -314,40 +323,36 @@ filler = void $ many $ void (char ' ') <|> nl <|> com
   com = do
     void $ between (try $ string "--") (char '\n') $ many $ noneOf "\n"
     (st, is) <- getState
-    when (st /= AwaitBrace) $ putState (LineStart, is)
+    when (st == LineMiddle) $ putState (LineStart, is)
   nl = do
     void $ char '\n'
     (st, is) <- getState
-    when (st /= AwaitBrace) $ putState (LineStart, is)
+    when (st == LineMiddle) $ putState (LineStart, is)
 
 contract :: Parser ([String], [String], [(String, Ast)])
 contract = do
-  filler
   es <- option [] $ try $ want "contract" >>
     (between (want "(") (want ")") $ varStr `sepBy` want ",")
   ms <- option [] $ try $ want "storage" >>
     (between (want "(") (want ")") $ varStr `sepBy` want ",")
+  putState (AwaitBrace, [])
   ds <- supercombinators
-  eof
   when (isNothing $ mapM (`lookup` ds) es) $ fail "bad exports"
   pure (es, ms, ds)
 
-initParserState :: (LayoutState, [Int])
-initParserState = (AwaitBrace, [])
-
 lexOffside :: String -> Either ParseError [String]
-lexOffside = runParser (filler >> tokUntilEOF) initParserState "" where
+lexOffside = fmap (fmap snd) <$> runParser tokUntilEOF (AwaitBrace, []) "" where
   tokUntilEOF = do
     t <- tok
     case fst t of
       LexEOF -> pure []
-      _ -> (snd t:) <$> tokUntilEOF
+      _ -> (t:) <$> tokUntilEOF
 
 parseDefs :: String -> Either ParseError [(String, Ast)]
-parseDefs = runParser program initParserState ""
+parseDefs = runParser program (AwaitBrace, []) ""
 
 parseContract :: String -> Either ParseError ([String], [String], [(String, Ast)])
-parseContract = runParser contract initParserState "" where
+parseContract = runParser contract (Boilerplate, []) "" where
 
 -- The Constraints monad combines a State monad and an Either monad.
 -- The state consists of the set of constraints and next integer available
@@ -646,11 +651,23 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
     b = GV "b"
     io = TApp (TC "IO")
 
+-- TODO: These dictionaries should not be built-in!
+hacks :: [(String, Ast)]
+hacks =
+ [ fstHack
+ , sndHack
+ , maybePureHack
+ , maybeMonadHack
+ , ioPureHack
+ , ioMonadHack
+ , listEqHack
+ ]
+
 compileMinimal :: String -> Either String [(String, Ast)]
 compileMinimal s = case parseDefs s of
   Left err -> Left $ "parse error: " ++ show err
   Right ds -> liftLambdas . (second snd <$>) <$>
-    inferType (\_ _ -> Left "no exports") preludeMinimal (fstHack : sndHack : maybePureHack : maybeMonadHack : ioPureHack : ioMonadHack : listEqHack : ds)
+    inferType (\_ _ -> Left "no exports") preludeMinimal (ds ++ hacks)
 
 inferType
   :: (String -> String -> Either String Type)

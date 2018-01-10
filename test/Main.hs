@@ -136,9 +136,10 @@ gmachineTests = (\(result, source) -> TestCase $
     , ("Pack 0", "main_ = [[1],[2]]   == [[1,1],[2]]")
     , ("Pack 0", "main_ = (==) [[1,1],[2]] [[1,3],[2]]")
     , ("Pack 1", "f x = x == x; main_ = f [1,2,3]")
+    , ("1", "main_ = (case 3 > 2 of True -> 1; False -> 0)")
     , (show ["hello"], "main = putHello")
-    , (show ["hello", "hello"], "main = putHello >>= (\\x -> putHello)")
-    , (show ["hello", "hello"], "main = putHello >>= (\\_ -> putHello)")
+    , (show ["hello", "hello"], "main = putHello >>= \\x -> putHello")
+    , (show ["hello", "hello"], "main = putHello >>= \\_ -> putHello")
     , (show ["hello", "hello"], unlines
       [ "main = do"
       , "  putHello"
