@@ -4,6 +4,7 @@ module Asm (wasm, typedAstToBin, compileMk1, Ins(..)) where
 import Control.Arrow
 import "mtl" Control.Monad.State
 import qualified Data.Map as M
+import Data.ByteString.Short (ShortByteString)
 import Data.Char
 import Data.Int
 import Data.List
@@ -14,6 +15,7 @@ import WasmOp
 
 -- | G-Machine instructions.
 data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal String
+  | PushString ShortByteString
   | MkAp | Slide Int | Split Int | Eval
   | UpdatePop Int | UpdateInd Int | Alloc Int
   | Casejump [(Maybe Int, [Ins])] | Trap deriving Show
@@ -56,8 +58,8 @@ nPages = 8
 --
 -- where each list item is a 32-bit integer.
 --
--- Globals are resolved in a giant `br_table`. This avoids the run-time type
--- checking of the table, but ugly.
+-- Globals are resolved in a giant `br_table`. This is ugly, but avoids
+-- run-time type-checking.
 
 data Tag = TagAp | TagInd | TagGlobal | TagInt | TagSum deriving Enum
 
@@ -224,6 +226,7 @@ prims = (Prim "putHello" 0 [End]:) $ mkPrim <$>
   , (">=", cmpAsm I64_ge_s)
   , ("&&", boolAsm I32_and)
   , ("||", boolAsm I32_or)
+  , ("++", undefined)  -- TODO
   ]
   where mkPrim (s, as) = Prim { primName = s, primArity = 2, primAsm = as }
 
@@ -691,6 +694,7 @@ mk1 ast = case ast of
     modify' $ \bs -> zip as [length bs..] ++ bs
     (++ [UpdatePop $ length as, Eval]) <$> mk1 b
   I n -> pure [PushInt n]
+  S s -> pure [PushString s]
   t :@ u -> do
     mu <- mk1 u
     bump 1

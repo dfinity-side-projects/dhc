@@ -633,6 +633,7 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
   , (">=", TC "Int" :-> TC "Int" :-> TC "Bool")
   , ("&&", TC "Bool" :-> TC "Bool" :-> TC "Bool")
   , ("||", TC "Bool" :-> TC "Bool" :-> TC "Bool")
+  , ("++", TC "String" :-> TC "String" :-> TC "String")
   , ("undefined", a)
   , ("putHello", io $ TC "()")
   ]) ++

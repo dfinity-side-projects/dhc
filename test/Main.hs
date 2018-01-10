@@ -1,11 +1,13 @@
+import Data.ByteString.Short (ShortByteString, fromShort, toShort)
 import Data.Int
 import qualified Data.Map as M
 import Data.Maybe
+import Data.Monoid
 import Test.HUnit
 import Asm
 import DHC
 
-data Node = NInt Int64 | NAp Int Int | NGlobal Int String | NInd Int | NCon Int [Int] | RealWorld [String] deriving Show
+data Node = NInt Int64 | NString ShortByteString | NAp Int Int | NGlobal Int String | NInd Int | NCon Int [Int] | RealWorld [String] deriving Show
 
 -- | Interprets G-Machine instructions.
 gmachine :: String -> String
@@ -46,11 +48,17 @@ gmachine prog = if "main" `M.member` funs then
     prim ">" = intCmp (>)
     prim "&&" = boolOp min
     prim "||" = boolOp max
+    prim "++" = go rest (k:srest) $ heapAdd $ NString t where
+      (s0:s1:srest) = s
+      NString str0 = h M.! s0
+      NString str1 = h M.! s1
+      t = toShort $ fromShort str0 <> fromShort str1
     prim "putHello" = go rest (k:tail s) $ rwAdd "hello" $ M.insert k1 (NCon 0 []) $ heapAdd $ NCon 0 [k1, 0] where k1 = k + 1
     prim g   = error $ "unsupported: " ++ g
     exec ins = case ins of
       Trap -> "UNREACHABLE"
       PushInt n -> go rest (k:s) $ heapAdd $ NInt n
+      PushString str -> go rest (k:s) $ heapAdd $ NString str
       Push n -> go rest (s!!n:s) h
       PushGlobal v -> go rest (k:s) $ heapAdd $ NGlobal (arity v) v
       MkAp -> let (s0:s1:srest) = s in go rest (k:srest) $ heapAdd $ NAp s0 s1
@@ -87,6 +95,7 @@ gmachine prog = if "main" `M.member` funs then
     | "main_" `M.member` funs = case h M.! r of
       NInt n -> show n
       NCon n _ -> "Pack " ++ show n
+      NString s -> show s
       _ -> error "expect NInt or NCon on stack"
     | NCon 0 [_, o] <- h M.! r, RealWorld out <- h M.! o = show out
   go [] s h = error $ "bad stack: " ++ show (s, h)
@@ -137,6 +146,7 @@ gmachineTests = (\(result, source) -> TestCase $
     , ("Pack 0", "main_ = (==) [[1,1],[2]] [[1,3],[2]]")
     , ("Pack 1", "f x = x == x; main_ = f [1,2,3]")
     , ("1", "main_ = (case 3 > 2 of True -> 1; False -> 0)")
+    , ("\"Hello, World\"", "main_ = \"Hello\" ++ \", \" ++ \"World\"")
     , (show ["hello"], "main = putHello")
     , (show ["hello", "hello"], "main = putHello >>= \\x -> putHello")
     , (show ["hello", "hello"], "main = putHello >>= \\_ -> putHello")
