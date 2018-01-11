@@ -2,14 +2,15 @@
 
 The following compiles Haskell to WebAssembly and runs it.
 
-It expects a pure function named `run`, which it reduces to weak head
-normal form. If the result is an integer, then we print this integer. If
-the result is algebraic data type, then we print the index of the data
-constructor; for example, `False` and `Nothing` are 0, `True` and `Just`
-are 1.
-
 Only a tiny fragment of the language is supported. There is almost no syntax
 sugar.
+
+System calls:
+
+------------------------------------------------------------------------------
+putStr :: String -> IO ()
+putInt :: Int -> IO ()
+------------------------------------------------------------------------------
 
 There is no garbage collection.
 
@@ -18,8 +19,19 @@ https://github.com/dfinity/dhc[Source].
 [pass]
 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 <script type="text/javascript">
+var ram, dv;
+function syscall(n, addr) {
+Haste.syscall(n, addr);
+}
+function load8(addr) { return dv.getUint8(addr); }
+function load32(addr) { return dv.getUint32(addr, true); }
 function runWasmInts(a){WebAssembly.instantiate(new Uint8Array(a),
-{i:{f:(x,y) => Haste.outputcb(x,y)}}).then(x => x.instance.exports.e());}
+{i:{f:(x,y) => syscall(x,y)}}).then(x => {
+ram = x.instance.exports.mem;
+dv = new DataView(ram.buffer);
+document.getElementById('out').innerHTML ="";
+x.instance.exports.e()});
+}
 </script>
 <script src="dhcdemo.js">
 </script>
@@ -37,37 +49,61 @@ enumFromTo a b = case a > b of True  -> []
                                False -> a : enumFromTo (a + 1) b
 map f = foldr (\x xs -> f x:xs) []
 tenTimes x = 10 * x
+f $ x = f x
 f rec n = case n == 0 of True -> 0
                          False -> rec (n - 1) + 2*n - 1
-f $ x = f x
-run = let {fixedf = f fixedf} in fixedf 100 +
-  uncurry (+) (factorial 5, sum $ map tenTimes [1..5])
-
+main = do
+  putStr "recursion with fix: "
+  let {fixedf = f fixedf} in putInt $ fixedf 100
+  putStr "\n5! + (10 + 20 + 30 + 40 + 50) = "
+  putInt $ uncurry (+) (factorial 5, sum $ map tenTimes [1..5])
 </textarea></p>
 <button id="go">Compile & Run!</button>
 <p><textarea id="asm" readonly rows="5" cols="80">
 </textarea></p>
-<div id="out"></div>
+<pre id="out"></pre>
 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 //////////////////////////////////////////////////////////////////////////////
 \begin{code}
 {-# LANGUAGE OverloadedStrings #-}
 import Control.Monad
+import Data.Char
 import Haste.DOM
 import Haste.Events
 import Haste.Foreign
 import Asm
 
-printInts :: Elem -> Int -> Int -> IO ()
-printInts e x y = setProp e "innerHTML" $ case x of
-  0 -> show y ++ if y >= 0 then "" else
-    " (unsigned = " ++ show (fromIntegral y + b) ++ ")"
-  _ -> show $ fromIntegral x * b + ((fromIntegral y + b) `mod` b)
-  where b = 2^(32 :: Int) :: Integer
+append :: Elem -> String -> IO ()
+append e s = do
+  v <- getProp e "innerHTML"
+  setProp e "innerHTML" $ v ++ s
+
+syscall :: Elem -> Int -> Int -> IO ()
+syscall e n addr
+  | n == 21 = do
+    tag <- load8 addr
+    when (tag /= 5) $ error $ "BUG! want string (tag 5), got " ++ show tag
+    slen <- load32 $ addr + 4
+    s <- mapM load8 [addr + 8 + i | i <- [0..slen - 1]]
+    append e $ chr <$> s
+  | n == 22 = do
+    tag <- load8 addr
+    when (tag /= 3) $ error $ "BUG! want int (tag 3), got " ++ show tag
+    x <- load32 $ addr + 12
+    y <- load32 $ addr + 8
+    let b = 2^(32 :: Int) :: Integer
+    append e $ case x of
+      0 -> show y ++ if y >= 0 then "" else
+        " (unsigned = " ++ show (fromIntegral y + b) ++ ")"
+      _ -> show $ fromIntegral x * b + ((fromIntegral y + b) `mod` b)
+  | otherwise =  error "bad syscall"
+  where
+    load8 = ffi "load8" :: Int -> IO Int
+    load32 = ffi "load32" :: Int -> IO Int
 
 main :: IO ()
 main = withElems ["src", "asm", "go", "out"] $ \[src, asmEl, goB, outE] -> do
-  export "outputcb" $ printInts outE
+  export "syscall" $ syscall outE
   void $ goB `onEvent` Click $ const $ do
     setProp asmEl "value" ""
     s <- getProp src "value"

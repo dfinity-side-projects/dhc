@@ -1,10 +1,17 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE PackageImports #-}
 module Asm (wasm, typedAstToBin, compileMk1, Ins(..)) where
 import Control.Arrow
-import "mtl" Control.Monad.State
 import qualified Data.Map as M
+#ifdef __HASTE__
+import "mtl" Control.Monad.State
+import qualified Data.ByteString as SBS
+#else
+import Control.Monad.State
 import Data.ByteString.Short (ShortByteString)
+import qualified Data.ByteString.Short as SBS
+#endif
 import Data.Char
 import Data.Int
 import Data.List
@@ -12,6 +19,10 @@ import Data.Maybe
 
 import DHC hiding (Call, Type)
 import WasmOp
+
+#ifdef __HASTE__
+type ShortByteString = SBS.ByteString
+#endif
 
 -- | G-Machine instructions.
 data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal String
@@ -38,7 +49,7 @@ nPages = 8
 --    4 Enum
 --    8, 12.. Heap addresses of components.
 --
--- Application `f x`.
+-- Application `f x`:
 --    0 TagAp
 --    4 Unused
 --    8 f
@@ -52,6 +63,11 @@ nPages = 8
 --    0 TagInd
 --    4 Heap address of target
 --
+-- String:
+--    0 TagString
+--    4 length
+--    8 bytes
+--
 -- For example, `Just 42` is represented by:
 --
 --   [TagSum, 1, p], where p points to [TagInt, 0, 42]
@@ -61,7 +77,7 @@ nPages = 8
 -- Globals are resolved in a giant `br_table`. This is ugly, but avoids
 -- run-time type-checking.
 
-data Tag = TagAp | TagInd | TagGlobal | TagInt | TagSum deriving Enum
+data Tag = TagAp | TagInd | TagGlobal | TagInt | TagSum | TagString deriving Enum
 
 type WasmOp = Op
 
@@ -78,7 +94,9 @@ encWasmOp op = case op of
   I32_load8_u m n -> [0x2d, m, n]
   I32_load16_u m n -> [0x2f, m, n]
   I32_store m n -> [0x36, m, n]
+  I32_store8 m n -> [0x3a, m, n]
   Br n -> 0xc : leb128 n
+  Br_if n -> 0xd : leb128 n
   Br_table bs a -> 0xe : leb128 (length bs) ++ concatMap leb128 (bs ++ [a])
   If _ as -> [0x4, 0x40] ++ concatMap encWasmOp as ++ [0xb]
   Block _ as -> [2, 0x40] ++ concatMap encWasmOp as ++ [0xb]
@@ -87,8 +105,8 @@ encWasmOp op = case op of
 
 intAsm :: WasmOp -> [WasmOp]
 intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
-  [ Get_global hp  -- [hp] = Int
-  , I32_const $ fromIntegral $ fromEnum TagInt
+  [ Get_global hp  -- [hp] = TagInt
+  , tag_const TagInt
   , I32_store 2 0
   -- [hp + 8] = [[sp + 4] + 8] `op` [[sp + 8] + 8]
   , Get_global hp  -- PUSH hp + 8
@@ -127,8 +145,8 @@ intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
 
 cmpAsm :: WasmOp -> [WasmOp]
 cmpAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
-  [ Get_global hp  -- [hp] = Sum
-  , I32_const $ fromIntegral $ fromEnum TagSum
+  [ Get_global hp  -- [hp] = TagSum
+  , tag_const TagSum
   , I32_store 2 0
   -- [hp + 4] = [[sp + 4] + 8] == [[sp + 8] + 8]
   , Get_global hp  -- PUSH hp + 4
@@ -167,8 +185,8 @@ cmpAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
 
 boolAsm :: WasmOp -> [WasmOp]
 boolAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
-  [ Get_global hp  -- [hp] = Sum
-  , I32_const $ fromIntegral $ fromEnum TagSum
+  [ Get_global hp  -- [hp] = TagSum
+  , tag_const TagSum
   , I32_store 2 0
   -- [hp + 4] = [[sp + 4] + 4] `op` [[sp + 8] + 4]
   , Get_global hp
@@ -205,6 +223,122 @@ boolAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
   , Set_global hp
   ] ++ fromIns (UpdatePop 2) ++ [Call 1, End]
 
+catAsm :: [WasmOp]
+catAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
+  [ Get_global sp  -- PUSH sp + 8
+  , I32_const 8
+  , I32_add
+  , Get_global hp  -- PUSH hp
+  , Get_global hp  -- [hp] = TagString
+  , tag_const TagString
+  , I32_store 2 0
+
+  , Get_global hp -- [hp + 4] = [[sp + 4] + 4] + [[sp + 8] + 4]
+  , I32_const 4
+  , I32_add
+  , Get_global sp
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , Get_global sp
+  , I32_const 8
+  , I32_add
+  , I32_load 2 0
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , I32_add
+  , I32_store 2 0
+  , Get_global sp  -- bp = [[sp + 4] + 4]
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , Set_global bp
+  , Get_global hp  -- hp = hp + 8
+  , I32_const 8
+  , I32_add
+  , Set_global hp
+  , Get_global bp  -- PUSH bp
+  , Loop Nada
+    [ Get_global bp  -- bp = bp - 1
+    , I32_const 1
+    , I32_sub
+    , Set_global bp
+
+    , Get_global hp  -- [hp + i] = [[sp + 4] + 8 + i] | i <- [0..bp - 1]
+    , Get_global bp
+    , I32_add
+    , Get_global sp
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 8
+    , I32_add
+    , Get_global bp
+    , I32_add
+    , I32_load8_u 0 0
+    , I32_store8 0 0
+
+    , Get_global bp
+    , Br_if 0
+    ]
+  , Get_global hp  -- hp = hp + old_bp  ; Via POP.
+  , I32_add
+  , Set_global hp
+  , Get_global sp  -- bp = [[sp + 8] + 4]
+  , I32_const 8
+  , I32_add
+  , I32_load 2 0
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , Set_global bp
+  , Get_global bp  -- PUSH bp
+  , Loop Nada
+    [ Get_global bp  -- bp = bp - 1
+    , I32_const 1
+    , I32_sub
+    , Set_global bp
+    , Get_global hp  -- [hp + i] = [[sp + 8] + 8 + i] | i <- [0..bp - 1]
+    , Get_global bp
+    , I32_add
+    , Get_global sp
+    , I32_const 8
+    , I32_add
+    , I32_load 2 0
+    , I32_const 8
+    , I32_add
+    , Get_global bp
+    , I32_add
+    , I32_load8_u 0 0
+    , I32_store8 0 0
+    , Get_global bp
+    , Br_if 0
+    ]
+  , Get_global hp  -- hp = hp + old_bp  ; Via POP.
+  , I32_add
+  , Set_global hp
+  , I32_store 2 0  -- [sp + 8] = old_hp  ; Via POPs.
+  , Get_global sp  -- sp = sp + 4
+  , I32_const 4
+  , I32_add
+  , Set_global sp
+  , I32_const 0  -- Align hp.
+  , Get_global hp
+  , I32_sub
+  , I32_const 3
+  , I32_and
+  , Get_global hp
+  , I32_add
+  , Set_global hp
+  ] ++ fromIns (UpdatePop 2) ++ [Call 1, End]
+
 -- Primitive functions.
 data Prim = Prim
   { primName :: String
@@ -212,8 +346,34 @@ data Prim = Prim
   , primAsm :: [WasmOp]
   }
 
+sysCall :: Int32 -> [WasmOp]
+sysCall n = concatMap fromIns [ Push 0, Eval] ++
+  -- Stack = [putStr, putStr :@ str, putStr :@ str :@ RealWorld, ...]
+  [ I32_const n  -- System call.
+  , Get_global sp
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , Call 0
+  -- Clobber the stack: no sharing in the IO monad.
+  , Get_global sp  -- [sp + 16] = 42
+  , I32_const 16
+  , I32_add
+  , I32_const 42
+  , I32_store 2 0
+  , Get_global sp  -- sp = sp + 12
+  , I32_const 12
+  , I32_add
+  , Set_global sp
+  ] ++ concatMap fromIns [Copro 0 0, Copro 0 2] ++
+  [ End
+  ]
+
 prims :: [Prim]
-prims = (Prim "putHello" 0 [End]:) $ mkPrim <$>
+prims =
+  [ Prim "putStr" 1 $ sysCall 21
+  , Prim "putInt" 1 $ sysCall 22
+  ] ++ fmap mkPrim
   [ ("+", intAsm I64_add)
   , ("-", intAsm I64_sub)
   , ("*", intAsm I64_mul)
@@ -226,7 +386,7 @@ prims = (Prim "putHello" 0 [End]:) $ mkPrim <$>
   , (">=", cmpAsm I64_ge_s)
   , ("&&", boolAsm I32_and)
   , ("||", boolAsm I32_or)
-  , ("++", undefined)  -- TODO
+  , ("++", catAsm)
   ]
   where mkPrim (s, as) = Prim { primName = s, primArity = 2, primAsm = as }
 
@@ -272,48 +432,30 @@ insToBin funs m = concat
     , [encType I32, 1, 0x41, 0, 0xb]  -- BP
     ]
   -- Export section.
-  -- [0, n] = external_kind Function, index n.
-  , sect 7 [encStr "e" ++ [0, length fs + 1]]
+  , sect 7
+    -- 0 = external_kind Function, n = function index.
+    [ encStr "e" ++ [0, length fs + 1]
+    -- 2 = external_kind Memory, 0 = memory index
+    , encStr "mem" ++ [2, 0]
+    ]
   , sect 10 $ encProcedure <$> (fs ++  -- Code section.
-    [fromInsWith (getGlobal funs) (PushGlobal "run") ++
-    [ Call 1
-    , Get_global sp
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , Set_global bp
-    , Block Nada
-      [ Block Nada
-        [ Get_global bp
-        , I32_load 2 0
-        , Br_table [2, 2, 2, 0, 1] 2  -- Branch on Tag.
-        ]  -- Int.
-      , Get_global bp  -- High bits.
-      , I32_const 8
-      , I32_add
-      , I64_load 3 0
-      , I64_const 32
-      , I64_shr_u
-      , I32_wrap_i64
-      , Get_global bp  -- Low bits.
-      , I32_const 8
-      , I32_add
-      , I64_load 3 0
-      , I32_wrap_i64
-      , Call 0
-      , Br 1
-      ]  -- Sum (enum).
-    , I32_const 0
-    , Get_global bp
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , Call 0
-    , End
-    ]])
+     -- The magic constant 42 represents the RealWorld.
+    [ [ Get_global sp  -- [sp] = 42
+      , I32_const 42
+      , I32_store 2 0
+      , Get_global sp  -- sp = sp - 4
+      , I32_const 4
+      , I32_sub
+      , Set_global sp
+      ]
+      ++ concatMap (fromInsWith $ getGlobal funs)
+        [PushGlobal "main", MkAp]
+      ++ [ Call 1, End ]
+    ])
   ] where
   -- Function 0: import function which we send our outputs.
-  -- Function 1: Eval.
+  -- Function 1: Eval (reduce to weak head normal form).
+  -- Function 2: reduce to normal form.
   -- Afterwards, the primitive functions, then the functions in the program.
   fs = evalAsm (length prims + length m) : (primAsm <$> prims)
     ++ ((++ [End]) . concatMap (fromInsWith $ getGlobal funs) . snd <$> m)
@@ -322,6 +464,7 @@ insToBin funs m = concat
   encProcedure = lenc . (0:) . concatMap encWasmOp
   encType I32 = 0x7f
   encType I64 = 0x7e
+  encType _ = error "TODO"
   -- | Encodes function signature.
   encSig ins outs = 0x60 : lenc (encType <$> ins) ++ lenc (encType <$> outs)
   evalAsm n =
@@ -448,7 +591,7 @@ fromInsWith lookupGlobal instruction = case instruction of
     , I32_const 4
     , I32_sub
     , Set_global sp
-    , Get_global hp  -- [hp] = Int
+    , Get_global hp  -- [hp] = TagInt
     , tag_const TagInt
     , I32_store 2 0
     , Get_global hp  -- [hp + 8] = n
@@ -458,6 +601,44 @@ fromInsWith lookupGlobal instruction = case instruction of
     , I64_store 3 0
     , Get_global hp  -- hp = hp + 16
     , I32_const 16
+    , I32_add
+    , Set_global hp
+    ]
+  -- TODO: Prepopulate heap instead of this expensive code.
+  PushString sbs -> let
+    s = SBS.unpack sbs
+    delta = (4 - (SBS.length sbs `mod` 4)) `mod` 4
+    in
+    [ Get_global sp  -- [sp] = hp
+    , Get_global hp
+    , I32_store 2 0
+    , Get_global sp  -- sp = sp - 4
+    , I32_const 4
+    , I32_sub
+    , Set_global sp
+    , Get_global hp  -- [hp] = TagString
+    , tag_const TagString
+    , I32_store 2 0
+    , Get_global hp  -- [hp + 4] = SBS.length sbs
+    , I32_const 4
+    , I32_add
+    , I32_const $ fromIntegral $ SBS.length sbs
+    , I32_store 2 0
+    , Get_global hp  -- hp = hp + 8
+    , I32_const 8
+    , I32_add
+    , Set_global hp
+    ] ++ concat
+    [ [ Get_global hp
+      , I32_const $ fromIntegral c
+      , I32_store8 0 0
+      , Get_global hp
+      , I32_const 1
+      , I32_add
+      , Set_global hp
+      ] | c <- s] ++
+    [ Get_global hp
+    , I32_const $ fromIntegral delta
     , I32_add
     , Set_global hp
     ]
@@ -474,7 +655,7 @@ fromInsWith lookupGlobal instruction = case instruction of
     , Set_global sp
     ]
   MkAp ->
-    [ Get_global hp  -- [hp] = Ap
+    [ Get_global hp  -- [hp] = TagAp
     , tag_const TagAp
     , I32_store 2 0
     , Get_global hp  -- [hp + 8] = [sp + 4]
@@ -515,7 +696,7 @@ fromInsWith lookupGlobal instruction = case instruction of
     , I32_const 4
     , I32_sub
     , Set_global sp
-    , Get_global hp  -- [hp] = Global | (n << 8)
+    , Get_global hp  -- [hp] = TagGlobal | (n << 8)
     , I32_const $ fromIntegral $ fromEnum TagGlobal + 256*n
     , I32_store 2 0
     , Get_global hp  -- [hp + 4] = n
@@ -547,7 +728,7 @@ fromInsWith lookupGlobal instruction = case instruction of
     [ Get_global sp  -- [sp] = hp
     , Get_global hp
     , I32_store 2 0
-    , Get_global hp  -- [hp] = Ind
+    , Get_global hp  -- [hp] = TagInd
     , tag_const TagInd
     , I32_store 2 0
     , Get_global hp  -- hp = hp + 8
@@ -601,7 +782,7 @@ fromInsWith lookupGlobal instruction = case instruction of
     ]
   Copro m n ->
     [ Get_global hp  -- [hp] = Sum
-    , tag_const TagSum
+    , I32_const $ fromIntegral $ fromEnum TagSum + 256 * n
     , I32_store 2 0
     , Get_global hp  -- [hp + 4] = m
     , I32_const 4

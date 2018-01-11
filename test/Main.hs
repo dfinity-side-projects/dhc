@@ -1,3 +1,4 @@
+import Data.ByteString.Char8 (unpack)
 import Data.ByteString.Short (ShortByteString, fromShort, toShort)
 import Data.Int
 import qualified Data.Map as M
@@ -36,7 +37,7 @@ gmachine prog = if "main" `M.member` funs then
       NCon x [] = h M.! s0
       NCon y [] = h M.! s1
     rwAdd msg heap | RealWorld ms <- heap M.! 0 =
-      M.insert 0 (RealWorld $ msg:ms) heap
+      M.insert 0 (RealWorld $ ms ++ [msg]) heap
     rwAdd _ _ = error "BUG! Expect RealWorld at 0 on heap"
     prim "+" = intInt (+)
     prim "-" = intInt (-)
@@ -53,7 +54,10 @@ gmachine prog = if "main" `M.member` funs then
       NString str0 = h M.! s0
       NString str1 = h M.! s1
       t = toShort $ fromShort str0 <> fromShort str1
-    prim "putHello" = go rest (k:tail s) $ rwAdd "hello" $ M.insert k1 (NCon 0 []) $ heapAdd $ NCon 0 [k1, 0] where k1 = k + 1
+    prim "putStr" = go rest (k:srest) $ rwAdd (unpack $ fromShort str) $ M.insert k1 (NCon 0 []) $ heapAdd $ NCon 0 [k1, 0] where
+      k1 = k + 1
+      (s0:_:srest) = s
+      NString str = h M.! s0
     prim g   = error $ "unsupported: " ++ g
     exec ins = case ins of
       Trap -> "UNREACHABLE"
@@ -75,7 +79,10 @@ gmachine prog = if "main" `M.member` funs then
         NInd i -> go (Right Eval:rest) (i:tail s) h
         NAp a _ -> go (Right Eval:rest) (a:s) h
         NGlobal n g -> let
-          p | g == "putHello" = [Left "putHello", Right $ UpdatePop 0, Right Eval]
+          p | g == "putStr" =
+               [ Right $ Push 1  -- RealWorld
+               , Right $ Push 1, Right Eval
+               , Left "putStr", Right $ UpdatePop 2, Right Eval]
             | otherwise  = case lookup g m of
             Just is -> Right <$> is
             Nothing -> (Right <$> [Push 1, Eval, Push 1, Eval]) ++
@@ -147,13 +154,13 @@ gmachineTests = (\(result, source) -> TestCase $
     , ("Pack 1", "f x = x == x; main_ = f [1,2,3]")
     , ("1", "main_ = (case 3 > 2 of True -> 1; False -> 0)")
     , ("\"Hello, World\"", "main_ = \"Hello\" ++ \", \" ++ \"World\"")
-    , (show ["hello"], "main = putHello")
-    , (show ["hello", "hello"], "main = putHello >>= \\x -> putHello")
-    , (show ["hello", "hello"], "main = putHello >>= \\_ -> putHello")
-    , (show ["hello", "hello"], unlines
+    , (show ["hello"], "main = putStr \"hello\"")
+    , (show ["hello", "world"], "main = putStr \"hello\" >>= \\x -> putStr \"world\"")
+    , (show ["hello", "hello"], "putHello = putStr \"hello\" ; main = putHello >>= \\_ -> putHello")
+    , (show ["hello", "world"], unlines
       [ "main = do"
-      , "  putHello"
-      , "  putHello"
+      , "  putStr \"hello\""
+      , "  putStr \"world\""
       ])
     ]
 

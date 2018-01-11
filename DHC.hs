@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE PackageImports #-}
 module DHC (parseContract, Ast(..), Type(..), inferType, parseDefs, lexOffside,
@@ -6,9 +7,14 @@ module DHC (parseContract, Ast(..), Type(..), inferType, parseDefs, lexOffside,
 import Control.Arrow
 import Control.DeepSeq (NFData(..))
 import Control.Monad
-import "mtl" Control.Monad.State
 import Data.Binary (Binary)
+#ifdef __HASTE__
+import "mtl" Control.Monad.State
+import Data.ByteString (ByteString, pack)
+#else
+import Control.Monad.State
 import Data.ByteString.Short (ShortByteString, pack)
+#endif
 import Data.ByteString.Internal (c2w)
 import Data.Char
 import Data.Int
@@ -18,6 +24,10 @@ import Data.Map.Strict (Map)
 import Data.Maybe
 import GHC.Generics (Generic)
 import Text.Parsec hiding (State)
+
+#ifdef __HASTE__
+type ShortByteString = ByteString
+#endif
 
 instance Binary Ast
 instance Binary Type
@@ -313,9 +323,14 @@ rawTok = do
   symbol = (,) LexSymbol <$> many1 (oneOf "!#$%&*+./<=>?@\\^|-~:")
   str = do
     void $ char '"'
-    s <- many $ (char '\\' >> oneOf "\\\"") <|> noneOf "\""
+    s <- many $ (char '\\' >> escapes) <|> noneOf "\""
     void $ char '"'
     pure (LexString, s)
+  escapes = foldl1' (<|>)
+    [ char '\\' >> pure '\\'
+    , char '"' >> pure '"'
+    , char 'n' >> pure '\n'
+    ]
 
 filler :: Parser ()
 filler = void $ many $ void (char ' ') <|> nl <|> com
@@ -406,7 +421,7 @@ gather findExport prelude env ast = case ast of
         pure (t1, AnnPlaceholder v $ TV x)
       Nothing -> case M.lookup v prelude of
         Just (ma, gt) -> flip (,) (maybe (AnnVar v) (uncurry AnnPack) ma) . fst <$> instantiate (gt, [])
-        Nothing       -> bad $ "undefined: " ++ v ++ show (prelude, env)
+        Nothing       -> bad $ "undefined: " ++ v
   t :@ u -> do
     a@(tt, _) <- rec env t
     b@(uu, _) <- rec env u
@@ -635,7 +650,8 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
   , ("||", TC "Bool" :-> TC "Bool" :-> TC "Bool")
   , ("++", TC "String" :-> TC "String" :-> TC "String")
   , ("undefined", a)
-  , ("putHello", io $ TC "()")
+  , ("putStr", TC "String" :-> io (TC "()"))
+  , ("putInt", TC "Int" :-> io (TC "()"))
   ]) ++
   [ ("False",   (jp 0 0, TC "Bool"))
   , ("True",    (jp 1 0, TC "Bool"))

@@ -6,12 +6,6 @@
 DHC is a Haskell compiler that produces WebAssembly.
 
 It accepts only a tiny subset of the language.
-There is almost no syntax sugar.
-
-Lambdas compile incorrectly. They should be manually lifted instead.
-
-There is no support for the `S` (strings), `Call` and `Qual` language features
-declared in `DHC.hs`, which are used by other Dfinity projects.
 
 ## Live demo
 
