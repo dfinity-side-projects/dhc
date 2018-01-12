@@ -5,6 +5,7 @@ module Main where
 import Control.Monad
 import Data.Bits
 import qualified Data.ByteString as B
+import Data.Char
 import Data.Int
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IM
@@ -17,12 +18,23 @@ main = do
   s <- B.getContents
   case parseWasm s of
     Left err -> putStrLn $ "parse error: " ++ show err
-    Right out -> execute [fun0] emptyMem putMem getMem out "e"
+    Right out -> execute [syscall] emptyMem putMem getMem out "e"
   where
-    fun0 [I32_const x, I32_const y] = putStrLn $ show (y, x)
     emptyMem = IM.empty
     putMem = \a k v -> pure $ IM.insert k v a
     getMem = \a k -> pure $ a IM.! k
+    syscall (VM {mem}) [I32_const x, I32_const y]
+      | y == 21 = do
+        tag <- getTag
+        when (tag /= 5) $ error "BUG! want String"
+        slen <- getNum getMem 4 (x + 4) mem
+        putStr . fmap chr =<< sequence [getNum getMem 1 (x + 8 + i) mem | i <- [0..slen - 1]]
+      | y == 22 = do
+        tag <- getTag
+        when (tag /= 3) $ error "BUG! want Int"
+        print =<< getNum getMem 8 (x + 8) mem
+      | otherwise = error "BUG! bad syscall"
+      where getTag = getNum getMem 1 x mem
 
 data VM a = VM
   { globs :: IntMap Op
@@ -50,7 +62,7 @@ shiftR64U :: Int64 -> Int64 -> Int64
 shiftR64U a b = fromIntegral $ shiftR ((fromIntegral a) :: Word64) $ fromIntegral ((fromIntegral b :: Word64) `mod` 64)
 
 execute :: Monad m =>
-  [[Op] -> m ()] -> a -> (a -> Int -> Word8 -> m a) -> (a -> Int -> m Word8)
+  [VM a -> [Op] -> m ()] -> a -> (a -> Int -> Word8 -> m a) -> (a -> Int -> m Word8)
   -> Wasm -> [Char] -> m ()
 execute fns initMem put get Wasm {imports, exports, code, globals} s = let
   fCount = length fns
@@ -61,7 +73,7 @@ execute fns initMem put get Wasm {imports, exports, code, globals} s = let
   run vm@VM{globs, stack, insts, mem} = case head $ head insts of
     Call i -> if i < fCount then do
         let k = length $ fst $ snd $ imports!!i
-        fns!!i $ take k stack
+        (fns!!i) vm $ take k stack
         run vm { stack = drop k stack, insts = i1 }
       else do
         run vm { insts = snd (code!!(i - fCount)):i1 }
@@ -69,6 +81,7 @@ execute fns initMem put get Wasm {imports, exports, code, globals} s = let
     Get_global i -> run vm {stack = globs IM.! i:stack, insts = i1}
     c@(I32_const _) -> run vm {stack = c:stack, insts = i1}
     c@(I64_const _) -> run vm {stack = c:stack, insts = i1}
+    I32_and -> binOp32 (.&.)
     I32_add -> binOp32 (+)
     I32_sub -> binOp32 (-)
     I32_mul -> binOp32 (*)
@@ -105,6 +118,9 @@ execute fns initMem put get Wasm {imports, exports, code, globals} s = let
     I32_store _ _ -> let (I32_const n:I32_const addr:_) = stack in do
       mem' <- putNum put 4 addr n mem
       run vm {stack = drop 2 stack, insts = i1, mem = mem'}
+    I32_store8 _ _ -> let (I32_const n:I32_const addr:_) = stack in do
+      mem' <- putNum put 1 addr n mem
+      run vm {stack = drop 2 stack, insts = i1, mem = mem'}
     I64_store _ _ -> do
       let
         I32_const addr = stack!!1
@@ -121,6 +137,9 @@ execute fns initMem put get Wasm {imports, exports, code, globals} s = let
     Block _ bl -> run vm {insts = bl:i1}
     Loop _ bl -> run vm {insts = bl:insts}
     Br k -> run vm {insts = drop (k + 1) insts}
+    Br_if k -> let (I32_const n:t) = stack in if n /= 0
+      then run vm {stack = t, insts = drop (k + 1) insts}
+      else run vm {stack = t, insts = i1}
     Br_table as d -> do
       let
         n = fromIntegral n' where I32_const n' = head stack
@@ -136,6 +155,6 @@ execute fns initMem put get Wasm {imports, exports, code, globals} s = let
         (I64_const b:I64_const a:_) = stack
         c = I64_const $ f a b
   Just fI = lookup s exports
-  in if fI < fCount then void $ fns!!fI $ [] else do
+  in if fI < fCount then undefined else
     run $ VM (IM.fromList $ zip [0..] $ head . snd <$> globals)
       [] [snd $ code!!(fI - fCount)] initMem

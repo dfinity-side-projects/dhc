@@ -8,6 +8,7 @@ import qualified Data.ByteString.Char8 as B8
 import Data.ByteString.Char8 (ByteString)
 import Data.Char
 import Data.Int
+import Data.Maybe
 import Data.Word
 
 import WasmOp
@@ -147,8 +148,9 @@ wasm = do
         t <- varuint32
         when (t > functionCount w) $ bad "function index out of range"
         case k of
-          Function -> pure (fieldStr, t)
-      pure w { exports = es }
+          Function -> pure $ Just (fieldStr, t)
+          Memory -> pure Nothing
+      pure w { exports = catMaybes es }
 
     sectFunction w = do
       -- TODO: Check type indices are in range.
