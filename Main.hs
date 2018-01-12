@@ -9,6 +9,7 @@ import Data.Char
 import Data.Int
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IM
+import Data.List
 import Data.Word
 
 import Network.DFINITY.Parse
@@ -18,41 +19,34 @@ main = do
   s <- B.getContents
   case parseWasm s of
     Left err -> putStrLn $ "parse error: " ++ show err
-    Right out -> execute [syscall] emptyMem putMem getMem out "e"
-  where
-    emptyMem = IM.empty
-    putMem = \a k v -> pure $ IM.insert k v a
-    getMem = \a k -> pure $ a IM.! k
-    syscall (VM {mem}) [I32_const x, I32_const y]
-      | y == 21 = do
-        tag <- getTag
-        when (tag /= 5) $ error "BUG! want String"
-        slen <- getNum getMem 4 (x + 4) mem
-        putStr . fmap chr =<< sequence [getNum getMem 1 (x + 8 + i) mem | i <- [0..slen - 1]]
-      | y == 22 = do
-        tag <- getTag
-        when (tag /= 3) $ error "BUG! want Int"
-        print =<< getNum getMem 8 (x + 8) mem
-      | otherwise = error "BUG! bad syscall"
-      where getTag = getNum getMem 1 x mem
+    Right out -> execute [syscall] out "e"
 
-data VM a = VM
+syscall :: VM -> [Op] -> IO ()
+syscall (VM {mem}) [I32_const x, I32_const y]
+  | y == 21 = do
+    when (getTag /= 5) $ error "BUG! want String"
+    let slen = getNum 4 (x + 4) mem
+    putStr $ [chr $ getNum 1 (x + 8 + i) mem | i <- [0..slen - 1]]
+  | y == 22 = do
+    when (getTag /= 3) $ error "BUG! want Int"
+    print (getNum 8 (x + 8) mem :: Int)
+  | otherwise = error $ "BUG! bad syscall " ++ show y
+  where getTag = getNum 1 x mem :: Int
+syscall a b = error $ "BUG! bad syscall " ++ show (a, b)
+
+data VM = VM
   { globs :: IntMap Op
   , stack :: [Op]
   , insts :: [[Op]]
-  , mem   :: a
+  , mem   :: IntMap Int
   } deriving Show
 
-getNum :: (Integral n, Monad m) =>
-  (a -> Int -> m Word8) -> Int -> Int32 -> a -> m n
-getNum get w addr mem = do
-  bs <- mapM (get mem) ((fromIntegral addr +) <$> [0..w-1])
-  pure $ sum $ zipWith (*) (fromIntegral <$> bs) ((256^) <$> [(0 :: Int)..])
+getNum :: Integral n => Int -> Int32 -> IntMap Int -> n
+getNum w addr mem = sum $ zipWith (*) (fromIntegral <$> bs) ((256^) <$> [(0 :: Int)..]) where bs = fmap (mem IM.!) ((fromIntegral addr +) <$> [0..w-1])
 
-putNum :: (Integral n, Monad m) =>
-  (a -> Int -> Word8 -> m a) -> Int -> Int32 -> n -> a -> m a
-putNum put w addr n mem = foldM f mem [0..w-1] where
-  f m k = put m (fromIntegral addr + k) $ getByte k
+putNum :: Integral n => Int -> Int32 -> n -> IntMap Int -> IntMap Int
+putNum w addr n mem = foldl' f mem [0..w-1] where
+  f m k = IM.insert (fromIntegral addr + k) (getByte k) m
   getByte k = fromIntegral $ n `div` (256^k) `mod` 256
 
 shiftR32U :: Int32 -> Int32 -> Int32
@@ -62,9 +56,8 @@ shiftR64U :: Int64 -> Int64 -> Int64
 shiftR64U a b = fromIntegral $ shiftR ((fromIntegral a) :: Word64) $ fromIntegral ((fromIntegral b :: Word64) `mod` 64)
 
 execute :: Monad m =>
-  [VM a -> [Op] -> m ()] -> a -> (a -> Int -> Word8 -> m a) -> (a -> Int -> m Word8)
-  -> Wasm -> [Char] -> m ()
-execute fns initMem put get Wasm {imports, exports, code, globals} s = let
+  [VM -> [Op] -> m ()] -> Wasm -> [Char] -> m ()
+execute fns Wasm {imports, exports, code, globals} s = let
   fCount = length fns
   run VM {insts} | null insts = pure ()
   run vm@VM {insts} | null $ head insts = case tail insts of
@@ -105,31 +98,31 @@ execute fns initMem put get Wasm {imports, exports, code, globals} s = let
       in run vm {stack = c:tail stack, insts = i1}
     I32_load8_u _ _ -> do
       let I32_const addr = head stack
-      c <- I32_const <$> getNum get 1 addr mem
+          c = I32_const $ getNum 1 addr mem
       run vm {stack = c:tail stack, insts = i1}
     I32_load16_u _ _ -> do
       let I32_const addr = head stack
-      c <- I32_const <$> getNum get 2 addr mem
+          c = I32_const $ getNum 2 addr mem
       run vm {stack = c:tail stack, insts = i1}
     I32_load _ _ -> do
       let I32_const addr = head stack
-      c <- I32_const <$> getNum get 4 addr mem
+          c = I32_const $ getNum 4 addr mem
       run vm {stack = c:tail stack, insts = i1}
     I32_store _ _ -> let (I32_const n:I32_const addr:_) = stack in do
-      mem' <- putNum put 4 addr n mem
+      let mem' = putNum 4 addr n mem
       run vm {stack = drop 2 stack, insts = i1, mem = mem'}
     I32_store8 _ _ -> let (I32_const n:I32_const addr:_) = stack in do
-      mem' <- putNum put 1 addr n mem
+      let mem' = putNum 1 addr n mem
       run vm {stack = drop 2 stack, insts = i1, mem = mem'}
     I64_store _ _ -> do
       let
         I32_const addr = stack!!1
         I64_const n = head stack
-      mem' <- putNum put 8 addr n mem
+      let mem' = putNum 8 addr n mem
       run vm {stack = drop 2 stack, insts = i1, mem = mem'}
     I64_load _ _ -> do
       let I32_const addr = head stack
-      c <- I64_const <$> getNum get 8 addr mem
+          c = I64_const $ getNum 8 addr mem
       run vm {stack = c:tail stack, insts = i1}
     If _ bl -> let I32_const n = head stack in if n == 1
       then run vm {stack = tail stack, insts = bl:i1}
@@ -155,6 +148,5 @@ execute fns initMem put get Wasm {imports, exports, code, globals} s = let
         (I64_const b:I64_const a:_) = stack
         c = I64_const $ f a b
   Just fI = lookup s exports
-  in if fI < fCount then undefined else
-    run $ VM (IM.fromList $ zip [0..] $ head . snd <$> globals)
-      [] [snd $ code!!(fI - fCount)] initMem
+  in run $ VM (IM.fromList $ zip [0..] $ head . snd <$> globals)
+      [] [[Call fI]] IM.empty

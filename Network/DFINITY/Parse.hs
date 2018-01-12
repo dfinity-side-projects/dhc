@@ -7,7 +7,6 @@ import Control.Monad
 import qualified Data.ByteString.Char8 as B8
 import Data.ByteString.Char8 (ByteString)
 import Data.Char
-import Data.Int
 import Data.Maybe
 import Data.Word
 
@@ -139,6 +138,7 @@ wasm = do
             t <- varuint32
             when (t > length (types w)) $ bad "type out of range"
             pure ((moduleStr, fieldStr), types w !! t)
+          _ -> error "TODO"
       pure w { imports = ms }
 
     sectExport w = do
@@ -150,6 +150,7 @@ wasm = do
         case k of
           Function -> pure $ Just (fieldStr, t)
           Memory -> pure Nothing
+          _ -> error "TODO"
       pure w { exports = catMaybes es }
 
     sectFunction w = do
@@ -190,7 +191,10 @@ wasm = do
     sectCode w = do
       bodies <- rep varuint32 $ do
         _ <- varuint32
-        locals <- concat <$> rep varuint32 (rep varuint32 valueType)
+        locals <- concat <$> rep varuint32 (do
+          n <- varuint32
+          t <- valueType
+          pure $ replicate n t)
         ops <- codeBlock
         pure (locals, ops)
       pure w { code = bodies}
