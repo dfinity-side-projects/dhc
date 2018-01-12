@@ -16,6 +16,7 @@ WORKDIR /tmp
 RUN git clone https://github.com/valderman/haste-compiler
 WORKDIR /tmp/haste-compiler
 RUN git checkout 0.6.0.0
+RUN printf '%s tagged-0.8.5\n%s transformers-compat-0.5.1.4\nsetup-info:\n  ghc:\n    linux64-nopie:\n      7.10.3:\n        url: "https://github.com/commercialhaskell/ghc/releases/download/ghc-7.10.3-release/ghc-7.10.3-x86_64-deb8-linux.tar.xz"\n        content-length: 90852380\n        sha1: bab16f95ef4fe6b7cc2fb6b36a02dceeeb53faa4\n' '-' '-' >> stack.yaml
 RUN stack setup
 RUN stack install
 RUN stack install hsc2hs
