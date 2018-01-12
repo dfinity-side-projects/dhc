@@ -335,8 +335,9 @@ rawTok = do
 filler :: Parser ()
 filler = void $ many $ void (char ' ') <|> nl <|> com
   where
+  newlines = "\r\n\f"
   com = do
-    void $ between (try $ string "--") (char '\n') $ many $ noneOf "\n"
+    void $ between (try $ string "--") ((void $ try $ string "\r\n") <|> (void $ oneOf newlines)) $ many $ noneOf newlines
     (st, is) <- getState
     when (st == LineMiddle) $ putState (LineStart, is)
   nl = do
