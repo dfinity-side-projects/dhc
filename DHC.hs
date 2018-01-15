@@ -681,10 +681,25 @@ hacks =
  , listEqHack
  ]
 
+expandSyscalls :: Ast -> Ast
+expandSyscalls ast = case ast of
+  t :@ u -> rec t :@ rec u
+  Lam xs t -> Lam xs $ rec t
+  Let xs t -> Let (second rec <$> xs) $ rec t
+  Cas x as -> Cas (rec x) (second rec <$> as)
+  Var s | Just t <- lookup s ss -> t
+  _ -> ast
+  where
+  rec = expandSyscalls
+  ss =
+    [ ("putStr", Var "#syscall" :@ I 1 :@ I 21)
+    , ("putInt", Var "#syscall" :@ I 1 :@ I 22)
+    ]
+
 compileMinimal :: String -> Either String [(String, Ast)]
 compileMinimal s = case parseDefs s of
   Left err -> Left $ "parse error: " ++ show err
-  Right ds -> liftLambdas . (second snd <$>) <$>
+  Right ds -> (second expandSyscalls <$>) . liftLambdas . (second snd <$>) <$>
     inferType (\_ _ -> Left "no exports") preludeMinimal (ds ++ hacks)
 
 inferType

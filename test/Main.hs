@@ -54,9 +54,13 @@ gmachine prog = if "main" `M.member` funs then
       NString str0 = h M.! s0
       NString str1 = h M.! s1
       t = toShort $ fromShort str0 <> fromShort str1
+    prim "#syscall"
+      | NInt 1 <- h M.! s0, NInt 21 <- h M.! s1, NAp _ a <- h M.! s2
+        = go (Right (Push 0):Right Eval:Left "putStr":Right (Slide 2):rest) (a:srest) h
+      where (s0:s1:_:s2:srest) = s
     prim "putStr" = go rest (k:srest) $ rwAdd (unpack $ fromShort str) $ M.insert k1 (NCon 0 []) $ heapAdd $ NCon 0 [k1, 0] where
       k1 = k + 1
-      (s0:_:srest) = s
+      (s0:srest) = s
       NString str = h M.! s0
     prim g   = error $ "unsupported: " ++ g
     exec ins = case ins of
@@ -79,10 +83,7 @@ gmachine prog = if "main" `M.member` funs then
         NInd i -> go (Right Eval:rest) (i:tail s) h
         NAp a _ -> go (Right Eval:rest) (a:s) h
         NGlobal n g -> let
-          p | g == "putStr" =
-               [ Right $ Push 1  -- RealWorld
-               , Right $ Push 1, Right Eval
-               , Left "putStr", Right $ UpdatePop 2, Right Eval]
+          p | g == "#syscall" = [ Left "#syscall" ]
             | otherwise  = case lookup g m of
             Just is -> Right <$> is
             Nothing -> (Right <$> [Push 1, Eval, Push 1, Eval]) ++

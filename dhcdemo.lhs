@@ -25,8 +25,9 @@ Haste.syscall(n, addr);
 }
 function load8(addr) { return dv.getUint8(addr); }
 function load32(addr) { return dv.getUint32(addr, true); }
+function store32(addr, x) { dv.setUint32(addr, x, true); }
 function runWasmInts(a){WebAssembly.instantiate(new Uint8Array(a),
-{i:{f:(x,y) => syscall(x,y)}}).then(x => {
+{i:{f:(n,sp,hp) => { return Haste.syscall(n,sp,hp); } }}).then(x => {
 ram = x.instance.exports.mem;
 dv = new DataView(ram.buffer);
 document.getElementById('out').innerHTML ="";
@@ -78,15 +79,20 @@ append e s = do
   v <- getProp e "innerHTML"
   setProp e "innerHTML" $ v ++ s
 
-syscall :: Elem -> Int -> Int -> IO ()
-syscall e n addr
+syscall :: Elem -> Int -> Int -> Int -> IO Int
+syscall e n sp hp
   | n == 21 = do
+    addr <- load32 $ sp + 4
     tag <- load8 addr
     when (tag /= 5) $ error $ "BUG! want string (tag 5), got " ++ show tag
     slen <- load32 $ addr + 4
     s <- mapM load8 [addr + 8 + i | i <- [0..slen - 1]]
     append e $ chr <$> s
+    store32 hp 4
+    store32 (hp + 4) 0
+    pure $ hp + 8
   | n == 22 = do
+    addr <- load32 $ sp + 4
     tag <- load8 addr
     when (tag /= 3) $ error $ "BUG! want int (tag 3), got " ++ show tag
     x <- load32 $ addr + 12
@@ -96,10 +102,14 @@ syscall e n addr
       0 -> show y ++ if y >= 0 then "" else
         " (unsigned = " ++ show (fromIntegral y + b) ++ ")"
       _ -> show $ fromIntegral x * b + ((fromIntegral y + b) `mod` b)
+    store32 hp 4
+    store32 (hp + 4) 0
+    pure $ hp + 8
   | otherwise =  error "bad syscall"
   where
     load8 = ffi "load8" :: Int -> IO Int
     load32 = ffi "load32" :: Int -> IO Int
+    store32 = ffi "store32" :: Int -> Int -> IO ()
 
 main :: IO ()
 main = withElems ["src", "asm", "go", "out"] $ \[src, asmEl, goB, outE] -> do

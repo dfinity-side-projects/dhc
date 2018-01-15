@@ -45,7 +45,7 @@ nPages = 8
 --    8 64-bit value
 --
 -- Coproduct (sum) types:
---    0 TagSum
+--    0 TagSum | (arity << 8)
 --    4 Enum
 --    8, 12.. Heap addresses of components.
 --
@@ -83,6 +83,9 @@ type WasmOp = Op
 
 encWasmOp :: WasmOp -> [Int]
 encWasmOp op = case op of
+  Get_local n -> 0x20 : leb128 n
+  Set_local n -> 0x21 : leb128 n
+  Tee_local n -> 0x22 : leb128 n
   Get_global n -> 0x23 : leb128 n
   Set_global n -> 0x24 : leb128 n
   I64_const n -> 0x42 : sleb128 n
@@ -346,34 +349,108 @@ data Prim = Prim
   , primAsm :: [WasmOp]
   }
 
-sysCall :: Int32 -> [WasmOp]
-sysCall n = concatMap fromIns [ Push 0, Eval] ++
-  -- Stack = [putStr, putStr :@ str, putStr :@ str :@ RealWorld, ...]
-  [ I32_const n  -- System call.
-  , Get_global sp
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , Call 0
-  -- Clobber the stack: no sharing in the IO monad.
-  , Get_global sp  -- [sp + 16] = 42
-  , I32_const 16
-  , I32_add
-  , I32_const 42
-  , I32_store 2 0
-  , Get_global sp  -- sp = sp + 12
+syscallAsm :: [WasmOp]
+syscallAsm =
+  -- Example:
+  --
+  --   putStr ("He" ++ "llo")
+  --
+  -- becomes:
+  --
+  --   (#syscall 1 21) ("He" ++ "llo") #RealWorld
+  --
+  -- After removing the innermost spine, we have:
+  --
+  --   1, 21, (#syscall 1 21),  (... :@ ("He" ++ "llo")), (... :@ #RealWorld)
+  --
+  -- That is, the last two arguments are still on a spine, and we retain
+  -- a pointer to `#syscall 1 21`. Normally, this pointer enables sharing
+  -- (laziness) but we ignore it in this case because it's a syscall with
+  -- a potential side effect.
+  [ Get_global sp  -- sp = sp + 12
   , I32_const 12
   , I32_add
   , Set_global sp
-  ] ++ concatMap fromIns [Copro 0 0, Copro 0 2] ++
+  , Get_global sp  -- [[sp - 4] + 8] is now the syscall number.
+  , I32_const 4
+  , I32_sub
+  , I32_load 2 0
+  , I32_const 8
+  , I32_add
+  , I32_load 2 0
+  , Get_global sp  -- local0 = [[sp - 8] + 8], the number of arguments.
+  , I32_const 8
+  , I32_sub
+  , I32_load 2 0
+  , I32_const 8
+  , I32_add
+  , I32_load 2 0
+  , Tee_local 0  -- local1 = local0
+  , Set_local 1
+
+  , Block Nada
+    [ Loop Nada  -- Encode all arguments.
+      [ Get_local 0  -- Break if local0 == 0.
+      , I32_eqz
+      , Br_if 1
+      -- Debone next argument...
+      , Get_global sp
+      , Get_global sp
+      , Get_local 1  -- [sp] = [[sp + 4*local1] + 12]
+      , I32_const 4
+      , I32_mul
+      , I32_add
+      , I32_load 2 0
+      , I32_const 12
+      , I32_add
+      , I32_load 2 0
+      , I32_store 2 0
+      , Get_global sp  -- sp = sp - 4
+      , I32_const 4
+      , I32_sub
+      , Set_global sp
+      -- ... then evaluate. TODO: Reduce to normal form.
+      , Call 1
+      , Get_local 0
+      , I32_const 1
+      , I32_sub
+      , Set_local 0
+      , Br 0
+      ]
+    ]
+  -- Example stack now holds:
+  --   "Hello", ("He" ++ "llo"), (... :@ #RealWorld)
+  , Get_global sp  -- #syscall(syscall_number, sp, hp)
+  , Get_global hp
+  , Call 0
+  -- The syscall writes the result to [hp] and returns new hp value.
+  -- Clobber the stack: no sharing in the IO monad.
+  , Get_global sp  -- sp = sp + 8*argCount
+  , Get_local 1
+  , I32_const 8
+  , I32_mul
+  , I32_add
+  , Set_global sp
+  -- Return (result, #RealWorld).
+  , Get_global sp  -- [sp + 4] = 42
+  , I32_const 4
+  , I32_add
+  , I32_const 42
+  , I32_store 2 0
+  , Get_global sp  -- [sp] = hp
+  , Get_global hp
+  , I32_store 2 0
+  , Get_global sp  -- sp = sp - 4
+  , I32_const 4
+  , I32_sub
+  , Set_global sp
+  , Set_global hp  -- hp = hp_new
+  ] ++ concatMap fromIns [Copro 0 2] ++
   [ End
   ]
 
 prims :: [Prim]
-prims =
-  [ Prim "putStr" 1 $ sysCall 21
-  , Prim "putInt" 1 $ sysCall 22
-  ] ++ fmap mkPrim
+prims = fmap mkPrim
   [ ("+", intAsm I64_add)
   , ("-", intAsm I64_sub)
   , ("*", intAsm I64_mul)
@@ -387,6 +464,7 @@ prims =
   , ("&&", boolAsm I32_and)
   , ("||", boolAsm I32_or)
   , ("++", catAsm)
+  , ("#syscall", syscallAsm)
   ]
   where mkPrim (s, as) = Prim { primName = s, primArity = 2, primAsm = as }
 
@@ -420,7 +498,7 @@ getGlobal funs v = case M.lookup v funs of
 insToBin :: GlobalTable -> [(String, [Ins])] -> [Int]
 insToBin funs m = concat
   [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
-  , sect 1 [encSig [I32, I32] [], encSig [] []]  -- Type section.
+  , sect 1 [encSig [I32, I32, I32] [I32], encSig [] []]  -- Type section.
   -- Import section.
   -- [0, 0] = external_kind Function, index 0.
   , sect 2 [encStr "i" ++ encStr "f" ++ [0, 0]]
@@ -455,13 +533,14 @@ insToBin funs m = concat
   ] where
   -- Function 0: import function which we send our outputs.
   -- Function 1: Eval (reduce to weak head normal form).
-  -- Function 2: reduce to normal form.
+  -- Function 2: syscall
   -- Afterwards, the primitive functions, then the functions in the program.
-  fs = evalAsm (length prims + length m) : (primAsm <$> prims)
+  fs = evalAsm (length prims + length m) : syscallAsm : (primAsm <$> prims)
     ++ ((++ [End]) . concatMap (fromInsWith $ getGlobal funs) . snd <$> m)
   sect t xs = t : lenc (varlen xs ++ concat xs)
   encStr s = lenc $ ord <$> s
-  encProcedure = lenc . (0:) . concatMap encWasmOp
+  -- TODO: Wasteful. Only syscall needs local variables.
+  encProcedure = lenc . ([1, 2, encType I32] ++) . concatMap encWasmOp
   encType I32 = 0x7f
   encType I64 = 0x7e
   encType _ = error "TODO"
@@ -518,7 +597,7 @@ insToBin funs m = concat
     , I32_add
     , Set_global bp
 
-    , Loop Nada
+    , Loop Nada  -- Remove spine.
       [ Get_global sp  -- sp = sp + 4
       , I32_const 4
       , I32_add
@@ -550,7 +629,7 @@ insToBin funs m = concat
         , I32_load 2 0
         , Br_table [0..n-1] n
         ]
-      nest k = [Block Nada $ nest $ k - 1, Call $ 1 + k, Br $ n - k]
+      nest k = [Block Nada $ nest $ k - 1, Call $ 2 + k, Br $ n - k]
 
 leb128 :: Int -> [Int]
 leb128 n | n < 64    = [n]
@@ -699,7 +778,7 @@ fromInsWith lookupGlobal instruction = case instruction of
     , Get_global hp  -- [hp] = TagGlobal | (n << 8)
     , I32_const $ fromIntegral $ fromEnum TagGlobal + 256*n
     , I32_store 2 0
-    , Get_global hp  -- [hp + 4] = n
+    , Get_global hp  -- [hp + 4] = g
     , I32_const 4
     , I32_add
     , I32_const $ fromIntegral g
@@ -781,7 +860,7 @@ fromInsWith lookupGlobal instruction = case instruction of
     , I32_store 2 0
     ]
   Copro m n ->
-    [ Get_global hp  -- [hp] = Sum
+    [ Get_global hp  -- [hp] = TagSum | (n << 8)
     , I32_const $ fromIntegral $ fromEnum TagSum + 256 * n
     , I32_store 2 0
     , Get_global hp  -- [hp + 4] = m
