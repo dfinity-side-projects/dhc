@@ -14,7 +14,7 @@ import WasmOp
 
 data ExternalKind = Function | Table | Memory | Global
 type FuncType = ([Type], [Type])
-type Body = ([Type], [Op])
+type Body = ([Op], [Op])
 type Import = ((String, String), FuncType)
 
 data Wasm = Wasm {
@@ -58,6 +58,10 @@ bad = ByteParser . const . Left
 byteParse :: ByteParser a -> ByteString -> Either String a
 byteParse (ByteParser f) s = f s >>= (\(w, t) ->
   if B8.null t then Right w else Left "expected EOF")
+
+initLocal :: Type -> Op
+initLocal I32 = I32_const 0
+initLocal _ = error "TODO"
 
 wasm :: ByteParser Wasm
 wasm = do
@@ -193,7 +197,7 @@ wasm = do
         _ <- varuint32
         locals <- concat <$> rep varuint32 (do
           n <- varuint32
-          t <- valueType
+          t <- initLocal <$> valueType
           pure $ replicate n t)
         ops <- codeBlock
         pure (locals, ops)

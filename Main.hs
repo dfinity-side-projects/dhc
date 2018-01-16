@@ -21,21 +21,32 @@ main = do
     Left err -> putStrLn $ "parse error: " ++ show err
     Right out -> execute [syscall] out "e"
 
-syscall :: VM -> [Op] -> IO ()
-syscall (VM {mem}) [I32_const x, I32_const y]
-  | y == 21 = do
+syscall :: VM -> [Op] -> IO VM
+syscall vm@(VM {mem, stack}) [I32_const hp, I32_const sp, I32_const n]
+  | n == 21 = do
     when (getTag /= 5) $ error "BUG! want String"
-    let slen = getNum 4 (x + 4) mem
-    putStr $ [chr $ getNum 1 (x + 8 + i) mem | i <- [0..slen - 1]]
-  | y == 22 = do
+    let slen = getNum 4 (addr + 4) mem
+    putStr $ [chr $ getNum 1 (addr + 8 + i) mem | i <- [0..slen - 1]]
+    pure vm
+      { mem = putNum 4 hp (4 :: Int) $ putNum 4 (hp + 4) (0 :: Int) mem
+      , stack = I32_const (hp + 8):stack
+      }
+  | n == 22 = do
     when (getTag /= 3) $ error "BUG! want Int"
-    print (getNum 8 (x + 8) mem :: Int)
-  | otherwise = error $ "BUG! bad syscall " ++ show y
-  where getTag = getNum 1 x mem :: Int
+    print (getNum 8 (addr + 8) mem :: Int)
+    pure vm
+      { mem = putNum 4 hp (4 :: Int) $ putNum 4 (hp + 4) (0 :: Int) mem
+      , stack = I32_const (hp + 8):stack
+      }
+  | otherwise = error $ "BUG! bad syscall " ++ show n
+  where
+    addr = getNum 4 (sp + 4) mem :: Int32
+    getTag = getNum 1 addr mem :: Int
 syscall a b = error $ "BUG! bad syscall " ++ show (a, b)
 
 data VM = VM
   { globs :: IntMap Op
+  , locs  :: [IntMap Op]
   , stack :: [Op]
   , insts :: [[Op]]
   , mem   :: IntMap Int
@@ -55,21 +66,27 @@ shiftR32U a b = fromIntegral $ shiftR ((fromIntegral a) :: Word32) $ fromIntegra
 shiftR64U :: Int64 -> Int64 -> Int64
 shiftR64U a b = fromIntegral $ shiftR ((fromIntegral a) :: Word64) $ fromIntegral ((fromIntegral b :: Word64) `mod` 64)
 
-execute :: Monad m =>
-  [VM -> [Op] -> m ()] -> Wasm -> [Char] -> m ()
+-- The `End` opcode is reintroduced at the ends of function calls, so that we
+-- know when to pop locals.
+execute :: Monad m => [VM -> [Op] -> m VM] -> Wasm -> [Char] -> m ()
 execute fns Wasm {imports, exports, code, globals} s = let
   fCount = length fns
   run VM {insts} | null insts = pure ()
   run vm@VM {insts} | null $ head insts = case tail insts of
     ((Loop _ _:rest):t) -> run vm {insts = rest:t}
     _                   -> run vm {insts = tail insts}
-  run vm@VM{globs, stack, insts, mem} = case head $ head insts of
+  run vm@VM{globs, locs, stack, insts, mem} = case head $ head insts of
     Call i -> if i < fCount then do
         let k = length $ fst $ snd $ imports!!i
-        (fns!!i) vm $ take k stack
-        run vm { stack = drop k stack, insts = i1 }
+        vm' <- (fns!!i) vm { stack = drop k stack, insts = i1 } $ take k stack
+        run vm'
       else do
-        run vm { insts = snd (code!!(i - fCount)):i1 }
+        let (locals, body) = code!!(i - fCount)
+        run vm { locs = IM.fromList (zip [0..] locals):locs, insts = body:(End: head i1):tail i1 }
+    End -> run vm { locs = tail locs, insts = i1 }
+    Set_local i -> run vm {locs = IM.insert i (head stack) (head locs):tail locs, stack = tail stack, insts = i1}
+    Get_local i -> run vm {stack = head locs IM.! i:stack, insts = i1}
+    Tee_local i -> run vm {locs = IM.insert i (head stack) (head locs):tail locs, insts = i1}
     Set_global i -> run vm {globs = IM.insert i (head stack) globs, stack = tail stack, insts = i1}
     Get_global i -> run vm {stack = globs IM.! i:stack, insts = i1}
     c@(I32_const _) -> run vm {stack = c:stack, insts = i1}
@@ -80,6 +97,9 @@ execute fns Wasm {imports, exports, code, globals} s = let
     I32_mul -> binOp32 (*)
     I32_shr_u -> binOp32 shiftR32U
     I32_ne -> binOp32 $ ((fromIntegral . fromEnum) .) . (/=)
+    I32_eqz -> let
+      (I32_const a:t) = stack
+      in run vm {stack = (I32_const $ fromIntegral $ fromEnum $ a == 0):t, insts = i1}
     I64_gt_s -> let
       (I64_const b:I64_const a:_) = stack
       c = I32_const $ fromIntegral $ fromEnum $ a > b
@@ -149,4 +169,4 @@ execute fns Wasm {imports, exports, code, globals} s = let
         c = I64_const $ f a b
   Just fI = lookup s exports
   in run $ VM (IM.fromList $ zip [0..] $ head . snd <$> globals)
-      [] [[Call fI]] IM.empty
+      [] [] [[Call fI]] IM.empty
