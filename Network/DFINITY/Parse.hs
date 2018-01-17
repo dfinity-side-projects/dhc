@@ -1,7 +1,7 @@
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Network.DFINITY.Parse (parseWasm, Op(..), Wasm(..)) where
+module Network.DFINITY.Parse (parseWasm, WasmOp(..), Wasm(..)) where
 
 import Control.Monad
 import qualified Data.ByteString.Char8 as B8
@@ -14,7 +14,7 @@ import WasmOp
 
 data ExternalKind = Function | Table | Memory | Global
 type FuncType = ([Type], [Type])
-type Body = ([Op], [Op])
+type Body = ([WasmOp], [WasmOp])
 type Import = ((String, String), FuncType)
 
 data Wasm = Wasm {
@@ -22,7 +22,7 @@ data Wasm = Wasm {
   imports :: [Import],
   decls :: [Int],
   memory :: [(Int, Maybe Int)],
-  globals :: [((Type, Bool), [Op])],
+  globals :: [((Type, Bool), [WasmOp])],
   exports :: [(String, Int)],
   start :: Maybe Int,
   code :: [Body] } deriving Show
@@ -59,7 +59,7 @@ byteParse :: ByteParser a -> ByteString -> Either String a
 byteParse (ByteParser f) s = f s >>= (\(w, t) ->
   if B8.null t then Right w else Left "expected EOF")
 
-initLocal :: Type -> Op
+initLocal :: Type -> WasmOp
 initLocal I32 = I32_const 0
 initLocal _ = error "TODO"
 
@@ -203,7 +203,7 @@ wasm = do
         pure (locals, ops)
       pure w { code = bodies}
 
-    codeBlock :: ByteParser [Op]
+    codeBlock :: ByteParser [WasmOp]
     codeBlock = do
       opcode <- varuint7
       s <- if
