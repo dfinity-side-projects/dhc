@@ -79,8 +79,6 @@ nPages = 8
 
 data Tag = TagAp | TagInd | TagGlobal | TagInt | TagSum | TagString deriving Enum
 
-type WasmOp = Op
-
 encWasmOp :: WasmOp -> [Int]
 encWasmOp op = case op of
   Get_local n -> 0x20 : leb128 n
@@ -423,28 +421,37 @@ syscallAsm =
   , Get_global sp  -- #syscall(syscall_number, sp, hp)
   , Get_global hp
   , Call 0
-  -- The syscall writes the result to [hp] and returns new hp value.
+  -- Because the syscall cannot modify sp or hp, our convention is that
+  --   [sp] = result ; [sp - 4] = hp_new
+  -- We update the globals here, in WebAssembly.
   -- Clobber the stack: no sharing in the IO monad.
-  , Get_global sp  -- sp = sp + 8*argCount
+  , Get_global sp  -- hp = [sp - 4]
+  , I32_const 4
+  , I32_sub
+  , I32_load 2 0
+  , Set_global hp
+  , Get_global sp  -- [sp + 8*argCount] = [sp]
   , Get_local 1
   , I32_const 8
   , I32_mul
   , I32_add
-  , Set_global sp
-  -- Return (result, #RealWorld).
-  , Get_global sp  -- [sp + 4] = 42
-  , I32_const 4
+  , Get_global sp
+  , I32_load 2 0
+  , I32_store 2 0
+  , Get_global sp  -- sp = sp + 8*argCount - 4
+  , Get_local 1
+  , I32_const 8
+  , I32_mul
   , I32_add
-  , I32_const 42
-  , I32_store 2 0
-  , Get_global sp  -- [sp] = hp
-  , Get_global hp
-  , I32_store 2 0
-  , Get_global sp  -- sp = sp - 4
   , I32_const 4
   , I32_sub
   , Set_global sp
-  , Set_global hp  -- hp = hp_new
+  -- Return (result, #RealWorld).
+  , Get_global sp  -- [sp + 8] = 42
+  , I32_const 8
+  , I32_add
+  , I32_const 42
+  , I32_store 2 0
   ] ++ concatMap fromIns [Copro 0 2] ++
   [ End
   ]
@@ -464,7 +471,7 @@ prims = fmap mkPrim
   , ("&&", boolAsm I32_and)
   , ("||", boolAsm I32_or)
   , ("++", catAsm)
-  , ("#syscall", syscallAsm)
+  , ("#syscall", [Call 2, End])
   ]
   where mkPrim (s, as) = Prim { primName = s, primArity = 2, primAsm = as }
 
@@ -486,7 +493,7 @@ astToIns ds = (funs, map (\(s, d) -> (s, evalState (mk1 d) [])) ds) where
 typedAstToBin :: [(String, (Ast, Type))] -> [Int]
 typedAstToBin = uncurry insToBin . astToIns . liftLambdas . (second fst <$>)
 
-tag_const :: Tag -> Op
+tag_const :: Tag -> WasmOp
 tag_const = I32_const . fromIntegral . fromEnum
 
 -- | Returns arity and index of given global function.
@@ -498,11 +505,16 @@ getGlobal funs v = case M.lookup v funs of
 insToBin :: GlobalTable -> [(String, [Ins])] -> [Int]
 insToBin funs m = concat
   [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
-  , sect 1 [encSig [I32, I32, I32] [I32], encSig [] []]  -- Type section.
+  , sect 1  -- Type section.
+    [ encSig [I32, I32, I32] []  -- Type of syscall.
+    , encSig [] []  -- Most functions have type () -> ().
+    , encSig [] [I32]  -- Next two are for getters and setters.
+    , encSig [I32] []
+    ]
   -- Import section.
   -- [0, 0] = external_kind Function, index 0.
   , sect 2 [encStr "i" ++ encStr "f" ++ [0, 0]]
-  , sect 3 $ replicate (length fs + 1) [1]  -- Function section.
+  , sect 3 $ (pure . fst . fst <$> fs) ++ [[1]]  -- Function section.
   , sect 5 [[0, nPages]]  -- Memory section (0 = no-maximum).
   , sect 6  -- Global section (1 = mutable).
     [ [encType I32, 1, 0x41] ++ leb128 (65536*nPages - 4) ++ [0xb]  -- SP
@@ -512,13 +524,18 @@ insToBin funs m = concat
   -- Export section.
   , sect 7
     -- 0 = external_kind Function, n = function index.
-    [ encStr "e" ++ [0, length fs + 1]
+    [ encStr "main" ++ [0, length fs + 1]
+    , encStr "getsp" ++ [0, 3]
+    , encStr "setsp" ++ [0, 4]
+    , encStr "gethp" ++ [0, 5]
+    , encStr "sethp" ++ [0, 6]
     -- 2 = external_kind Memory, 0 = memory index
     , encStr "mem" ++ [2, 0]
     ]
   , sect 10 $ encProcedure <$> (fs ++  -- Code section.
-     -- The magic constant 42 represents the RealWorld.
-    [ [ Get_global sp  -- [sp] = 42
+    [((1, 0),
+      -- The magic constant 42 represents the RealWorld.
+      [ Get_global sp  -- [sp] = 42
       , I32_const 42
       , I32_store 2 0
       , Get_global sp  -- sp = sp - 4
@@ -526,21 +543,31 @@ insToBin funs m = concat
       , I32_sub
       , Set_global sp
       ]
-      ++ concatMap (fromInsWith $ getGlobal funs)
-        [PushGlobal "main", MkAp]
+      ++ concatMap (fromInsWith $ getGlobal funs) [PushGlobal "main", MkAp]
       ++ [ Call 1, End ]
-    ])
+    )])
   ] where
   -- Function 0: import function which we send our outputs.
   -- Function 1: Eval (reduce to weak head normal form).
   -- Function 2: syscall
+  -- Function 3: getsp
+  -- Function 4: setsp
+  -- Function 5: gethp
+  -- Function 6: sethp
   -- Afterwards, the primitive functions, then the functions in the program.
-  fs = evalAsm (length prims + length m) : syscallAsm : (primAsm <$> prims)
-    ++ ((++ [End]) . concatMap (fromInsWith $ getGlobal funs) . snd <$> m)
+  predefs =
+    [ ((1, 0), evalAsm (length prims + length m))
+    , ((1, 2), syscallAsm)
+    , ((2, 0), [Get_global sp, End])
+    , ((3, 0), [Get_local 0, Set_global sp, End])
+    , ((2, 0), [Get_global hp, End])
+    , ((3, 0), [Get_local 0, Set_global hp, End])
+    ]
+  fs = predefs ++ fmap ((,) (1, 0)) ((primAsm <$> prims) ++ ((++ [End]) . concatMap (fromInsWith $ getGlobal funs) . snd <$> m))
   sect t xs = t : lenc (varlen xs ++ concat xs)
   encStr s = lenc $ ord <$> s
-  -- TODO: Wasteful. Only syscall needs local variables.
-  encProcedure = lenc . ([1, 2, encType I32] ++) . concatMap encWasmOp
+  encProcedure ((_, 0), body) = lenc $ 0:concatMap encWasmOp body
+  encProcedure ((_, locCount), body) = lenc $ ([1, locCount, encType I32] ++) $ concatMap encWasmOp body
   encType I32 = 0x7f
   encType I64 = 0x7e
   encType _ = error "TODO"
@@ -629,7 +656,7 @@ insToBin funs m = concat
         , I32_load 2 0
         , Br_table [0..n-1] n
         ]
-      nest k = [Block Nada $ nest $ k - 1, Call $ 2 + k, Br $ n - k]
+      nest k = [Block Nada $ nest $ k - 1, Call $ length predefs + k, Br $ n - k]
 
 leb128 :: Int -> [Int]
 leb128 n | n < 64    = [n]
