@@ -1,8 +1,8 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE PackageImports #-}
-module DHC (parseContract, Ast(..), Type(..), inferType, parseDefs, lexOffside,
-  preludeMinimal, compileMinimal, liftLambdas) where
+module DHC (parseContract, Syscalls, Ast(..), Type(..), inferType, parseDefs, lexOffside,
+  preludeMinimal, hsToAst, liftLambdas) where
 
 import Control.Arrow
 import Control.DeepSeq (NFData(..))
@@ -651,8 +651,6 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
   , ("||", TC "Bool" :-> TC "Bool" :-> TC "Bool")
   , ("++", TC "String" :-> TC "String" :-> TC "String")
   , ("undefined", a)
-  , ("putStr", TC "String" :-> io (TC "()"))
-  , ("putInt", TC "Int" :-> io (TC "()"))
   ]) ++
   [ ("False",   (jp 0 0, TC "Bool"))
   , ("True",    (jp 1 0, TC "Bool"))
@@ -667,7 +665,6 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
     jp m n = Just (m, n)
     a = GV "a"
     b = GV "b"
-    io = TApp (TC "IO")
 
 -- TODO: These dictionaries should not be built-in!
 hacks :: [(String, Ast)]
@@ -681,26 +678,28 @@ hacks =
  , listEqHack
  ]
 
-expandSyscalls :: Ast -> Ast
-expandSyscalls ast = case ast of
+type Syscalls = Map String (Int, Type)
+
+expandSyscalls :: Syscalls -> Ast -> Ast
+expandSyscalls sys ast = case ast of
   t :@ u -> rec t :@ rec u
   Lam xs t -> Lam xs $ rec t
   Let xs t -> Let (second rec <$> xs) $ rec t
   Cas x as -> Cas (rec x) (second rec <$> as)
-  Var s | Just t <- lookup s ss -> t
+  Var s | Just (n, t) <- M.lookup s sys -> Var "#syscall" :@ I (argCount t) :@ I (fromIntegral n)
   _ -> ast
   where
-  rec = expandSyscalls
-  ss =
-    [ ("putStr", Var "#syscall" :@ I 1 :@ I 21)
-    , ("putInt", Var "#syscall" :@ I 1 :@ I 22)
-    ]
+    rec = expandSyscalls sys
+    argCount (_ :-> u) = 1 + argCount u
+    argCount _ = 0
 
-compileMinimal :: String -> Either String [(String, Ast)]
-compileMinimal s = case parseDefs s of
+hsToAst :: Syscalls -> String -> Either String [(String, Ast)]
+hsToAst sys s = case parseDefs s of
   Left err -> Left $ "parse error: " ++ show err
-  Right ds -> (second expandSyscalls <$>) . liftLambdas . (second snd <$>) <$>
-    inferType (\_ _ -> Left "no exports") preludeMinimal (ds ++ hacks)
+  Right ds -> (second (expandSyscalls sys) <$>)
+    . liftLambdas . (second snd <$>) <$>
+    inferType (\_ _ -> Left "no exports") m (ds ++ hacks)
+  where m = preludeMinimal `M.union` (first (const Nothing) <$> sys)
 
 inferType
   :: (String -> String -> Either String Type)

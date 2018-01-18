@@ -479,7 +479,14 @@ wasm :: String -> Either String [Int]
 wasm prog = uncurry insToBin <$> compileMk1 prog
 
 compileMk1 :: String -> Either String (GlobalTable, [(String, [Ins])])
-compileMk1 haskell = astToIns <$> compileMinimal haskell
+compileMk1 haskell = astToIns <$> hsToAst webDemoSys haskell
+
+webDemoSys :: Syscalls
+webDemoSys = M.fromList
+  [ ("putStr", (21, TC "String" :-> io (TC "()")))
+  , ("putInt", (22, TC "Int" :-> io (TC "()")))
+  ]
+  where io = TApp (TC "IO")
 
 -- | Arity and index of each global, both predefined primitives and
 -- user-defined functions.
