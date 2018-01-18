@@ -1,6 +1,6 @@
 {-# LANGUAGE NamedFieldPuns #-}
 
-module Hero (Wasm, HeroVM, parseWasm, runWasm, getNumVM, putNumVM, pushVM, WasmOp(I32_const)) where
+module Hero (Wasm, HeroVM, parseWasm, runWasm, getNumVM, putNumVM, WasmOp(I32_const)) where
 
 import Data.Bits
 import Data.Int
@@ -18,9 +18,6 @@ data HeroVM = HeroVM
   , insts :: [[WasmOp]]
   , mem   :: IntMap Int
   } deriving Show
-
-pushVM :: WasmOp -> HeroVM -> HeroVM
-pushVM op vm = vm { stack = op:stack vm }
 
 getNumVM :: Integral n => Int -> Int32 -> HeroVM -> n
 getNumVM w addr vm = getNum w addr $ mem vm
@@ -44,10 +41,10 @@ shiftR64U a b = fromIntegral $ shiftR ((fromIntegral a) :: Word64) $ fromIntegra
 
 -- The `End` opcode is reintroduced at the ends of function calls, so that we
 -- know when to pop locals.
-runWasm :: Monad m => [HeroVM -> [WasmOp] -> m HeroVM] -> Wasm -> [Char] -> m ()
+runWasm :: Monad m => [HeroVM -> [WasmOp] -> m HeroVM] -> Wasm -> [Char] -> m [WasmOp]
 runWasm fns Wasm {imports, exports, code, globals} s = let
   fCount = length fns
-  run HeroVM {insts} | null insts = pure ()
+  run HeroVM {insts, stack} | null insts = pure $ stack
   run vm@HeroVM {insts} | null $ head insts = case tail insts of
     ((Loop _ _:rest):t) -> run vm {insts = rest:t}
     _                   -> run vm {insts = tail insts}
