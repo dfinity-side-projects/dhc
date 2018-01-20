@@ -7,6 +7,6 @@ import Asm
 main :: IO ()
 main = do
   s <- getContents
-  case wasm s of
+  case hsToWasmWebDemo s of
     Left err -> error err
     Right asm -> B.putStr $ B.pack $ fromIntegral <$> asm

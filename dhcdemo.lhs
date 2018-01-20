@@ -116,7 +116,7 @@ main = withElems ["src", "asm", "go", "out"] $ \[src, asmEl, goB, outE] -> do
   void $ goB `onEvent` Click $ const $ do
     setProp asmEl "value" ""
     s <- getProp src "value"
-    case wasm s of
+    case hsToWasmWebDemo s of
       Left err -> setProp asmEl "value" err
       Right asm -> do
         setProp asmEl "value" $ show asm

@@ -19,7 +19,7 @@ gmachine prog = if "main" `M.member` funs then
   where
   drop' n as | n > length as = error "BUG!"
              | otherwise     = drop n as
-  Right (funs, m) = compileMk1 prog
+  Right (funs, m) = hsToGMachineWebDemo prog
   arity v = fst $ funs M.! v
   go (fOrIns:rest) s h = either prim exec fOrIns where
     k = M.size h

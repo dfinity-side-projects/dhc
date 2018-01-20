@@ -1,7 +1,8 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE PackageImports #-}
-module Asm (wasm, typedAstToBin, compileMk1, Ins(..)) where
+module Asm (hsToWasm, Ins(..),
+  hsToGMachineWebDemo, hsToWasmWebDemo) where
 import Control.Arrow
 import qualified Data.Map as M
 #ifdef __HASTE__
@@ -475,11 +476,14 @@ prims = fmap mkPrim
   ]
   where mkPrim (s, as) = Prim { primName = s, primArity = 2, primAsm = as }
 
-wasm :: String -> Either String [Int]
-wasm prog = uncurry insToBin <$> compileMk1 prog
+hsToWasmWebDemo :: String -> Either String [Int]
+hsToWasmWebDemo prog = hsToWasm webDemoSys prog
 
-compileMk1 :: String -> Either String (GlobalTable, [(String, [Ins])])
-compileMk1 haskell = astToIns <$> hsToAst webDemoSys haskell
+hsToGMachineWebDemo :: String -> Either String (GlobalTable, [(String, [Ins])])
+hsToGMachineWebDemo haskell = astToIns <$> hsToAst webDemoSys haskell
+
+hsToWasm :: Syscalls -> String -> Either String [Int]
+hsToWasm sys prog = uncurry insToBin . astToIns <$> hsToAst sys prog
 
 webDemoSys :: Syscalls
 webDemoSys = M.fromList
@@ -492,13 +496,10 @@ webDemoSys = M.fromList
 -- user-defined functions.
 type GlobalTable = M.Map String (Int, Int)
 
-astToIns :: [(String, Ast)] -> (GlobalTable, [(String, [Ins])])
-astToIns ds = (funs, map (\(s, d) -> (s, evalState (mk1 d) [])) ds) where
+astToIns :: AstPlus -> (GlobalTable, [(String, [Ins])])
+astToIns (_, storage, ds) = (funs, map (\(s, d) -> (s, evalState (mk1 storage d) [])) ds) where
   ps = zipWith (\p i -> (primName p, (primArity p, i))) prims [0..]
   funs = M.fromList $ ps ++ zipWith (\(name, Lam as _) i -> (name, (length as, i))) ds [length prims..]
-
-typedAstToBin :: [(String, (Ast, Type))] -> [Int]
-typedAstToBin = uncurry insToBin . astToIns . liftLambdas . (second fst <$>)
 
 tag_const :: Tag -> WasmOp
 tag_const = I32_const . fromIntegral . fromEnum
@@ -982,17 +983,17 @@ fromInsWith lookupGlobal instruction = case instruction of
     , Set_global sp
     ]
 
-mk1 :: Ast -> State [(String, Int)] [Ins]
-mk1 ast = case ast of
+mk1 :: [String] -> Ast -> State [(String, Int)] [Ins]
+mk1 storage ast = case ast of
   Lam as b -> do
     modify' $ \bs -> zip as [length bs..] ++ bs
-    (++ [UpdatePop $ length as, Eval]) <$> mk1 b
+    (++ [UpdatePop $ length as, Eval]) <$> rec b
   I n -> pure [PushInt n]
   S s -> pure [PushString s]
   t :@ u -> do
-    mu <- mk1 u
+    mu <- rec u
     bump 1
-    mt <- mk1 t
+    mt <- rec t
     bump (-1)
     pure $ case last mt of
       Copro _ _ -> mu ++ mt
@@ -1001,25 +1002,25 @@ mk1 ast = case ast of
     m <- get
     pure $ case lookup v m of
       Just k -> [Push k]
-      Nothing -> [PushGlobal v]
+      Nothing -> if v `elem` storage then [PushString $ SBS.pack $ fromIntegral . ord <$> v] else [PushGlobal v]
   Pack n m -> pure [Copro n m]
   Cas expr alts -> do
-    me <- mk1 expr
+    me <- rec expr
     xs <- forM alts $ \(p, body) -> do
       orig <- get  -- Save state.
       (f, b) <- case fromApList p of
         [I n] -> do  -- TODO: Rewrite as equality check.
           bump 1
-          (,) (Just $ fromIntegral n) . (++ [Slide 1]) <$> mk1 body
+          (,) (Just $ fromIntegral n) . (++ [Slide 1]) <$> rec body
         (Pack n _:vs) -> do
           bump $ length vs
           modify' (zip (map (\(Var v) -> v) vs) [0..] ++)
-          bod <- mk1 body
+          bod <- rec body
           pure (Just $ fromIntegral n, Split (length vs) : bod ++ [Slide (length vs)])
         [Var s] -> do
           bump 1
           modify' $ \bs -> (s, 0):bs
-          (,) Nothing . (++ [Slide 1]) <$> mk1 body
+          (,) Nothing . (++ [Slide 1]) <$> rec body
         _ -> undefined
       put orig  -- Restore state.
       pure (f, b)
@@ -1028,13 +1029,14 @@ mk1 ast = case ast of
     orig <- get  -- Save state.
     bump n
     modify' (zip (fst <$> ds) [n-1,n-2..0] ++)
-    dsAsm <- mapM mk1 $ snd <$> ds
-    b <- mk1 body
+    dsAsm <- mapM rec $ snd <$> ds
+    b <- rec body
     put orig  -- Restore state.
     pure $ Alloc n : concat (zipWith (++) dsAsm (pure . UpdateInd <$> [n-1,n-2..0])) ++ b ++ [Slide n]
   _ -> error $ "TODO: compile: " ++ show ast
   where
     bump n = modify' $ map $ second (+n)
+    rec = mk1 storage
 
 fromApList :: Ast -> [Ast]
 fromApList (a :@ b) = fromApList a ++ [b]

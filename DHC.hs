@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE PackageImports #-}
-module DHC (parseContract, Syscalls, Ast(..), Type(..), inferType, parseDefs, lexOffside,
+module DHC (parseContract, Syscalls, Ast(..), AstPlus, Type(..), inferType, parseDefs, lexOffside,
   preludeMinimal, hsToAst, liftLambdas) where
 
 import Control.Arrow
@@ -367,8 +367,10 @@ lexOffside = fmap (fmap snd) <$> runParser tokUntilEOF (AwaitBrace, []) "" where
 parseDefs :: String -> Either ParseError [(String, Ast)]
 parseDefs = runParser program (AwaitBrace, []) ""
 
-parseContract :: String -> Either ParseError ([String], [String], [(String, Ast)])
-parseContract = runParser contract (Boilerplate, []) "" where
+type AstPlus = ([String], [String], [(String, Ast)])
+
+parseContract :: String -> Either ParseError AstPlus
+parseContract = runParser contract (Boilerplate, []) ""
 
 -- The Constraints monad combines a State monad and an Either monad.
 -- The state consists of the set of constraints and next integer available
@@ -411,6 +413,9 @@ gather
 gather findExport prelude env ast = case ast of
   I i -> pure (TC "Int", AnnI i)
   S s -> pure (TC "String", AnnS s)
+  Var "_" -> do
+    x <- newTV
+    pure (x, AnnVar "_")
   Var v -> case lookup v env of
     Just qt  -> if v `M.member` prelude then bad $ "ambiguous: " ++ v
       else do
@@ -693,20 +698,27 @@ expandSyscalls sys ast = case ast of
     argCount (_ :-> u) = 1 + argCount u
     argCount _ = 0
 
-hsToAst :: Syscalls -> String -> Either String [(String, Ast)]
-hsToAst sys s = case parseDefs s of
-  Left err -> Left $ "parse error: " ++ show err
-  Right ds -> (second (expandSyscalls sys) <$>)
+hsToAst :: Syscalls -> String -> Either String AstPlus
+hsToAst sys prog = do
+  (es, storage, ds) <- showErr $ parseContract prog
+  typeCheckedDefs <- (second (expandSyscalls sys) <$>)
     . liftLambdas . (second snd <$>) <$>
-    inferType (\_ _ -> Left "no exports") m (ds ++ hacks)
-  where m = preludeMinimal `M.union` (first (const Nothing) <$> sys)
+    inferType (\_ _ -> Left "no exports") (genTypes storage) (ds ++ hacks)
+  pure (es, storage, typeCheckedDefs)
+  where
+    showErr = either (Left . show) Right
+    genTypes storage = preludeMinimal `M.union` (first (const Nothing) <$> sys)
+      `M.union` (M.fromList $ storageTypeConstraintHack <$> storage)
+    storageTypeConstraintHack s = (s, (Nothing, TC "Map" `TApp` TV ('#':s)))
 
 inferType
   :: (String -> String -> Either String Type)
   -> Globals
   -> [(String, Ast)]
   -> Either String [(String, (QualType, Ast))]
-inferType findExport globs ds = foldM inferMutual [] $ map (map (\k -> (k, fromJust $ lookup k ds))) $ reverse $ scc (callees ds) $ fst <$> ds where
+inferType findExport globs ds = foldM inferMutual [] $ map (map (\k -> (k, fromJust $ lookup k ds))) sortedDefs where
+  -- Groups of definitions, sorted in the order we should infer their types.
+  sortedDefs = reverse $ scc (callees ds) $ fst <$> ds
   -- inferMutual :: [(String, AnnAst Type)] -> [(String, Ast)] -> Either String [(String, AnnAst Type)]
   inferMutual acc grp = do
     (bs, ConState _ cs m) <- buildConstraints $ do
