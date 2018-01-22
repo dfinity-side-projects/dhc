@@ -476,6 +476,11 @@ prims = fmap mkPrim
   ]
   where mkPrim (s, as) = Prim { primName = s, primArity = 2, primAsm = as }
 
+-- | First element is the list of exported functions.
+-- The second contains the arity and index of each global, both predefined
+-- primitives and user-defined functions, exported or not.
+type GlobalTable = ([String], M.Map String (Int, Int))
+
 hsToWasmWebDemo :: String -> Either String [Int]
 hsToWasmWebDemo prog = hsToWasm webDemoSys prog
 
@@ -491,10 +496,6 @@ webDemoSys = M.fromList
   , ("putInt", (22, TC "Int" :-> io (TC "()")))
   ]
   where io = TApp (TC "IO")
-
--- | Arity and index of each global, both predefined primitives and
--- user-defined functions.
-type GlobalTable = M.Map String (Int, Int)
 
 astToIns :: AstPlus -> (GlobalTable, [(String, [Ins])])
 astToIns (_, storage, ds) = (funs, map (\(s, d) -> (s, evalState (mk1 storage d) [])) ds) where
