@@ -482,23 +482,23 @@ prims = fmap mkPrim
 type GlobalTable = ([String], M.Map String (Int, Int))
 
 hsToWasmWebDemo :: String -> Either String [Int]
-hsToWasmWebDemo prog = hsToWasm webDemoSys prog
+hsToWasmWebDemo prog = snd <$> hsToWasm webDemoSys prog
 
 hsToGMachineWebDemo :: String -> Either String (GlobalTable, [(String, [Ins])])
 hsToGMachineWebDemo haskell = astToIns <$> hsToAst webDemoSys haskell
 
-hsToWasm :: Syscalls -> String -> Either String [Int]
+hsToWasm :: Syscalls -> String -> Either String ([(String, Int)], [Int])
 hsToWasm sys prog = uncurry insToBin . astToIns <$> hsToAst sys prog
 
 webDemoSys :: Syscalls
-webDemoSys = M.fromList
+webDemoSys = (M.fromList
   [ ("putStr", (21, TC "String" :-> io (TC "()")))
   , ("putInt", (22, TC "Int" :-> io (TC "()")))
-  ]
+  ], \_ _ -> Nothing)
   where io = TApp (TC "IO")
 
 astToIns :: AstPlus -> (GlobalTable, [(String, [Ins])])
-astToIns (_, storage, ds) = (funs, map (\(s, d) -> (s, evalState (mk1 storage d) [])) ds) where
+astToIns (es, storage, ds) = ((es, funs), map (\(s, d) -> (s, evalState (mk1 storage d) [])) ds) where
   ps = zipWith (\p i -> (primName p, (primArity p, i))) prims [0..]
   funs = M.fromList $ ps ++ zipWith (\(name, Lam as _) i -> (name, (length as, i))) ds [length prims..]
 
@@ -506,13 +506,13 @@ tag_const :: Tag -> WasmOp
 tag_const = I32_const . fromIntegral . fromEnum
 
 -- | Returns arity and index of given global function.
-getGlobal :: GlobalTable -> String -> (Int, Int)
+getGlobal :: M.Map String (Int, Int) -> String -> (Int, Int)
 getGlobal funs v = case M.lookup v funs of
   Nothing -> error $ "no such global: " ++ v
   Just (i, j) -> (i, j)
 
-insToBin :: GlobalTable -> [(String, [Ins])] -> [Int]
-insToBin funs m = concat
+insToBin :: GlobalTable -> [(String, [Ins])] -> ([(String, Int)], [Int])
+insToBin (exs, funs) m = (,) ((\s -> (s, fst $ getGlobal funs s)) <$> exs) $ concat
   [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
   , sect 1  -- Type section.
     [ encSig [I32, I32, I32] []  -- Type of syscall.
@@ -531,7 +531,7 @@ insToBin funs m = concat
     , [encType I32, 1, 0x41, 0, 0xb]  -- BP
     ]
   -- Export section.
-  , sect 7
+  , sect 7 $
     -- 0 = external_kind Function, n = function index.
     [ encStr "main" ++ [0, length fs + 1]
     , encStr "getsp" ++ [0, 3]
@@ -540,7 +540,7 @@ insToBin funs m = concat
     , encStr "sethp" ++ [0, 6]
     -- 2 = external_kind Memory, 0 = memory index
     , encStr "mem" ++ [2, 0]
-    ]
+    ] ++ [encStr ('_':s) ++ [0, 1 + length predefs + snd (getGlobal funs s)] | s <- exs]
   , sect 10 $ encProcedure <$> (fs ++  -- Code section.
     [((1, 0),
       -- The magic constant 42 represents the RealWorld.
@@ -1010,9 +1010,6 @@ mk1 storage ast = case ast of
     xs <- forM alts $ \(p, body) -> do
       orig <- get  -- Save state.
       (f, b) <- case fromApList p of
-        [I n] -> do  -- TODO: Rewrite as equality check.
-          bump 1
-          (,) (Just $ fromIntegral n) . (++ [Slide 1]) <$> rec body
         (Pack n _:vs) -> do
           bump $ length vs
           modify' (zip (map (\(Var v) -> v) vs) [0..] ++)

@@ -174,7 +174,7 @@ supercombinators = catMaybes <$> between (want "{") (want "}") (sc `sepBy` want 
     pure $ Cas x as
   lambda = Lam <$> between (want "\\") (want "->") (many1 varStr) <*> expr
   alt = try (do
-    p <- expr  -- TODO: Restrict to patterns.
+    p <- expr
     void $ want "->"
     x <- expr
     pure $ Just (p, x)) <|> pure Nothing
@@ -370,7 +370,12 @@ parseDefs = runParser program (AwaitBrace, []) ""
 type AstPlus = ([String], [String], [(String, Ast)])
 
 parseContract :: String -> Either ParseError AstPlus
-parseContract = runParser contract (Boilerplate, []) ""
+parseContract = fmap maybeAddMain . runParser contract (Boilerplate, []) ""
+
+maybeAddMain :: AstPlus -> AstPlus
+maybeAddMain a@(es, ms, asts) = case lookup "main" asts of
+  Nothing -> (es, ms, ("main", Var "pure" :@ Pack 0 0):asts)
+  Just _  -> a
 
 -- The Constraints monad combines a State monad and an Either monad.
 -- The state consists of the set of constraints and next integer available
@@ -683,7 +688,7 @@ hacks =
  , listEqHack
  ]
 
-type Syscalls = Map String (Int, Type)
+type Syscalls = (Map String (Int, Type), String -> String -> Maybe Int)
 
 expandSyscalls :: Syscalls -> Ast -> Ast
 expandSyscalls sys ast = case ast of
@@ -691,23 +696,34 @@ expandSyscalls sys ast = case ast of
   Lam xs t -> Lam xs $ rec t
   Let xs t -> Let (second rec <$> xs) $ rec t
   Cas x as -> Cas (rec x) (second rec <$> as)
-  Var s | Just (n, t) <- M.lookup s sys -> Var "#syscall" :@ I (argCount t) :@ I (fromIntegral n)
+  Var s | Just (n, t) <- M.lookup s (fst sys) -> Var "#syscall" :@ I (argCount t) :@ I (fromIntegral n)
+  -- Example:
+  --  target.fun 1 2 "three"
+  -- becomes:
+  --  #syscall 5 0 "target" "fun" 3 1 2 "three"
+  Qual c f | Just n <- snd sys c f -> Var "#syscall" :@ I (fromIntegral $ n + 3) :@ I 0 :@ S (pack $ c2w <$> c) :@ S (pack $ c2w <$> f) :@ I (fromIntegral n)
   _ -> ast
   where
     rec = expandSyscalls sys
     argCount (_ :-> u) = 1 + argCount u
     argCount _ = 0
 
+getContractExport :: Syscalls -> String -> String -> Either String Type
+getContractExport (_, f) c v = case f c v of
+  Nothing -> Left "no such export"
+  Just n -> Right $ foldr (:->) (TC "IO" `TApp` GV "r") [GV $ "x" ++ show i | i <- [1..n]]
+
 hsToAst :: Syscalls -> String -> Either String AstPlus
 hsToAst sys prog = do
   (es, storage, ds) <- showErr $ parseContract prog
   typeCheckedDefs <- (second (expandSyscalls sys) <$>)
     . liftLambdas . (second snd <$>) <$>
-    inferType (\_ _ -> Left "no exports") (genTypes storage) (ds ++ hacks)
+    inferType (getContractExport sys) (genTypes storage) (ds ++ hacks)
   pure (es, storage, typeCheckedDefs)
   where
     showErr = either (Left . show) Right
-    genTypes storage = preludeMinimal `M.union` (first (const Nothing) <$> sys)
+    genTypes storage = preludeMinimal
+      `M.union` (first (const Nothing) <$> fst sys)
       `M.union` (M.fromList $ storageTypeConstraintHack <$> storage)
     storageTypeConstraintHack s = (s, (Nothing, TC "Map" `TApp` TV ('#':s)))
 

@@ -12,14 +12,14 @@ data Node = NInt Int64 | NString ShortByteString | NAp Int Int | NGlobal Int Str
 
 -- | Interprets G-Machine instructions.
 gmachine :: String -> String
-gmachine prog = if "main" `M.member` funs then
-    go (Right <$> [PushGlobal "main", MkAp, Eval]) [0] $ M.singleton 0 $ RealWorld []
-  else
+gmachine prog = if "main_" `M.member` funs then
     go (Right <$> [PushGlobal "main_", Eval]) [] M.empty
+  else
+    go (Right <$> [PushGlobal "main", MkAp, Eval]) [0] $ M.singleton 0 $ RealWorld []
   where
   drop' n as | n > length as = error "BUG!"
              | otherwise     = drop n as
-  Right (funs, m) = hsToGMachineWebDemo prog
+  Right ((_, funs), m) = hsToGMachineWebDemo prog
   arity v = fst $ funs M.! v
   go (fOrIns:rest) s h = either prim exec fOrIns where
     k = M.size h
