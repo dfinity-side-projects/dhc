@@ -341,6 +341,92 @@ catAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
   , Set_global hp
   ] ++ fromIns (UpdatePop 2) ++ [Call 1, End]
 
+strEqAsm :: [WasmOp]
+strEqAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
+  [ Get_global sp  -- PUSH sp + 8
+  , I32_const 8
+  , I32_add
+  , Get_global hp  -- PUSH hp
+  , Get_global hp  -- [hp] = TagSum
+  , tag_const TagSum
+  , I32_store 2 0
+  , Get_global hp  -- [hp + 4] = 0
+  , I32_const 4
+  , I32_add
+  , I32_const 0
+  , I32_store 2 0
+
+  , Get_global sp  -- bp = [[sp + 4] + 4]
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , Set_global bp
+
+  , Block Nada
+    [ Get_global sp  -- if bp /= [[sp + 8] + 4] then break
+    , I32_const 8
+    , I32_add
+    , I32_load 2 0
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , Get_global bp
+    , I32_ne
+    , Br_if 0
+
+    , Loop Nada
+      [ Block Nada
+        [ Get_global bp  -- if bp == 0 then break.
+        , I32_eqz
+        , Br_if 0
+        , Get_global bp  -- bp = bp - 1
+        , I32_const 1
+        , I32_sub
+        , Set_global bp
+
+        , Get_global sp  -- [[sp + 4] + 8 + bp].8u /= [[sp + 8] + 8 + bp].8u
+        , I32_const 4
+        , I32_add
+        , I32_load 2 0
+        , I32_const 8
+        , I32_add
+        , Get_global bp
+        , I32_add
+        , I32_load8_u 0 0
+        , Get_global sp
+        , I32_const 8
+        , I32_add
+        , I32_load 2 0
+        , I32_const 8
+        , I32_add
+        , Get_global bp
+        , I32_add
+        , I32_load8_u 0 0
+        , I32_ne
+        , Br_if 2  -- Break if unequal characters found.
+        , Br 1  -- Keep looping.
+        ]
+      ]
+    , Get_global hp  -- [hp + 4] = 1
+    , I32_const 4
+    , I32_add
+    , I32_const 1
+    , I32_store 2 0
+    ]
+  , I32_store 2 0  -- [sp + 8] = old_hp  ; Via POPs.
+  , Get_global sp  -- sp = sp + 4
+  , I32_const 4
+  , I32_add
+  , Set_global sp
+  , Get_global hp  -- hp = hp + 8
+  , I32_const 8
+  , I32_add
+  , Set_global hp
+  ] ++ fromIns (UpdatePop 2) ++ [Call 1, End]
+
 -- Primitive functions.
 data Prim = Prim
   { primName :: String
@@ -472,6 +558,7 @@ prims = fmap mkPrim
   , ("&&", boolAsm I32_and)
   , ("||", boolAsm I32_or)
   , ("++", catAsm)
+  , ("String-==", strEqAsm)
   , ("#syscall", [Call 2, End])
   ]
   where mkPrim (s, as) = Prim { primName = s, primArity = 2, primAsm = as }
