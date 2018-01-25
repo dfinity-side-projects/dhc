@@ -716,7 +716,7 @@ getContractExport (_, f) c v = case f c v of
 hsToAst :: Syscalls -> String -> Either String AstPlus
 hsToAst sys prog = do
   (es, storage, ds) <- showErr $ parseContract prog
-  typeCheckedDefs <- (second (expandSyscalls sys) <$>)
+  typeCheckedDefs <- (second (expandSyscalls sys . expandCase) <$>)
     . liftLambdas . (second snd <$>) <$>
     inferType (getContractExport sys) (genTypes storage) (ds ++ hacks)
   pure (es, storage, typeCheckedDefs)
@@ -844,6 +844,51 @@ liftLambdas scs = existingDefs ++ newDefs where
   g (_, AnnCas expr as) =
     Cas <$> g expr <*> mapM (\(p, t) -> (,) <$> g p <*> g t) as
   g (_, ann) = pure $ deAnn ann
+
+expandCase :: Ast -> Ast
+expandCase ast = case ast of
+  u :@ v  -> rec u :@ rec v
+  Lam ss a -> Lam ss $ rec a
+  Cas e alts -> Cas (rec e) $ (\a -> evalState (expandAlt [] a) 0) <$> alts
+  _ -> ast
+  where
+    rec = expandCase
+   -- TODO: Call `fromApList` only in last case alternative.
+    expandAlt :: [(Ast, Ast)] -> (Ast, Ast) -> State Int (Ast, Ast)
+    expandAlt deeper (p, a) = do
+      case fromApList p of
+        [Var _] -> (,) p <$> g deeper a
+        [S s] -> do
+          v <- genVar
+          a1 <- g deeper a
+          pure (Var v, Cas (Var "String-==" :@ Var v :@ S s) [(Pack 1 0, a1)])
+        [I n] -> do
+          v <- genVar
+          a1 <- g deeper a
+          pure (Var v, Cas (Var "Int-==" :@ Var v :@ I n) [(Pack 1 0, a1)])
+        h@(Pack _ _):xs -> doPack [h] deeper xs a
+        _ -> error $ "bad case: " ++ show p
+
+    doPack acc deeper [] body = (,) (foldl1 (:@) acc) <$> g deeper body
+    doPack acc deeper (a:rest) body = do
+      gv <- Var <$> genVar
+      case a of
+        Var _ -> doPack (acc ++ [a]) deeper rest body
+        _     -> doPack (acc ++ [gv]) (deeper ++ [(gv, a)]) rest body
+
+    genVar = do
+      n <- get
+      put (n + 1)
+      pure $ "c*" ++ show n
+
+    g [] body = pure body
+    g ((v, w):rest) body = do
+      single <- expandAlt rest (w, body)
+      pure $ Cas v [single]
+
+    fromApList :: Ast -> [Ast]
+    fromApList (a :@ b) = fromApList a ++ [b]
+    fromApList a = [a]
 
 deAnn :: AnnAst' a -> Ast
 deAnn (AnnS s) = S s
