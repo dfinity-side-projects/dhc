@@ -434,6 +434,103 @@ data Prim = Prim
   , primAsm :: [WasmOp]
   }
 
+syscallPureAsm :: [WasmOp]
+syscallPureAsm =
+  -- Example:
+  --
+  --   beaconAt 123
+  --
+  -- becomes:
+  --
+  --   (#syscallPure 1 999) (Var "beaconAt" :@ 123)
+  --
+  -- After removing the innermost spine, we have:
+  --
+  --   1, 999, (#syscallPure 1 999), (Var "beaconAt" :@ 123)
+  [ Get_global sp  -- sp = sp + 12
+  , I32_const 12
+  , I32_add
+  , Set_global sp
+  , Get_global sp  -- [[sp - 4] + 8] is now the syscall number.
+  , I32_const 4
+  , I32_sub
+  , I32_load 2 0
+  , I32_const 8
+  , I32_add
+  , I32_load 2 0
+  , Get_global sp  -- local0 = [[sp - 8] + 8], the number of arguments.
+  , I32_const 8
+  , I32_sub
+  , I32_load 2 0
+  , I32_const 8
+  , I32_add
+  , I32_load 2 0
+  , Tee_local 0  -- local1 = local0
+  , Set_local 1
+
+  , Block Nada
+    [ Loop Nada  -- Encode all arguments.
+      [ Get_local 0  -- Break if local0 == 0.
+      , I32_eqz
+      , Br_if 1
+      -- Debone next argument...
+      , Get_global sp
+      , Get_global sp
+      , Get_local 1  -- [sp] = [[sp + 4*local1] + 12]
+      , I32_const 4
+      , I32_mul
+      , I32_add
+      , I32_load 2 0
+      , I32_const 12
+      , I32_add
+      , I32_load 2 0
+      , I32_store 2 0
+      , Get_global sp  -- sp = sp - 4
+      , I32_const 4
+      , I32_sub
+      , Set_global sp
+      -- ... then evaluate. TODO: Reduce to normal form.
+      , Call 1
+      , Get_local 0
+      , I32_const 1
+      , I32_sub
+      , Set_local 0
+      , Br 0
+      ]
+    ]
+  -- Example stack now holds:
+  --   123, 123
+  , Get_global sp  -- #syscall(syscall_number, sp, hp)
+  , Get_global hp
+  , Call 0
+  -- Because the syscall cannot modify sp or hp, our convention is that
+  --   [sp] = result ; [sp - 4] = hp_new
+  -- We update the globals here, in WebAssembly.
+  , Get_global sp  -- hp = [sp - 4]
+  , I32_const 4
+  , I32_sub
+  , I32_load 2 0
+  , Set_global hp
+  , Get_global sp  -- [sp + 8*argCount] = [sp]
+  , Get_local 1
+  , I32_const 8
+  , I32_mul
+  , I32_add
+  , Get_global sp
+  , I32_load 2 0
+  , I32_store 2 0
+  , Get_global sp  -- sp = sp + 8*argCount - 4
+  , Get_local 1
+  , I32_const 8
+  , I32_mul
+  , I32_add
+  , I32_const 4
+  , I32_sub
+  , Set_global sp
+  -- No update (normal evaluation, not lazy). Hopefully this syscall is cheap!
+  , End
+  ]
+
 syscallAsm :: [WasmOp]
 syscallAsm =
   -- Example:
@@ -446,7 +543,7 @@ syscallAsm =
   --
   -- After removing the innermost spine, we have:
   --
-  --   1, 21, (#syscall 1 21),  (... :@ ("He" ++ "llo")), (... :@ #RealWorld)
+  --   1, 21, (#syscall 1 21), (... :@ ("He" ++ "llo")), (... :@ #RealWorld)
   --
   -- That is, the last two arguments are still on a spine, and we retain
   -- a pointer to `#syscall 1 21`. Normally, this pointer enables sharing
@@ -511,7 +608,6 @@ syscallAsm =
   -- Because the syscall cannot modify sp or hp, our convention is that
   --   [sp] = result ; [sp - 4] = hp_new
   -- We update the globals here, in WebAssembly.
-  -- Clobber the stack: no sharing in the IO monad.
   , Get_global sp  -- hp = [sp - 4]
   , I32_const 4
   , I32_sub
@@ -560,6 +656,7 @@ prims = fmap mkPrim
   , ("++", catAsm)
   , ("String-==", strEqAsm)
   , ("#syscall", [Call 2, End])
+  , ("#syscallPure", [Call 7, End])
   ]
   where mkPrim (s, as) = Prim { primName = s, primArity = 2, primAsm = as }
 
@@ -650,6 +747,7 @@ insToBin (exs, funs) m = (,) ((\s -> (s, fst $ getGlobal funs s)) <$> exs) $ con
   -- Function 4: setsp
   -- Function 5: gethp
   -- Function 6: sethp
+  -- Function 7: pure syscall
   -- Afterwards, the primitive functions, then the functions in the program.
   predefs =
     [ ((1, 0), evalAsm (length prims + length m))
@@ -658,6 +756,7 @@ insToBin (exs, funs) m = (,) ((\s -> (s, fst $ getGlobal funs s)) <$> exs) $ con
     , ((3, 0), [Get_local 0, Set_global sp, End])
     , ((2, 0), [Get_global hp, End])
     , ((3, 0), [Get_local 0, Set_global hp, End])
+    , ((1, 2), syscallPureAsm)
     ]
   fs = predefs ++ fmap ((,) (1, 0)) ((primAsm <$> prims) ++ ((++ [End]) . concatMap (fromInsWith $ getGlobal funs) . snd <$> m))
   sect t xs = t : lenc (varlen xs ++ concat xs)

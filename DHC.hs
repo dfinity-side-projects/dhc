@@ -696,7 +696,7 @@ expandSyscalls sys ast = case ast of
   Lam xs t -> Lam xs $ rec t
   Let xs t -> Let (second rec <$> xs) $ rec t
   Cas x as -> Cas (rec x) (second rec <$> as)
-  Var s | Just (n, t) <- M.lookup s (fst sys) -> Var "#syscall" :@ I (argCount t) :@ I (fromIntegral n)
+  Var s | Just (n, t) <- M.lookup s (fst sys) -> (if isIO t then Var "#syscall" else Var "#syscallPure") :@ I (argCount t) :@ I (fromIntegral n)
   -- Example:
   --  target.fun 1 2 "three"
   -- becomes:
@@ -707,6 +707,9 @@ expandSyscalls sys ast = case ast of
     rec = expandSyscalls sys
     argCount (_ :-> u) = 1 + argCount u
     argCount _ = 0
+    isIO (_ :-> u) = isIO u
+    isIO (TC "IO" `TApp` _) = True
+    isIO _ = False
 
 getContractExport :: Syscalls -> String -> String -> Either String Type
 getContractExport (_, f) c v = case f c v of
@@ -857,6 +860,7 @@ expandCase ast = case ast of
 
     dupCase e [a] = Cas e $ evalState (expandAlt Nothing [] a) 0
     dupCase e (a:as) = Cas e $ evalState (expandAlt (Just $ rec $ Cas e as) [] a) 0
+    dupCase _ _ = error "BUG! no case alternatives"
 
     -- TODO: Call `fromApList` only in last case alternative.
     expandAlt :: Maybe Ast -> [(Ast, Ast)] -> (Ast, Ast) -> State Int [(Ast, Ast)]
@@ -876,12 +880,12 @@ expandCase ast = case ast of
 
       where
       moreCases = maybe [] ((pure . (,) (Var "_"))) onFail
-      doPack acc deeper [] body = (:moreCases) . (,) (foldl1 (:@) acc) <$> g deeper body
-      doPack acc deeper (a:rest) body = do
+      doPack acc dpr [] body = (:moreCases) . (,) (foldl1 (:@) acc) <$> g dpr body
+      doPack acc dpr (h:rest) body = do
         gv <- Var <$> genVar
-        case a of
-          Var _ -> doPack (acc ++ [a]) deeper rest body
-          _     -> doPack (acc ++ [gv]) (deeper ++ [(gv, a)]) rest body
+        case h of
+          Var _ -> doPack (acc ++ [h]) dpr rest body
+          _     -> doPack (acc ++ [gv]) (dpr ++ [(gv, h)]) rest body
       g [] body = pure body
       g ((v, w):rest) body = Cas v <$> expandAlt onFail rest (w, body)
 
