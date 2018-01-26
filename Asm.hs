@@ -18,7 +18,7 @@ import Data.Int
 import Data.List
 import Data.Maybe
 
-import DHC hiding (Call, Type)
+import DHC hiding (Type)
 import WasmOp
 
 #ifdef __HASTE__
@@ -443,6 +443,9 @@ syscallPureAsm =
   -- becomes:
   --
   --   (#syscallPure 1 999) (Var "beaconAt" :@ 123)
+  --
+  -- The number of arguments to "beaconAt" is 1.
+  -- The syscall number is 999.
   --
   -- After removing the innermost spine, we have:
   --
@@ -1005,7 +1008,7 @@ fromInsWith lookupGlobal instruction = case instruction of
     , I32_add
     , I32_const $ fromIntegral g
     , I32_store 2 0
-    , Get_global hp  -- hp = hp + 8
+    , Get_global hp  -- hp = hp + 16
     , I32_const 16
     , I32_add
     , Set_global hp
@@ -1116,20 +1119,19 @@ fromInsWith lookupGlobal instruction = case instruction of
     , Set_global hp
     ]
   Casejump alts0 -> let
-    -- TODO: This compiles Int case statements incorrectly.
-      (underscore, unsortedAlts) = partition (isNothing . fst) alts0
-      alts = sortOn fst unsortedAlts
-      catchall = if null underscore then [Trap] else snd $ head underscore
-      tab = zip (fromJust . fst <$> alts) [0..]
-      m = maximum $ fromJust . fst <$> alts
-      nest j (ins:rest) = pure $ Block Nada $ nest (j + 1) rest ++ concatMap (fromInsWith lookupGlobal) ins ++ [Br j]
-      nest _ [] = pure $ Block Nada
-        [ Get_global bp  -- [bp + 4]
-        , I32_const 4
-        , I32_add
-        , I32_load 2 0
-        , Br_table [fromIntegral $ fromMaybe (length alts) $ lookup i tab | i <- [0..m]] $ m + 1
-        ]
+    (underscore, unsortedAlts) = partition (isNothing . fst) alts0
+    alts = sortOn fst unsortedAlts
+    catchall = if null underscore then [Trap] else snd $ head underscore
+    tab = zip (fromJust . fst <$> alts) [0..]
+    m = maximum $ fromJust . fst <$> alts
+    nest j (ins:rest) = pure $ Block Nada $ nest (j + 1) rest ++ concatMap (fromInsWith lookupGlobal) ins ++ [Br j]
+    nest _ [] = pure $ Block Nada
+      [ Get_global bp  -- [bp + 4]
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , Br_table [fromIntegral $ fromMaybe (length alts) $ lookup i tab | i <- [0..m]] $ m + 1
+      ]
     in if null alts then concatMap (fromInsWith lookupGlobal) catchall else
     -- [sp + 4] should be:
     -- 0: TagSum
@@ -1185,6 +1187,7 @@ mk1 storage ast = case ast of
     pure $ case last mt of
       Copro _ _ -> mu ++ mt
       _ -> concat [mu, mt, [MkAp]]
+  Var "undefined" -> pure [Trap]
   Var v -> do
     m <- get
     pure $ case lookup v m of

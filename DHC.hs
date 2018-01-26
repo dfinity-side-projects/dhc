@@ -33,7 +33,7 @@ instance Binary Ast
 instance Binary Type
 
 infixl 5 :@
-data Ast = Qual String String | Call String String
+data Ast = Qual String String | CCall String String
   | Pack Int Int | I Int64 | S ShortByteString | Var String
   | Ast :@ Ast | Cas Ast [(Ast, Ast)]
   | Lam [String] Ast | Let [(String, Ast)] Ast
@@ -45,7 +45,7 @@ data Type = TC String | TApp Type Type | Type :-> Type
 
 instance NFData Ast where
   rnf (Qual s1 s2) = rnf s1 `seq` rnf s2 `seq` ()
-  rnf (Call s1 s2) = rnf s1 `seq` rnf s2 `seq` ()
+  rnf (CCall s1 s2) = rnf s1 `seq` rnf s2 `seq` ()
   rnf (Pack i1 i2) = rnf i1 `seq` rnf i2 `seq` ()
   rnf (I i) = rnf i `seq` ()
   rnf (S s) = rnf s `seq` ()
@@ -65,7 +65,7 @@ instance NFData Type where
 
 type AnnAst ann = (ann, AnnAst' ann)
 data AnnAst' ann
-  = AnnVar String | AnnQual String String | AnnCall String String
+  = AnnVar String | AnnQual String String | AnnCCall String String
   | AnnPack Int Int | AnnI Int64 | AnnS ShortByteString
   | AnnAst ann :@@ AnnAst ann
   | AnnCas (AnnAst ann) [(AnnAst ann, AnnAst ann)]
@@ -206,8 +206,8 @@ supercombinators = catMaybes <$> between (want "{") (want "}") (sc `sepBy` want 
     void $ want "call"
     (t, s) <- tok
     case t of
-      LexQual -> pure $ uncurry Call $ splitDot s
-      LexVar  -> pure $ Call "" s
+      LexQual -> pure $ uncurry CCall $ splitDot s
+      LexVar  -> pure $ CCall "" s
       _ -> fail "bad call"
   num = try $ do
     (t, s) <- tok
@@ -422,10 +422,9 @@ gather findExport prelude env ast = case ast of
     x <- newTV
     pure (x, AnnVar "_")
   Var v -> case lookup v env of
-    Just qt  -> if v `M.member` prelude then bad $ "ambiguous: " ++ v
-      else do
-        (t1, qs1) <- instantiate qt
-        pure $ foldl' (((,) t1 .) .  (:@@)) (t1, AnnVar v) $ (\(a, b) -> (TC $ "Dict-" ++ a, AnnPlaceholder a (TV b))) <$> qs1
+    Just qt  -> do
+      (t1, qs1) <- instantiate qt
+      pure $ foldl' (((,) t1 .) .  (:@@)) (t1, AnnVar v) $ (\(a, b) -> (TC $ "Dict-" ++ a, AnnPlaceholder a (TV b))) <$> qs1
     Nothing -> case M.lookup v methods of
       Just qt -> do
         (t1, [(_, x)]) <- instantiate qt
@@ -471,10 +470,10 @@ gather findExport prelude env ast = case ast of
     xs <- replicateM n newTV
     let r = foldl' (TApp) (TC "()") xs
     pure (foldr (:->) r xs, AnnPack m n)
--- TODO: Type classes for Call and Qual.
-  Call c f -> case findExport c f of
+-- TODO: Type classes for CCall and Qual.
+  CCall c f -> case findExport c f of
     Left err -> bad err
-    Right t -> flip (,) (AnnCall c f) . (TC "String" :->) .fst <$> instantiate (t, [])
+    Right t -> flip (,) (AnnCCall c f) . (TC "String" :->) .fst <$> instantiate (t, [])
   Qual c f -> case findExport c f of
     Left err -> bad err
     Right t -> flip (,) (AnnQual c f) . fst <$> instantiate (t, [])
@@ -700,8 +699,13 @@ expandSyscalls sys ast = case ast of
   -- Example:
   --  target.fun 1 2 "three"
   -- becomes:
-  --  #syscall 5 0 "target" "fun" 3 1 2 "three"
+  --  #syscall 6 0 "target" "fun" 3 1 2 "three"
   Qual c f | Just n <- snd sys c f -> Var "#syscall" :@ I (fromIntegral $ n + 3) :@ I 0 :@ S (pack $ c2w <$> c) :@ S (pack $ c2w <$> f) :@ I (fromIntegral n)
+  -- Example:
+  --  call target.fun "abc123" 1 2 "three"
+  -- becomes:
+  --  #syscall 7 8 "target" "fun" 3 "abc123" 1 2 "three"
+  CCall c f | Just n <- snd sys c f -> Var "#syscall" :@ I (fromIntegral $ n + 4) :@ I 8 :@ S (pack $ c2w <$> c) :@ S (pack $ c2w <$> f) :@ I (fromIntegral n)
   _ -> ast
   where
     rec = expandSyscalls sys
@@ -711,9 +715,12 @@ expandSyscalls sys ast = case ast of
     isIO (TC "IO" `TApp` _) = True
     isIO _ = False
 
-getContractExport :: Syscalls -> String -> String -> Either String Type
-getContractExport (_, f) c v = case f c v of
-  Nothing -> Left "no such export"
+getContractExport :: Syscalls -> [String] -> String -> String -> Either String Type
+getContractExport _ es "" v = if v `elem` es
+  then Right $ TV $ '*':v
+  else Left $ "no such export " ++ v
+getContractExport (_, f) _ c v = case f c v of
+  Nothing -> Left $ "no such export " ++ c ++ "." ++ v
   Just n -> Right $ foldr (:->) (TC "IO" `TApp` GV "r") [GV $ "x" ++ show i | i <- [1..n]]
 
 hsToAst :: Syscalls -> String -> Either String AstPlus
@@ -721,7 +728,7 @@ hsToAst sys prog = do
   (es, storage, ds) <- showErr $ parseContract prog
   typeCheckedDefs <- (second (expandSyscalls sys . expandCase) <$>)
     . liftLambdas . (second snd <$>) <$>
-    inferType (getContractExport sys) (genTypes storage) (ds ++ hacks)
+    inferType (getContractExport sys es) (genTypes storage) (ds ++ hacks)
   pure (es, storage, typeCheckedDefs)
   where
     showErr = either (Left . show) Right
@@ -760,7 +767,7 @@ callees ds f = deps f (fromJust $ lookup f ds) where
     Lam ss t | name `notElem` ss -> rec t
     -- TODO: Look for shadowed function name in case and let statements.
     -- Or add deshadowing phase.
-    Call "" v         -> [v]
+    CCall "" v         -> [v]
     Cas x as          -> rec x ++ concatMap rec (snd <$> as)
     Let as x          -> rec x ++ concatMap rec (snd <$> as)
     x :@ y            -> rec x ++ rec y
@@ -809,7 +816,7 @@ freeV scs = map f scs where
   g _    (S s) = ([], AnnS s)
   g _    (Pack m n) = ([], AnnPack m n)
   g _    (Qual x y) = ([], AnnQual x y)
-  g _    (Call x y) = ([], AnnCall x y)
+  g _    (CCall x y) = ([], AnnCCall x y)
   g _    (Placeholder x y) = ([], AnnPlaceholder x y)
 
 caseVars :: Ast -> [String]
@@ -862,7 +869,7 @@ expandCase ast = case ast of
     dupCase e (a:as) = Cas e $ evalState (expandAlt (Just $ rec $ Cas e as) [] a) 0
     dupCase _ _ = error "BUG! no case alternatives"
 
-    -- TODO: Call `fromApList` only in last case alternative.
+    -- TODO: CCall `fromApList` only in last case alternative.
     expandAlt :: Maybe Ast -> [(Ast, Ast)] -> (Ast, Ast) -> State Int [(Ast, Ast)]
     expandAlt onFail deeper (p, a) = do
       case fromApList p of
@@ -902,7 +909,7 @@ deAnn :: AnnAst' a -> Ast
 deAnn (AnnS s) = S s
 deAnn (AnnI i) = I i
 deAnn (AnnVar v) = Var v
-deAnn (AnnCall x y) = Call x y
+deAnn (AnnCCall x y) = CCall x y
 deAnn (AnnQual x y) = Qual x y
 deAnn (AnnPack x y) = Pack x y
 deAnn (AnnPlaceholder x y) = Placeholder x y
