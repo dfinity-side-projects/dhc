@@ -849,42 +849,46 @@ expandCase :: Ast -> Ast
 expandCase ast = case ast of
   u :@ v  -> rec u :@ rec v
   Lam ss a -> Lam ss $ rec a
-  Cas e alts -> Cas (rec e) $ (\a -> evalState (expandAlt [] a) 0) <$> alts
+
+  Cas e alts -> dupCase (rec e) alts
   _ -> ast
   where
     rec = expandCase
-   -- TODO: Call `fromApList` only in last case alternative.
-    expandAlt :: [(Ast, Ast)] -> (Ast, Ast) -> State Int (Ast, Ast)
-    expandAlt deeper (p, a) = do
+
+    dupCase e [a] = Cas e $ evalState (expandAlt Nothing [] a) 0
+    dupCase e (a:as) = Cas e $ evalState (expandAlt (Just $ rec $ Cas e as) [] a) 0
+
+    -- TODO: Call `fromApList` only in last case alternative.
+    expandAlt :: Maybe Ast -> [(Ast, Ast)] -> (Ast, Ast) -> State Int [(Ast, Ast)]
+    expandAlt onFail deeper (p, a) = do
       case fromApList p of
-        [Var _] -> (,) p <$> g deeper a
+        [Var _] -> (:moreCases) . (,) p <$> g deeper a
         [S s] -> do
           v <- genVar
           a1 <- g deeper a
-          pure (Var v, Cas (Var "String-==" :@ Var v :@ S s) [(Pack 1 0, a1)])
+          pure [(Var v, Cas (Var "String-==" :@ Var v :@ S s) $ (Pack 1 0, a1):moreCases)]
         [I n] -> do
           v <- genVar
           a1 <- g deeper a
-          pure (Var v, Cas (Var "Int-==" :@ Var v :@ I n) [(Pack 1 0, a1)])
-        h@(Pack _ _):xs -> doPack [h] deeper xs a
+          pure [(Var v, Cas (Var "Int-==" :@ Var v :@ I n) $ (Pack 1 0, a1):maybe [] ((pure . (,) (Pack 0 0))) onFail)]
+        h@(Pack _ _):xs -> (++ moreCases) <$> doPack [h] deeper xs a
         _ -> error $ "bad case: " ++ show p
 
-    doPack acc deeper [] body = (,) (foldl1 (:@) acc) <$> g deeper body
-    doPack acc deeper (a:rest) body = do
-      gv <- Var <$> genVar
-      case a of
-        Var _ -> doPack (acc ++ [a]) deeper rest body
-        _     -> doPack (acc ++ [gv]) (deeper ++ [(gv, a)]) rest body
+      where
+      moreCases = maybe [] ((pure . (,) (Var "_"))) onFail
+      doPack acc deeper [] body = (:moreCases) . (,) (foldl1 (:@) acc) <$> g deeper body
+      doPack acc deeper (a:rest) body = do
+        gv <- Var <$> genVar
+        case a of
+          Var _ -> doPack (acc ++ [a]) deeper rest body
+          _     -> doPack (acc ++ [gv]) (deeper ++ [(gv, a)]) rest body
+      g [] body = pure body
+      g ((v, w):rest) body = Cas v <$> expandAlt onFail rest (w, body)
 
     genVar = do
       n <- get
       put (n + 1)
       pure $ "c*" ++ show n
-
-    g [] body = pure body
-    g ((v, w):rest) body = do
-      single <- expandAlt rest (w, body)
-      pure $ Cas v [single]
 
     fromApList :: Ast -> [Ast]
     fromApList (a :@ b) = fromApList a ++ [b]
