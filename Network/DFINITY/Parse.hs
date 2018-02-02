@@ -7,9 +7,8 @@ import Control.Monad
 import qualified Data.ByteString.Char8 as B8
 import Data.ByteString.Char8 (ByteString)
 import Data.Char
+import Data.Int
 import Data.Maybe
-import Data.Word
-
 import WasmOp
 
 data ExternalKind = Function | Table | Memory | Global
@@ -20,15 +19,17 @@ type Import = ((String, String), FuncType)
 data Wasm = Wasm {
   types :: [FuncType],
   imports :: [Import],
-  decls :: [Int],
+  decls :: [FuncType],
+  tableSize :: Int,
   memory :: [(Int, Maybe Int)],
   globals :: [((Type, Bool), [WasmOp])],
   exports :: [(String, Int)],
   start :: Maybe Int,
-  code :: [Body] } deriving Show
+  code :: [Body],
+  dataSection :: [([WasmOp], String)] } deriving Show
 
 emptyWasm :: Wasm
-emptyWasm = Wasm [] [] [] [] [] [] Nothing []
+emptyWasm = Wasm [] [] [] 0 [] [] [] Nothing [] []
 
 data ByteParser a = ByteParser (ByteString -> Either String (a, ByteString))
 
@@ -74,23 +75,27 @@ wasm = do
         d <- fromIntegral . ord <$> next
         if d > 127 then f (m * 128) $ (d - 128) * m + acc else pure $ d*m + acc
 
-    varint = varuint  -- TODO: Negative values.
+    varint = f 1 0 where
+      f :: Integer -> Integer -> ByteParser Integer
+      f m acc = do
+        d <- fromIntegral . ord <$> next
+        if d > 127 then f (m * 128) $ (d - 128) * m + acc else pure $
+          if d >= 64 then d*m + acc - 128*m else d*m + acc
 
     varuint1 = varuint
     varuint7 = ord <$> next
     varuint32 = varuint
 
-    varint7 = varint
-    varint32 = varint
-    varint64 = varint
+    varint7 :: ByteParser Int
+    varint7 = do
+      c <- ord <$> next
+      pure $ if c >= 64 then c - 128 else c
 
-    uint64 :: ByteParser Word64
-    uint64 = do
-      cs <- map ord <$> replicateM 8 next
-      let
-        f _ acc [] = acc
-        f m acc (d:ds) = f (m * 256) (acc + fromIntegral d * m) ds
-      pure $ f 1 0 cs
+    varint32 :: ByteParser Int32
+    varint32 = fromIntegral <$> varint
+
+    varint64 :: ByteParser Int64
+    varint64 = fromIntegral <$> varint
 
     lstr = rep varuint32 next
 
@@ -110,6 +115,10 @@ wasm = do
       when (t `notElem` [I32, I64, F32, F64, Nada]) $ error "bad value_type"
       pure t
 
+    elemType = do
+      t <- allType
+      when (t /= AnyFunc) $ error "bad elem_type"
+
     externalKind = do
       k <- varuint7
       pure $ case k of
@@ -121,7 +130,7 @@ wasm = do
 
     funcType = do
       form <- varint7
-      when (form /= 0x60) $ bad "expected func type"
+      when (form /= -32) $ bad "expected func type"
       paramTypes <- rep varuint32 valueType
       returnTypes <- rep varuint1 valueType
       pure (paramTypes, returnTypes)
@@ -158,8 +167,10 @@ wasm = do
       pure w { exports = catMaybes es }
 
     sectFunction w = do
-      -- TODO: Check type indices are in range.
-      sigs <- rep varuint32 varuint32
+      sigs <- rep varuint32 $ do
+        t <- varuint32
+        when (t > length (types w)) $ bad "type out of range"
+        pure $ types w !! t
       pure w { decls = sigs }
 
     sectStart w = do
@@ -167,7 +178,15 @@ wasm = do
       when (i > functionCount w) $ bad "function index out of range"
       pure w { start = Just i }
 
-    sectTable _ = undefined
+    sectTable w = do
+      n <- varuint32
+      when (n > 1) $ bad "MVP allows at most one table"
+      if n == 0 then pure w else do
+        elemType
+        flags <- varuint1
+        when (flags == 1) $ bad "unhandled"
+        m <- varuint32
+        pure w { tableSize = m }
 
     sectMemory w = do
       n <- varuint32
@@ -194,7 +213,7 @@ wasm = do
 
     sectCode w = do
       bodies <- rep varuint32 $ do
-        _ <- varuint32
+        _ <- varuint32  -- Size.
         locals <- concat <$> rep varuint32 (do
           n <- varuint32
           t <- initLocal <$> valueType
@@ -202,6 +221,14 @@ wasm = do
         ops <- codeBlock
         pure (locals, ops)
       pure w { code = bodies}
+
+    sectData w = do
+      ds <- rep varuint32 $ do
+        index <- varuint32
+        when (index /= 0) $ bad "MVP allows at most one memory"
+        offset <- codeBlock
+        (,) offset <$> lstr
+      pure w { dataSection = ds }
 
     codeBlock :: ByteParser [WasmOp]
     codeBlock = do
@@ -230,10 +257,10 @@ wasm = do
             pure $ Br_table tgts defTgt
           0x41 -> do
             i32 <- varint32
-            pure $ I32_const $ fromIntegral i32
+            pure $ I32_const i32
           0x42 -> do
             i64 <- varint64
-            pure $ I64_const $ fromIntegral i64
+            pure $ I64_const i64
           0x10 -> do
             i <- varuint32
             pure $ Call i
@@ -256,7 +283,9 @@ wasm = do
           6 -> sectGlobal
           7 -> sectExport
           8 -> sectStart
+          9 -> error "TODO: element section"
           10 -> sectCode
+          11 -> sectData
           _ -> pure
       case byteParse (f w) s of
         Left err -> bad err

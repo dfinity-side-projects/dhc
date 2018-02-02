@@ -12,7 +12,7 @@ main = do
   s <- B.getContents
   case parseWasm s of
     Left err -> putStrLn $ "parse error: " ++ show err
-    Right out -> void $ runWasm [syscall] out "main"
+    Right out -> (print out >>) $ void $ runWasm [syscall] out "main"
 
 syscall :: HeroVM -> [WasmOp] -> IO HeroVM
 syscall vm [I32_const hp, I32_const sp, I32_const n]
@@ -28,7 +28,7 @@ syscall vm [I32_const hp, I32_const sp, I32_const n]
       vm
   | n == 22 = do
     when (getTag /= 3) $ error "BUG! want Int"
-    print (getNumVM 8 (addr + 8) vm :: Int)
+    putStr $ show (getNumVM 8 (addr + 8) vm :: Int)
     pure
       $ putNumVM 4 hp (4 :: Int)
       $ putNumVM 4 (hp + 4) (0 :: Int)
