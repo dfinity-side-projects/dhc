@@ -108,9 +108,6 @@ gmachine prog = if "main_" `M.member` funs then
     | NCon 0 [_, o] <- h M.! r, RealWorld out <- h M.! o = show out
   go [] s h = error $ "bad stack: " ++ show (s, h)
 
-main :: IO Counts
-main = runTestTT $ TestList $ lexOffsideTests ++ gmachineTests
-
 gmachineTests :: [Test]
 gmachineTests = (\(result, source) -> TestCase $
   assertEqual source result $ gmachine source) <$>
@@ -181,3 +178,6 @@ lexOffsideTests = (\(result, source) -> TestCase $
     , (words "{ f x = ( case x of { True -> 1 ; False -> 0 ) } }",
       "f x = (case x of True -> 1; False -> 0)")
     ]
+
+main :: IO Counts
+main = runTestTT $ TestList $ lexOffsideTests ++ gmachineTests

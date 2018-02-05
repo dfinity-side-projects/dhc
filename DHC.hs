@@ -335,13 +335,13 @@ rawTok = do
 filler :: Parser ()
 filler = void $ many $ void (char ' ') <|> nl <|> com
   where
-  newlines = "\r\n\f"
+  hsNewline = (void $ try $ string "\r\n") <|> (void $ oneOf "\r\n\f")
   com = do
-    void $ between (try $ string "--") ((void $ try $ string "\r\n") <|> (void $ oneOf newlines)) $ many $ noneOf newlines
+    void $ between (try $ string "--") hsNewline $ many $ noneOf "\r\n\f"
     (st, is) <- getState
     when (st == LineMiddle) $ putState (LineStart, is)
   nl = do
-    void $ char '\n'
+    hsNewline
     (st, is) <- getState
     when (st == LineMiddle) $ putState (LineStart, is)
 
@@ -689,8 +689,8 @@ hacks =
 
 type Syscalls = (Map String (Int, Type), String -> String -> Maybe Int)
 
-expandSyscalls :: Syscalls -> Ast -> Ast
-expandSyscalls sys ast = case ast of
+expandSyscalls :: Syscalls -> [(String, Int)] -> Ast -> Ast
+expandSyscalls sys arities ast = case ast of
   t :@ u -> rec t :@ rec u
   Lam xs t -> Lam xs $ rec t
   Let xs t -> Let (second rec <$> xs) $ rec t
@@ -703,12 +703,15 @@ expandSyscalls sys ast = case ast of
   Qual c f | Just n <- snd sys c f -> Var "#syscall" :@ I (fromIntegral $ n + 3) :@ I 0 :@ S (pack $ c2w <$> c) :@ S (pack $ c2w <$> f) :@ I (fromIntegral n)
   -- Example:
   --  call target.fun "abc123" 1 2 "three"
+  --  call fun "abc123" 1 2 "three"
   -- becomes:
   --  #syscall 7 8 "target" "fun" 3 "abc123" 1 2 "three"
+  --  #syscall 6 9 "fun" 3 "abc123" 1 2 "three"
+  CCall "" f | Just n <- lookup f arities -> Var "#syscall" :@ I (fromIntegral $ n + 3) :@ I 9 :@ S (pack $ c2w <$> f) :@ I (fromIntegral n)
   CCall c f | Just n <- snd sys c f -> Var "#syscall" :@ I (fromIntegral $ n + 4) :@ I 8 :@ S (pack $ c2w <$> c) :@ S (pack $ c2w <$> f) :@ I (fromIntegral n)
   _ -> ast
   where
-    rec = expandSyscalls sys
+    rec = expandSyscalls sys arities
     argCount (_ :-> u) = 1 + argCount u
     argCount _ = 0
     isIO (_ :-> u) = isIO u
@@ -726,9 +729,13 @@ getContractExport (_, f) _ c v = case f c v of
 hsToAst :: Syscalls -> String -> Either String AstPlus
 hsToAst sys prog = do
   (es, storage, ds) <- showErr $ parseContract prog
-  typeCheckedDefs <- (second (expandSyscalls sys . expandCase) <$>)
-    . liftLambdas . (second snd <$>) <$>
-    inferType (getContractExport sys es) (genTypes storage) (ds ++ hacks)
+  inferred <- inferType (getContractExport sys es) (genTypes storage) (ds ++ hacks)
+  let
+    arities = second (countArgs . fst . fst) <$> inferred
+    countArgs (_ :-> b) = 1 + countArgs b
+    countArgs _ = 0
+    typeCheckedDefs = (second (expandSyscalls sys arities . expandCase) <$>)
+      . liftLambdas . (second snd <$>) $ inferred
   pure (es, storage, typeCheckedDefs)
   where
     showErr = either (Left . show) Right
