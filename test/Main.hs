@@ -19,7 +19,7 @@ gmachine prog = if "main_" `M.member` funs then
   where
   drop' n as | n > length as = error "BUG!"
              | otherwise     = drop n as
-  Right ((_, funs), m) = hsToGMachineWebDemo prog
+  ((_, funs), m) = either error id $ hsToGMachineWebDemo prog
   arity v = fst $ funs M.! v
   go (fOrIns:rest) s h = either prim exec fOrIns where
     k = M.size h
@@ -159,6 +159,18 @@ gmachineTests = (\(result, source) -> TestCase $
       [ "main = do"
       , "  putStr \"hello\""
       , "  putStr \"world\""
+      ])
+    , (show ["one", "two", "three"], unlines
+      [ "main = do"
+      , "  putStr \"one\""
+      , "  putStr \"two\""
+      , "  putStr \"three\""
+      ])
+    , (show ["hello", "world"], unlines
+      [ "main = do"
+      , "  x <- pure \"world\""
+      , "  putStr \"hello\""
+      , "  putStr x"
       ])
     ]
 

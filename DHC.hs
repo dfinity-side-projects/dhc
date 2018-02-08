@@ -151,10 +151,9 @@ supercombinators = catMaybes <$> between (want "{") (want "}") (sc `sepBy` want 
       ((mv, x):t) -> desugarDo x mv t
   desugarDo x Nothing [] = pure x
   desugarDo _ _ [] = fail "do block ends with (<-) statement"
-  desugarDo x (Just v) ((mv1, x1):rest) =
-    desugarDo (Var ">>=" :@ x :@ Lam [v] x1) mv1 rest
-  desugarDo x Nothing ((mv1, x1):rest) =
-    desugarDo (Var ">>=" :@ x :@ Lam ["_"] x1) mv1 rest
+  desugarDo x mv ((mv1, x1):rest) = do
+    body <- desugarDo x1 mv1 rest
+    pure $ Var ">>=" :@ x :@ Lam [fromMaybe "_" mv] body
   stmt = do
     v <- expr
     lArrStmt v <|> pure (Nothing, v)

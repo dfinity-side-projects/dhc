@@ -46,6 +46,10 @@ nPages = 8
 --    0 TagInt
 --    8 64-bit value
 --
+-- Ports:
+--    0 TagPort
+--    4 32-bit value
+--
 -- Coproduct (sum) types:
 --    0 TagSum | (arity << 8)
 --    4 Enum
@@ -79,7 +83,7 @@ nPages = 8
 -- Globals are resolved in a giant `br_table`. This is ugly, but avoids
 -- run-time type-checking.
 
-data Tag = TagAp | TagInd | TagGlobal | TagInt | TagSum | TagString deriving Enum
+data Tag = TagAp | TagInd | TagGlobal | TagInt | TagPort | TagSum | TagString deriving Enum
 
 encWasmOp :: WasmOp -> [Int]
 encWasmOp op = case op of
@@ -694,11 +698,13 @@ astToIns (AstPlus es ws storage ds ts) = (((es, funs), second compile <$> ds), w
     a :-> b -> wasmType (translateType a : acc) b
     r -> (,) (reverse acc) $ case r of
       TC "()" -> []
+      TApp (TC "IO") _ -> []
       _ -> [translateType r]
-  -- Int should translate to I64, but we choose I32 for JavaScript demos.
-  translateType (TC "Int") = I32
-  translateType (_ :-> _) = I32   -- Function reference.
-  translateType _ = error "no corresponding wasm type"
+  -- For JS demos.
+  -- translateType (TC "Int") = I32
+  translateType (TC "Int") = I64
+  translateType (TC "Port") = I32
+  translateType t = error $ "no corresponding wasm type: " ++ show t
   ps = zipWith (\p i -> (primName p, (primArity p, i))) prims [0..]
   funs = M.fromList $ ps ++ zipWith (\(name, Lam as _) i -> (name, (length as, i))) ds [length prims..]
 
@@ -840,6 +846,28 @@ insToBin (((exs, funs), m), wrapme) = (,) ((\s -> (s, fst $ getGlobal funs s)) <
     , I32_const 4
     , I32_sub
     , Set_global sp
+    , Get_global hp  -- [hp] = TagPort
+    , tag_const TagPort
+    , I32_store 2 0
+    , Get_global hp  -- [hp + 4] = local i
+    , I32_const 4
+    , I32_add
+    , Get_local i
+    , I32_store 2 0
+    , Get_global hp  -- hp = hp + 8
+    , I32_const 8
+    , I32_add
+    , Set_global hp
+    ]
+  {- For JS demos.
+  wdeclIn I32 i =
+    [ Get_global sp  -- [sp] = hp
+    , Get_global hp
+    , I32_store 2 0
+    , Get_global sp  -- sp = sp - 4
+    , I32_const 4
+    , I32_sub
+    , Set_global sp
     , Get_global hp  -- [hp] = TagInt
     , tag_const TagInt
     , I32_store 2 0
@@ -858,6 +886,7 @@ insToBin (((exs, funs), m), wrapme) = (,) ((\s -> (s, fst $ getGlobal funs s)) <
     , I32_add
     , Set_global hp
     ]
+  -}
   wdeclIn _ _ = error "TODO"
   wdeclOut I64 =
     [ Get_global sp  -- sp = sp + 4
