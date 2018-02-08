@@ -12,7 +12,7 @@ import Data.Maybe
 import WasmOp
 
 data ExternalKind = Function | Table | Memory | Global
-type FuncType = ([Type], [Type])
+type FuncType = ([WasmType], [WasmType])
 type Body = ([WasmOp], [WasmOp])
 type Import = ((String, String), FuncType)
 
@@ -22,7 +22,7 @@ data Wasm = Wasm {
   decls :: [FuncType],
   tableSize :: Int,
   memory :: [(Int, Maybe Int)],
-  globals :: [((Type, Bool), [WasmOp])],
+  globals :: [((WasmType, Bool), [WasmOp])],
   exports :: [(String, Int)],
   start :: Maybe Int,
   code :: [Body],
@@ -60,7 +60,7 @@ byteParse :: ByteParser a -> ByteString -> Either String a
 byteParse (ByteParser f) s = f s >>= (\(w, t) ->
   if B8.null t then Right w else Left "expected EOF")
 
-initLocal :: Type -> WasmOp
+initLocal :: WasmType -> WasmOp
 initLocal I32 = I32_const 0
 initLocal _ = error "TODO"
 
