@@ -18,7 +18,7 @@ import Data.Int
 import Data.List
 import Data.Maybe
 
-import DHC hiding (Type)
+import DHC
 import WasmOp
 
 #ifdef __HASTE__
@@ -30,7 +30,8 @@ data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal String
   | PushString ShortByteString
   | MkAp | Slide Int | Split Int | Eval
   | UpdatePop Int | UpdateInd Int | Alloc Int
-  | Casejump [(Maybe Int, [Ins])] | Trap deriving Show
+  | Casejump [(Maybe Int, [Ins])] | Trap
+  deriving Show
 
 nPages :: Int
 nPages = 8
@@ -672,10 +673,10 @@ hsToWasmWebDemo :: String -> Either String [Int]
 hsToWasmWebDemo prog = snd <$> hsToWasm webDemoSys prog
 
 hsToGMachineWebDemo :: String -> Either String (GlobalTable, [(String, [Ins])])
-hsToGMachineWebDemo haskell = astToIns <$> hsToAst webDemoSys haskell
+hsToGMachineWebDemo haskell = fst . astToIns <$> hsToAst webDemoSys haskell
 
 hsToWasm :: Syscalls -> String -> Either String ([(String, Int)], [Int])
-hsToWasm sys prog = uncurry insToBin . astToIns <$> hsToAst sys prog
+hsToWasm sys prog = insToBin . astToIns <$> hsToAst sys prog
 
 webDemoSys :: Syscalls
 webDemoSys = (M.fromList
@@ -684,9 +685,20 @@ webDemoSys = (M.fromList
   ], \_ _ -> Nothing)
   where io = TApp (TC "IO")
 
-astToIns :: AstPlus -> (GlobalTable, [(String, [Ins])])
-astToIns (AstPlus es _ storage ds _) = ((es, funs), toIns <$> ds) where
-  toIns (f, d) = (f, evalState (mk1 storage d) [])
+astToIns :: AstPlus -> ((GlobalTable, [(String, [Ins])]), [(String, ([WasmType], [WasmType]))])
+astToIns (AstPlus es ws storage ds ts) = (((es, funs), second compile <$> ds), wrapme) where
+  compile d = evalState (mk1 storage d) []
+  wrapme = wasmize <$> ws
+  wasmize w = (w, wasmType [] $ fst $ fromJust $ lookup w ts)
+  wasmType acc t = case t of
+    a :-> b -> wasmType (translateType a : acc) b
+    r -> (,) (reverse acc) $ case r of
+      TC "()" -> []
+      _ -> [translateType r]
+  -- Int should translate to I64, but we choose I32 for JavaScript demos.
+  translateType (TC "Int") = I32
+  translateType (_ :-> _) = I32   -- Function reference.
+  translateType _ = error "no corresponding wasm type"
   ps = zipWith (\p i -> (primName p, (primArity p, i))) prims [0..]
   funs = M.fromList $ ps ++ zipWith (\(name, Lam as _) i -> (name, (length as, i))) ds [length prims..]
 
@@ -699,19 +711,23 @@ getGlobal funs v = case M.lookup v funs of
   Nothing -> error $ "no such global: " ++ v
   Just (i, j) -> (i, j)
 
-insToBin :: GlobalTable -> [(String, [Ins])] -> ([(String, Int)], [Int])
-insToBin (exs, funs) m = (,) ((\s -> (s, fst $ getGlobal funs s)) <$> exs) $ concat
+insToBin :: ((GlobalTable, [(String, [Ins])]), [(String, ([WasmType], [WasmType]))]) -> ([(String, Int)], [Int])
+insToBin (((exs, funs), m), wrapme) = (,) ((\s -> (s, fst $ getGlobal funs s)) <$> exs) $ concat
   [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
   , sect 1  -- Type section.
+    $
     [ encSig [I32, I32, I32] []  -- Type of syscall.
     , encSig [] []  -- Most functions have type () -> ().
     , encSig [] [I32]  -- Next two are for getters and setters.
     , encSig [I32] []
-    ]
+    ] ++ (uncurry encSig . snd <$> wrapme)
   -- Import section.
   -- [0, 0] = external_kind Function, index 0.
   , sect 2 [encStr "i" ++ encStr "f" ++ [0, 0]]
-  , sect 3 $ (pure . fst . fst <$> fs) ++ [[1]]  -- Function section.
+  , sect 3  -- Function section.
+    $ (pure . fst . fst <$> fs)  -- Top-level functions.
+    ++ [[1]]  -- Outer "main".
+    ++ (pure <$> take (length wrapme) [4..])  -- The wdecl functions.
   , sect 5 [[0, nPages]]  -- Memory section (0 = no-maximum).
   , sect 6  -- Global section (1 = mutable).
     [ [encType I32, 1, 0x41] ++ leb128 (65536*nPages - 4) ++ [0xb]  -- SP
@@ -728,9 +744,16 @@ insToBin (exs, funs) m = (,) ((\s -> (s, fst $ getGlobal funs s)) <$> exs) $ con
     , encStr "sethp" ++ [0, 6]
     -- 2 = external_kind Memory, 0 = memory index
     , encStr "mem" ++ [2, 0]
-    ] ++ [encStr ('_':s) ++ [0, 1 + length predefs + snd (getGlobal funs s)] | s <- exs]
-  , sect 10 $ encProcedure <$> (fs ++  -- Code section.
-    [((1, 0),
+    ]
+    -- The "contract" functions are exported with "_" prepended.
+    ++ [encStr ('_':s) ++ [0, 1 + length predefs + snd (getGlobal funs s)] | s <- exs]
+    -- The "wdecl" functions are exported with "w_" prepended.
+    ++ [encStr ('w':'_':s) ++ [0, 1 + length fs + 1 + k] | k <- [0..length wrapme - 1], let (s, _) = wrapme !! k]
+  , sect 10 $ encProcedure <$>  -- Code section.
+    (fs  -- Top-level functions.
+    -- Outer "main" function. It calls the internal "main" function (which
+    -- is "_main" if exported).
+    ++ [((1, 0),
       -- The magic constant 42 represents the RealWorld.
       [ Get_global sp  -- [sp] = 42
       , I32_const 42
@@ -742,7 +765,9 @@ insToBin (exs, funs) m = (,) ((\s -> (s, fst $ getGlobal funs s)) <$> exs) $ con
       ]
       ++ concatMap (fromInsWith $ getGlobal funs) [PushGlobal "main", MkAp]
       ++ [ Call 1, End ]
-    )])
+    )]
+    -- Wrappers for functions in "wdecl" section.
+    ++ (zip (flip (,) 0 <$> [4..]) $ wrap <$> wrapme))
   ] where
   -- Function 0: import function which we send our outputs.
   -- Function 1: Eval (reduce to weak head normal form).
@@ -762,7 +787,101 @@ insToBin (exs, funs) m = (,) ((\s -> (s, fst $ getGlobal funs s)) <$> exs) $ con
     , ((3, 0), [Get_local 0, Set_global hp, End])
     , ((1, 2), syscallPureAsm)
     ]
-  fs = predefs ++ fmap ((,) (1, 0)) ((primAsm <$> prims) ++ ((++ [End]) . concatMap (fromInsWith $ getGlobal funs) . snd <$> m))
+  fs = predefs
+    ++ ((,) (1, 0) . primAsm <$> prims)
+    ++ ((,) (1, 0) . (++ [End]) . concatMap (fromInsWith $ getGlobal funs) . snd <$> m)
+  wrap (f, (ins, outs)) =
+    -- Anticipate UpdatePop.
+    [ Get_global sp  -- [sp] = hp
+    , Get_global hp
+    , I32_store 2 0
+    , Get_global sp  -- sp = sp - 4
+    , I32_const 4
+    , I32_sub
+    , Set_global sp
+    , Get_global hp  -- hp = hp + 8
+    , I32_const 8
+    , I32_add
+    , Set_global hp
+    ]
+    -- Input arguments are local variables.
+    -- We move these to our stack in reverse order.
+    ++ concat (reverse $ zipWith wdeclIn ins [0..])
+    ++ [Call $ 1 + length predefs + snd (getGlobal funs f)]
+    -- Push the result to the WebAssembly stack.
+    ++ concatMap wdeclOut outs
+    ++ [End]
+  wdeclIn I64 i =
+    [ Get_global sp  -- [sp] = hp
+    , Get_global hp
+    , I32_store 2 0
+    , Get_global sp  -- sp = sp - 4
+    , I32_const 4
+    , I32_sub
+    , Set_global sp
+    , Get_global hp  -- [hp] = TagInt
+    , tag_const TagInt
+    , I32_store 2 0
+    , Get_global hp  -- [hp + 8] = local i
+    , I32_const 8
+    , I32_add
+    , Get_local i
+    , I64_store 3 0
+    , Get_global hp  -- hp = hp + 16
+    , I32_const 16
+    , I32_add
+    , Set_global hp
+    ]
+  wdeclIn I32 i =
+    [ Get_global sp  -- [sp] = hp
+    , Get_global hp
+    , I32_store 2 0
+    , Get_global sp  -- sp = sp - 4
+    , I32_const 4
+    , I32_sub
+    , Set_global sp
+    , Get_global hp  -- [hp] = TagInt
+    , tag_const TagInt
+    , I32_store 2 0
+    , Get_global hp  -- [hp + 12] = 0
+    , I32_const 12
+    , I32_add
+    , I32_const 0
+    , I32_store 2 0
+    , Get_global hp  -- [hp + 8] = local i
+    , I32_const 8
+    , I32_add
+    , Get_local i
+    , I32_store 2 0
+    , Get_global hp  -- hp = hp + 16
+    , I32_const 16
+    , I32_add
+    , Set_global hp
+    ]
+  wdeclIn _ _ = error "TODO"
+  wdeclOut I64 =
+    [ Get_global sp  -- sp = sp + 4
+    , I32_const 4
+    , I32_add
+    , Set_global sp
+    , Get_global sp  -- PUSH [[sp] + 8]
+    , I32_load 2 0
+    , I32_const 8
+    , I32_add
+    , I64_load 3 0
+    ]
+  wdeclOut I32 =
+    [ Get_global sp  -- sp = sp + 4
+    , I32_const 4
+    , I32_add
+    , Set_global sp
+    , Get_global sp  -- PUSH [[sp] + 8]
+    , I32_load 2 0
+    , I32_const 8
+    , I32_add
+    , I32_load 2 0
+    ]
+  wdeclOut _ = error "TODO"
   sect t xs = t : lenc (varlen xs ++ concat xs)
   encStr s = lenc $ ord <$> s
   encProcedure ((_, 0), body) = lenc $ 0:concatMap encWasmOp body
@@ -1175,8 +1294,9 @@ fromInsWith lookupGlobal instruction = case instruction of
 
 mk1 :: [String] -> Ast -> State [(String, Int)] [Ins]
 mk1 storage ast = case ast of
+  -- | Thanks to lambda lifting, `Lam` can only occur at the top level.
   Lam as b -> do
-    modify' $ \bs -> zip as [length bs..] ++ bs
+    put $ zip as [0..]
     (++ [UpdatePop $ length as, Eval]) <$> rec b
   I n -> pure [PushInt n]
   S s -> pure [PushString s]

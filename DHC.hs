@@ -365,7 +365,6 @@ contract = do
   ds <- supercombinators
   when (isNothing $ mapM (`lookup` ds) es) $ fail "bad exports"
   when (isNothing $ mapM (`lookup` ds) ws) $ fail "bad wdecls"
-  when (not $ null $ intersect es ws) $ fail "contract/wdecl conflict"
   pure $ AstPlus es ws ms ds []
 
 lexOffside :: String -> Either ParseError [String]

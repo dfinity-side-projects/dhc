@@ -1,7 +1,7 @@
 module WasmOp where
 import Data.Int
 
-data Type = I32 | I64 | F32 | F64 | Func | AnyFunc | Nada deriving (Show, Eq)
+data WasmType = I32 | I64 | F32 | F64 | Func | AnyFunc | Nada deriving (Show, Eq)
 
 -- Much of this file was generated from:
 --   http://webassembly.org/docs/binary-encoding/
@@ -9,7 +9,7 @@ data Type = I32 | I64 | F32 | F64 | Func | AnyFunc | Nada deriving (Show, Eq)
 data WasmOp = I32_eqz | I32_eq | I32_ne | I32_lt_s | I32_lt_u | I32_gt_s | I32_gt_u | I32_le_s | I32_le_u | I32_ge_s | I32_ge_u | I64_eqz | I64_eq | I64_ne | I64_lt_s | I64_lt_u | I64_gt_s | I64_gt_u | I64_le_s | I64_le_u | I64_ge_s | I64_ge_u | F32_eq | F32_ne | F32_lt | F32_gt | F32_le | F32_ge | F64_eq | F64_ne | F64_lt | F64_gt | F64_le | F64_ge | I32_clz | I32_ctz | I32_popcnt | I32_add | I32_sub | I32_mul | I32_div_s | I32_div_u | I32_rem_s | I32_rem_u | I32_and | I32_or | I32_xor | I32_shl | I32_shr_s | I32_shr_u | I32_rotl | I32_rotr | I64_clz | I64_ctz | I64_popcnt | I64_add | I64_sub | I64_mul | I64_div_s | I64_div_u | I64_rem_s | I64_rem_u | I64_and | I64_or | I64_xor | I64_shl | I64_shr_s | I64_shr_u | I64_rotl | I64_rotr | F32_abs | F32_neg | F32_ceil | F32_floor | F32_trunc | F32_nearest | F32_sqrt | F32_add | F32_sub | F32_mul | F32_div | F32_min | F32_max | F32_copysign | F64_abs | F64_neg | F64_ceil | F64_floor | F64_trunc | F64_nearest | F64_sqrt | F64_add | F64_sub | F64_mul | F64_div | F64_min | F64_max | F64_copysign | I32_wrap_i64 | I32_trunc_s_f32 | I32_trunc_u_f32 | I32_trunc_s_f64 | I32_trunc_u_f64 | I64_extend_s_i32 | I64_extend_u_i32 | I64_trunc_s_f32 | I64_trunc_u_f32 | I64_trunc_s_f64 | I64_trunc_u_f64 | F32_convert_s_i32 | F32_convert_u_i32 | F32_convert_s_i64 | F32_convert_u_i64 | F32_demote_f64 | F64_convert_s_i32 | F64_convert_u_i32 | F64_convert_s_i64 | F64_convert_u_i64 | F64_promote_f32 | I32_reinterpret_f32 | I64_reinterpret_f64 | F32_reinterpret_i32 | F64_reinterpret_i64
   | I32_load Int Int | I64_load Int Int | F32_load Int Int | F64_load Int Int | I32_load8_s Int Int | I32_load8_u Int Int | I32_load16_s Int Int | I32_load16_u Int Int | I64_load8_s Int Int | I64_load8_u Int Int | I64_load16_s Int Int | I64_load16_u Int Int | I64_load32_s Int Int | I64_load32_u Int Int | I32_store Int Int | I64_store Int Int | F32_store Int Int | F64_store Int Int | I32_store8 Int Int | I32_store16 Int Int | I64_store8 Int Int | I64_store16 Int Int | I64_store32 Int Int
   | Unreachable | Nop | Else | End | Return
-  | Block Type [WasmOp] | Loop Type [WasmOp] | If Type [WasmOp]
+  | Block WasmType [WasmOp] | Loop WasmType [WasmOp] | If WasmType [WasmOp]
   | Get_local Int | Set_local Int | Tee_local Int | Get_global Int | Set_global Int
   | I32_const Int32 | I64_const Int64 | F32_const Float | F64_const Double
   | Br_table [Int] Int
