@@ -685,7 +685,8 @@ webDemoSys = (M.fromList
   where io = TApp (TC "IO")
 
 astToIns :: AstPlus -> (GlobalTable, [(String, [Ins])])
-astToIns (es, storage, ds) = ((es, funs), map (\(s, d) -> (s, evalState (mk1 storage d) [])) ds) where
+astToIns (AstPlus es _ storage ds _) = ((es, funs), toIns <$> ds) where
+  toIns (f, d) = (f, evalState (mk1 storage d) [])
   ps = zipWith (\p i -> (primName p, (primArity p, i))) prims [0..]
   funs = M.fromList $ ps ++ zipWith (\(name, Lam as _) i -> (name, (length as, i))) ds [length prims..]
 

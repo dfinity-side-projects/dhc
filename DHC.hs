@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE PackageImports #-}
-module DHC (parseContract, Syscalls, Ast(..), AstPlus, Type(..), inferType, parseDefs, lexOffside,
+module DHC (parseContract, Syscalls, Ast(..), AstPlus(..), Type(..), inferType, parseDefs, lexOffside,
   preludeMinimal, hsToAst, liftLambdas) where
 
 import Control.Arrow
@@ -345,16 +345,28 @@ filler = void $ many $ void (char ' ') <|> nl <|> com
     (st, is) <- getState
     when (st == LineMiddle) $ putState (LineStart, is)
 
-contract :: Parser ([String], [String], [(String, Ast)])
+data AstPlus = AstPlus
+  { exports :: [String]
+  , wdecls :: [String]
+  , storages :: [String]
+  , asts :: [(String, Ast)]
+  , funTypes :: [(String, QualType)]
+  }
+
+contract :: Parser AstPlus
 contract = do
   es <- option [] $ try $ want "contract" >>
+    (between (want "(") (want ")") $ varStr `sepBy` want ",")
+  ws <- option [] $ try $ want "wdecl" >>
     (between (want "(") (want ")") $ varStr `sepBy` want ",")
   ms <- option [] $ try $ want "storage" >>
     (between (want "(") (want ")") $ varStr `sepBy` want ",")
   putState (AwaitBrace, [])
   ds <- supercombinators
   when (isNothing $ mapM (`lookup` ds) es) $ fail "bad exports"
-  pure (es, ms, ds)
+  when (isNothing $ mapM (`lookup` ds) ws) $ fail "bad wdecls"
+  when (not $ null $ intersect es ws) $ fail "contract/wdecl conflict"
+  pure $ AstPlus es ws ms ds []
 
 lexOffside :: String -> Either ParseError [String]
 lexOffside = fmap (fmap snd) <$> runParser tokUntilEOF (AwaitBrace, []) "" where
@@ -367,14 +379,12 @@ lexOffside = fmap (fmap snd) <$> runParser tokUntilEOF (AwaitBrace, []) "" where
 parseDefs :: String -> Either ParseError [(String, Ast)]
 parseDefs = runParser program (AwaitBrace, []) ""
 
-type AstPlus = ([String], [String], [(String, Ast)])
-
 parseContract :: String -> Either ParseError AstPlus
 parseContract = fmap maybeAddMain . runParser contract (Boilerplate, []) ""
 
 maybeAddMain :: AstPlus -> AstPlus
-maybeAddMain a@(es, ms, asts) = case lookup "main" asts of
-  Nothing -> (es, ms, ("main", Var "pure" :@ Pack 0 0):asts)
+maybeAddMain a = case lookup "main" $ asts a of
+  Nothing -> a { asts = ("main", Var "pure" :@ Pack 0 0):asts a }
   Just _  -> a
 
 -- The Constraints monad combines a State monad and an Either monad.
@@ -407,7 +417,7 @@ type Globals = Map String (Maybe (Int, Int), Type)
 type QualType = (Type, [(String, String)])
 
 -- | Gathers constraints.
--- Replaces '==' with Placeholder.
+-- Replaces overloaded methods with Placeholder.
 -- Replaces data constructors with Pack.
 gather
   :: (String -> String -> Either String Type)
@@ -728,15 +738,17 @@ getContractExport (_, f) _ c v = case f c v of
 
 hsToAst :: Syscalls -> String -> Either String AstPlus
 hsToAst sys prog = do
-  (es, storage, ds) <- showErr $ parseContract prog
+  a@(AstPlus es _ storage ds _) <- showErr $ parseContract prog
   inferred <- inferType (getContractExport sys es) (genTypes storage) (ds ++ hacks)
   let
     arities = second (countArgs . fst . fst) <$> inferred
     countArgs (_ :-> b) = 1 + countArgs b
     countArgs _ = 0
-    typeCheckedDefs = (second (expandSyscalls sys arities . expandCase) <$>)
-      . liftLambdas . (second snd <$>) $ inferred
-  pure (es, storage, typeCheckedDefs)
+    -- | Expands syscalls and case expressions in an AST.
+    transform = expandSyscalls sys arities . expandCase
+    subbedDefs = (second transform <$>) . liftLambdas . (second snd <$>) $ inferred
+    types = second fst <$> inferred
+  pure a { asts = subbedDefs, funTypes = types }
   where
     showErr = either (Left . show) Right
     genTypes storage = preludeMinimal
