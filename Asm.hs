@@ -706,7 +706,7 @@ astToIns (AstPlus es ws storage ds ts) = (((es, funs), second compile <$> ds), w
   translateType (TC "Port") = I32
   translateType t = error $ "no corresponding wasm type: " ++ show t
   ps = zipWith (\p i -> (primName p, (primArity p, i))) prims [0..]
-  funs = M.fromList $ ps ++ zipWith (\(name, Lam as _) i -> (name, (length as, i))) ds [length prims..]
+  funs = M.fromList $ ps ++ zipWith (\(name, Ast (Lam as _)) i -> (name, (length as, i))) ds [length prims..]
 
 tag_const :: Tag -> WasmOp
 tag_const = I32_const . fromIntegral . fromEnum
@@ -1322,7 +1322,7 @@ fromInsWith lookupGlobal instruction = case instruction of
     ]
 
 mk1 :: [String] -> Ast -> State [(String, Int)] [Ins]
-mk1 storage ast = case ast of
+mk1 storage (Ast ast) = case ast of
   -- | Thanks to lambda lifting, `Lam` can only occur at the top level.
   Lam as b -> do
     put $ zip as [0..]
@@ -1349,12 +1349,12 @@ mk1 storage ast = case ast of
     xs <- forM alts $ \(p, body) -> do
       orig <- get  -- Save state.
       (f, b) <- case fromApList p of
-        (Pack n _:vs) -> do
+        (Ast (Pack n _):vs) -> do
           bump $ length vs
-          modify' (zip (map (\(Var v) -> v) vs) [0..] ++)
+          modify' (zip (map (\(Ast (Var v)) -> v) vs) [0..] ++)
           bod <- rec body
           pure (Just $ fromIntegral n, Split (length vs) : bod ++ [Slide (length vs)])
-        [Var s] -> do
+        [Ast (Var s)] -> do
           bump 1
           modify' $ \bs -> (s, 0):bs
           (,) Nothing . (++ [Slide 1]) <$> rec body
@@ -1376,5 +1376,5 @@ mk1 storage ast = case ast of
     rec = mk1 storage
 
 fromApList :: Ast -> [Ast]
-fromApList (a :@ b) = fromApList a ++ [b]
+fromApList (Ast (a :@ b)) = fromApList a ++ [b]
 fromApList a = [a]

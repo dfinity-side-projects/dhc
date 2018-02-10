@@ -1,11 +1,10 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE PackageImports #-}
-module DHC (parseContract, Syscalls, Ast(..), AstPlus(..), Type(..), inferType, parseDefs, lexOffside,
+module DHC (parseContract, Syscalls, AstF(..), Ast(..), AstPlus(..), Type(..), inferType, parseDefs, lexOffside,
   preludeMinimal, hsToAst, liftLambdas) where
 
 import Control.Arrow
-import Control.DeepSeq (NFData(..))
 import Control.Monad
 import Data.Binary (Binary)
 #ifdef __HASTE__
@@ -29,39 +28,20 @@ import Text.Parsec hiding (State)
 type ShortByteString = ByteString
 #endif
 
-instance Binary Ast
 instance Binary Type
 
 infixl 5 :@
-data Ast = Qual String String | CCall String String
+data AstF a = Qual String String | CCall String String
   | Pack Int Int | I Int64 | S ShortByteString | Var String
-  | Ast :@ Ast | Cas Ast [(Ast, Ast)]
-  | Lam [String] Ast | Let [(String, Ast)] Ast
+  | a :@ a | Cas a [(a, a)]
+  | Lam [String] a | Let [(String, a)] a
   | Placeholder String Type deriving (Read, Show, Generic)
+
+newtype Ast = Ast (AstF Ast) deriving (Show, Generic)
 
 infixr 5 :->
 data Type = TC String | TApp Type Type | Type :-> Type
   | TV String | GV String deriving (Read, Show, Eq, Generic)
-
-instance NFData Ast where
-  rnf (Qual s1 s2) = rnf s1 `seq` rnf s2 `seq` ()
-  rnf (CCall s1 s2) = rnf s1 `seq` rnf s2 `seq` ()
-  rnf (Pack i1 i2) = rnf i1 `seq` rnf i2 `seq` ()
-  rnf (I i) = rnf i `seq` ()
-  rnf (S s) = rnf s `seq` ()
-  rnf (Var s) = rnf s `seq` ()
-  rnf (a1 :@ a2) = rnf a1 `seq` rnf a2 `seq` ()
-  rnf (Lam ss a) = rnf ss `seq` rnf a `seq` ()
-  rnf (Cas a as) = rnf a `seq` rnf as `seq` ()
-  rnf (Let ds a) = rnf ds `seq` rnf a `seq` ()
-  rnf (Placeholder s t) = rnf s `seq` rnf t `seq` ()
-
-instance NFData Type where
-  rnf (TC s) = rnf s `seq` ()
-  rnf (TApp t1 t2) = rnf t1 `seq` rnf t2 `seq` ()
-  rnf (t1 :-> t2) = rnf t1 `seq` rnf t2 `seq` ()
-  rnf (TV s) = rnf s `seq` ()
-  rnf (GV s) = rnf s `seq` ()
 
 type AnnAst ann = (ann, AnnAst' ann)
 data AnnAst' ann
@@ -115,7 +95,7 @@ supercombinators = catMaybes <$> between (want "{") (want "}") (sc `sepBy` want 
   sc = try (do
     (fun:args) <- scOp <|> many1 varStr
     void $ want "="
-    Just . (,) fun . Lam args <$> expr) <|> pure Nothing
+    Just . (,) fun . Ast . Lam args <$> expr) <|> pure Nothing
   scOp = try $ do
     l <- varStr
     op <- varSym
@@ -132,11 +112,14 @@ supercombinators = catMaybes <$> between (want "{") (want "}") (sc `sepBy` want 
         LAssoc -> do
           when isR $ fail "same precedence, mixed associativity"
           n <- bin (prec + 1) False
-          rec True $ Var o :@ m :@ n
-        NAssoc -> (Var o :@ m :@) <$> bin (prec + 1) False
+          rec True $ Ast $ Ast (Ast (Var o) :@ m) :@ n
+        NAssoc -> do
+          n <- bin (prec + 1) False
+          pure $ Ast $ Ast (Ast (Var o) :@ m) :@ n
         RAssoc -> do
           when isL $ fail "same precedence, mixed associativity"
-          (Var o :@ m :@) <$> bin prec True
+          n <- bin prec True
+          pure $ Ast $ Ast (Ast (Var o) :@ m) :@ n
       ) <|> pure m
   letDefn = do
     s <- varStr
@@ -153,69 +136,69 @@ supercombinators = catMaybes <$> between (want "{") (want "}") (sc `sepBy` want 
   desugarDo _ _ [] = fail "do block ends with (<-) statement"
   desugarDo x mv ((mv1, x1):rest) = do
     body <- desugarDo x1 mv1 rest
-    pure $ Var ">>=" :@ x :@ Lam [fromMaybe "_" mv] body
+    pure $ Ast $ Ast (Ast (Var ">>=") :@ x) :@ Ast (Lam [fromMaybe "_" mv] body)
   stmt = do
     v <- expr
     lArrStmt v <|> pure (Nothing, v)
   lArrStmt v = want "<-" >> case v of
-    Var s -> do
+    Ast (Var s) -> do
       x <- expr
       pure (Just s, x)
     _ -> fail "want variable on left of (<-)"
   letExpr = do
     ds <- between (want "let") (want "in") $
       between (want "{") (want "}") $ letDefn `sepBy` want ";"
-    Let ds <$> expr
+    Ast . Let ds <$> expr
   caseExpr = do
     x <- between (want "case") (want "of") expr
     as <- catMaybes <$> between (want "{") (want "}") (alt `sepBy` want ";")
     when (null as) $ fail "empty case"
-    pure $ Cas x as
-  lambda = Lam <$> between (want "\\") (want "->") (many1 varStr) <*> expr
+    pure $ Ast $ Cas x as
   alt = try (do
     p <- expr
     void $ want "->"
     x <- expr
     pure $ Just (p, x)) <|> pure Nothing
-  molecule = lambda <|> foldl1' (:@) <$> many1 atom
+  lambda = fmap Ast $ Lam <$> between (want "\\") (want "->") (many1 varStr) <*> expr
+  molecule = lambda <|> foldl1' ((Ast .) . (:@)) <$> many1 atom
+  var = Ast . Var <$> varStr
   atom = preOp <|> tup <|> call <|> qvar <|> var <|> num <|> str
     <|> lis <|> enumLis
-  preOp = try $ Var <$> between (want "(") (want ")") varSym
+  preOp = try $ Ast . Var <$> between (want "(") (want ")") varSym
   tup = do
     xs <- between (want "(") (want ")") $ expr `sepBy` want ","
     pure $ case xs of  -- Abuse Pack to represent tuples.
-      [] -> Pack 0 0
+      [] -> Ast $ Pack 0 0
       [x] -> x
-      _ -> foldl' (:@) (Pack 0 $ length xs) xs
+      _ -> foldl' ((Ast .) . (:@)) (Ast $ Pack 0 $ length xs) xs
   enumLis = try $ between (want "[") (want "]") $ do
     a <- expr
     void $ want ".."
     b <- expr
-    pure $ Var "enumFromTo" :@ a :@ b
+    pure $ Ast $ Ast (Ast (Var "enumFromTo") :@ a) :@ b
   lis = try $ do
     items <- between (want "[") (want "]") $ expr `sepBy` want ","
-    pure $ foldr (\a b -> Var ":" :@ a :@ b) (Var "[]") items
-  var = Var <$> varStr
+    pure $ foldr (\a b -> Ast (Ast (Ast (Var ":") :@ a) :@ b)) (Ast $ Var "[]") items
   splitDot s = second tail $ splitAt (fromJust $ elemIndex '.' s) s
   qvar = try $ do
     (t, s) <- tok
     when (t /= LexQual) $ fail ""
-    pure $ uncurry Qual $ splitDot s
+    pure $ Ast $ uncurry Qual $ splitDot s
   call = do
     void $ want "call"
     (t, s) <- tok
     case t of
-      LexQual -> pure $ uncurry CCall $ splitDot s
-      LexVar  -> pure $ CCall "" s
+      LexQual -> pure $ Ast $ uncurry CCall $ splitDot s
+      LexVar  -> pure $ Ast $ CCall "" s
       _ -> fail "bad call"
   num = try $ do
     (t, s) <- tok
     when (t /= LexNumber) $ fail ""
-    pure $ I $ read s
+    pure $ Ast $ I $ read s
   str = try $ do
     (t, s) <- tok
     when (t /= LexString) $ fail ""
-    pure $ S $ pack $ c2w <$> s
+    pure $ Ast $ S $ pack $ c2w <$> s
   varSym = do
     (t, s) <- tok
     when (t /= LexSymbol || s `elem` ["..", "::", "=", "|", "<-", "->", "=>"]) $ fail ""
@@ -382,7 +365,8 @@ parseContract = fmap maybeAddMain . runParser contract (Boilerplate, []) ""
 
 maybeAddMain :: AstPlus -> AstPlus
 maybeAddMain a = case lookup "main" $ asts a of
-  Nothing -> a { asts = ("main", Var "pure" :@ Pack 0 0):asts a }
+  Nothing -> a { asts = ("main",
+    Ast $ Ast (Var "pure") :@ Ast (Pack 0 0)):asts a }
   Just _  -> a
 
 -- The Constraints monad combines a State monad and an Either monad.
@@ -423,7 +407,7 @@ gather
   -> [(String, QualType)]
   -> Ast
   -> Constraints (AnnAst Type)
-gather findExport prelude env ast = case ast of
+gather findExport prelude env (Ast ast) = case ast of
   I i -> pure (TC "Int", AnnI i)
   S s -> pure (TC "String", AnnS s)
   Var "_" -> do
@@ -455,8 +439,8 @@ gather findExport prelude env ast = case ast of
     x <- newTV
     astas <- forM as $ \(p, a) -> do
       let
-        varsOf (t :@ u) = varsOf t ++ varsOf u
-        varsOf (Var v) | isLower (head v) = [v]
+        varsOf (Ast (t :@ u)) = varsOf t ++ varsOf u
+        varsOf (Ast (Var v)) | isLower (head v) = [v]
         varsOf _ = []
       when (varsOf p /= nub (varsOf p)) $ bad "multiple binding in pattern"
       envp <- forM (varsOf p) $ \s -> (,) s . flip (,) [] <$> newTV
@@ -521,8 +505,8 @@ generalize soln ctx (t0, a0) = ((t, qs), dictSolve dsoln soln ast) where
   (t, qs) = runState (generalize' ctx $ typeSolve soln t0) []
   dsoln = zip qs $ ("#d" ++) . show <$> [(0::Int)..]
   ast = case deAnn a0 of
-    Lam ss body -> Lam (dvars ++ ss) body
-    body -> Lam dvars body
+    Ast (Lam ss body) -> Ast $ Lam (dvars ++ ss) body
+    body -> Ast $ Lam dvars body
     where dvars = snd <$> dsoln
 
 generalize' :: Map String [String] -> Type -> State [(String, String)] Type
@@ -584,35 +568,35 @@ sndHack :: (String, Ast)
 sndHack = r where Right [r] = parseDefs "snd p = case p of (x, y) -> y"
 
 dictSolve :: [((String, String), String)] -> [(String, Type)] -> Ast -> Ast
-dictSolve dsoln soln ast = case ast of
-  u :@ v  -> rec u :@ rec v
-  Lam ss a -> Lam ss $ rec a
-  Cas e alts -> Cas (rec e) $ (id *** rec) <$> alts
+dictSolve dsoln soln (Ast ast) = case ast of
+  u :@ v  -> Ast $ rec u :@ rec v
+  Lam ss a -> Ast $ Lam ss $ rec a
+  Cas e alts -> Ast $ Cas (rec e) $ (id *** rec) <$> alts
 
-  Placeholder ">>=" t -> Var "snd" :@ rec (Placeholder "Monad" $ typeSolve soln t)
-  Placeholder "pure" t -> Var "fst" :@ rec (Placeholder "Monad" $ typeSolve soln t)
+  Placeholder ">>=" t -> Ast $ Ast (Var "snd") :@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
+  Placeholder "pure" t -> Ast $ Ast (Var "fst") :@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
 
-  Placeholder "==" t -> rec $ Placeholder "Eq" $ typeSolve soln t
-  Placeholder "save" t -> Var "fst" :@ rec (Placeholder "Save" $ typeSolve soln t)
-  Placeholder "load" t -> Var "snd" :@ rec (Placeholder "Save" $ typeSolve soln t)
+  Placeholder "==" t -> rec $ Ast $ Placeholder "Eq" $ typeSolve soln t
+  Placeholder "save" t -> Ast $ Ast (Var "fst") :@ rec (Ast $ Placeholder "Save" $ typeSolve soln t)
+  Placeholder "load" t -> Ast $ Ast (Var "snd") :@ rec (Ast $ Placeholder "Save" $ typeSolve soln t)
   Placeholder d t -> case typeSolve soln t of
-    TV v -> Var $ fromJust $ lookup (d, v) dsoln
-    u -> findInstance d u
-  _       -> ast
+    TV v -> Ast $ Var $ fromJust $ lookup (d, v) dsoln
+    u -> Ast $ findInstance d u
+  _       -> Ast ast
   where
     rec = dictSolve dsoln soln
     findInstance "Eq" t = case t of
       TC "String"        -> Var "String-=="
       TC "Int"           -> Var "Int-=="
-      TApp (TC "List") a -> Var "list_eq_instance" :@ rec (Placeholder "Eq" a)
+      TApp (TC "List") a -> Ast (Var "list_eq_instance") :@ rec (Ast $ Placeholder "Eq" a)
       e -> error $ "BUG! no Eq for " ++ show e
     findInstance "Save" t = case t of
-      TC "String" -> Pack 0 2 :@ Var "String-save" :@ Var "String-load"
-      TC "Int" -> Pack 0 2 :@ Var "Int-save" :@ Var "Int-load"
+      TC "String" -> Ast (Ast (Pack 0 2) :@ Ast (Var "String-save")) :@ Ast (Var "String-load")
+      TC "Int" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Int-save")) :@ Ast (Var "Int-load")
       e -> error $ "BUG! no Save for " ++ show e
     findInstance "Monad" t = case t of
-      TC "Maybe" -> Pack 0 2 :@ Var "maybe_pure" :@ Var "maybe_monad"
-      TC "IO" -> Pack 0 2 :@ Var "io_pure" :@ Var "io_monad"
+      TC "Maybe" -> Ast (Ast (Pack 0 2) :@ Ast (Var "maybe_pure")) :@ Ast (Var "maybe_monad")
+      TC "IO" -> Ast (Ast (Pack 0 2) :@ Ast (Var "io_pure")) :@ Ast (Var "io_monad")
       e -> error $ "BUG! no Monad for " ++ show e
     findInstance d _ = error $ "BUG! bad class: " ++ show d
 
@@ -698,27 +682,28 @@ hacks =
 type Syscalls = (Map String (Int, Type), String -> String -> Maybe Int)
 
 expandSyscalls :: Syscalls -> [(String, Int)] -> Ast -> Ast
-expandSyscalls sys arities ast = case ast of
+expandSyscalls sys arities (Ast ast) = Ast $ case ast of
   t :@ u -> rec t :@ rec u
   Lam xs t -> Lam xs $ rec t
   Let xs t -> Let (second rec <$> xs) $ rec t
   Cas x as -> Cas (rec x) (second rec <$> as)
-  Var s | Just (n, t) <- M.lookup s (fst sys) -> (if isIO t then Var "#syscall" else Var "#syscallPure") :@ I (argCount t) :@ I (fromIntegral n)
+  Var s | Just (n, t) <- M.lookup s (fst sys) -> Ast (Ast (if isIO t then Var "#syscall" else Var "#syscallPure") :@ Ast (I $ argCount t)) :@ Ast (I $ fromIntegral n)
   -- Example:
   --  target.fun 1 2 "three"
   -- becomes:
   --  #syscall 6 0 "target" "fun" 3 1 2 "three"
-  Qual c f | Just n <- snd sys c f -> Var "#syscall" :@ I (fromIntegral $ n + 3) :@ I 0 :@ S (pack $ c2w <$> c) :@ S (pack $ c2w <$> f) :@ I (fromIntegral n)
+  Qual c f | Just n <- snd sys c f -> foldl1' appIt [Var "#syscall", I (fromIntegral $ n + 3), I 0, S (pack $ c2w <$> c), S (pack $ c2w <$> f), I (fromIntegral n)]
   -- Example:
   --  call target.fun "abc123" 1 2 "three"
   --  call fun "abc123" 1 2 "three"
   -- becomes:
   --  #syscall 7 8 "target" "fun" 3 "abc123" 1 2 "three"
   --  #syscall 6 9 "fun" 3 "abc123" 1 2 "three"
-  CCall "" f | Just n <- lookup f arities -> Var "#syscall" :@ I (fromIntegral $ n + 3) :@ I 9 :@ S (pack $ c2w <$> f) :@ I (fromIntegral n)
-  CCall c f | Just n <- snd sys c f -> Var "#syscall" :@ I (fromIntegral $ n + 4) :@ I 8 :@ S (pack $ c2w <$> c) :@ S (pack $ c2w <$> f) :@ I (fromIntegral n)
+  CCall "" f | Just n <- lookup f arities -> foldl1' appIt [Var "#syscall", I (fromIntegral $ n + 3), I 9, S (pack $ c2w <$> f), I (fromIntegral n)]
+  CCall c f | Just n <- snd sys c f -> foldl1' appIt [Var "#syscall", I (fromIntegral $ n + 4), I 8, S (pack $ c2w <$> c), S (pack $ c2w <$> f), I (fromIntegral n)]
   _ -> ast
   where
+    appIt x y = Ast x :@ Ast y
     rec = expandSyscalls sys arities
     argCount (_ :-> u) = 1 + argCount u
     argCount _ = 0
@@ -780,7 +765,7 @@ inferType findExport globs ds = foldM inferMutual [] $ map (map (\k -> (k, fromJ
 
 callees :: [(String, Ast)] -> String -> [String]
 callees ds f = deps f (fromJust $ lookup f ds) where
-  deps name body = case body of
+  deps name (Ast body) = case body of
     Lam ss t | name `notElem` ss -> rec t
     -- TODO: Look for shadowed function name in case and let statements.
     -- Or add deshadowing phase.
@@ -809,26 +794,26 @@ topo suc vs = fst $ foldl' visit ([], []) vs where
 
 freeV :: [(String, Ast)] -> [(String, AnnAst [String])]
 freeV scs = map f scs where
-  f (d, ast) = (d, g [] ast)
-  g :: [String] -> Ast -> AnnAst [String]
-  g cand (Lam ss a) = (vs \\ ss, AnnLam ss a1) where
+  f (d, Ast ast) = (d, g [] ast)
+  g :: [String] -> AstF Ast -> AnnAst [String]
+  g cand (Lam ss (Ast a)) = (vs \\ ss, AnnLam ss a1) where
     a1@(vs, _) = g (union cand ss) a
-  g cand (x :@ y) = (fst x1 `union` fst y1, x1 :@@ y1) where
+  g cand (Ast x :@ Ast y) = (fst x1 `union` fst y1, x1 :@@ y1) where
     x1 = g cand x
     y1 = g cand y
   g cand (Var v) | v `elem` cand = ([v], AnnVar v)
                  | otherwise     = ([],  AnnVar v)
-  g cand (Cas x as) = (foldl' union (fst x1) $ fst <$> as1, AnnCas x1 $ snd <$> as1) where
+  g cand (Cas (Ast x) as) = (foldl' union (fst x1) $ fst <$> as1, AnnCas x1 $ snd <$> as1) where
     x1 = g cand x
     as1 = map h as
-    h (p, e) = (vs1, (g [] p, (vs, e1))) where
+    h (Ast p, Ast e) = (vs1, (g [] p, (vs, e1))) where
       (vs, e1) = g (cand `union` caseVars p) e
       vs1 = vs \\ caseVars p
-  g cand (Let ds e) = (fst e1 \\ binders, AnnLet ds1 e1) where
+  g cand (Let ds (Ast e)) = (fst e1 \\ binders, AnnLet ds1 e1) where
     e1 = g (cand `union` binders) e
     binders = fst <$> ds
     ds1 = map h ds
-    h (s, x) = (s, g (cand `union` binders) x)
+    h (s, Ast x) = (s, g (cand `union` binders) x)
   g _    (I i) = ([], AnnI i)
   g _    (S s) = ([], AnnS s)
   g _    (Pack m n) = ([], AnnPack m n)
@@ -836,9 +821,9 @@ freeV scs = map f scs where
   g _    (CCall x y) = ([], AnnCCall x y)
   g _    (Placeholder x y) = ([], AnnPlaceholder x y)
 
-caseVars :: Ast -> [String]
+caseVars :: AstF Ast -> [String]
 caseVars (Var v) = [v]
-caseVars (x :@ y) = caseVars x `union` caseVars y
+caseVars (Ast x :@ Ast y) = caseVars x `union` caseVars y
 caseVars _ = []
 
 liftLambdas :: [(String, Ast)] -> [(String, Ast)]
@@ -847,7 +832,7 @@ liftLambdas scs = existingDefs ++ newDefs where
   f (s, (_, AnnLam args body)) = do
     modify $ first $ const [s]
     body1 <- g body
-    pure (s, Lam args body1)
+    pure (s, Ast $ Lam args body1)
   f _ = error "bad top-level definition"
   genName :: State ([String], [(String, Ast)]) String
   genName = do
@@ -857,23 +842,23 @@ liftLambdas scs = existingDefs ++ newDefs where
         (++ ('$':last names)) . show <$> [(0::Int)..]
     put (n:names, ys)
     pure n
-  g (_, x :@@ y) = (:@) <$> g x <*> g y
-  g (_, AnnLet ds t) = Let <$> mapM noLamb ds <*> g t where
+  g (_, x :@@ y) = fmap Ast $ (:@) <$> g x <*> g y
+  g (_, AnnLet ds t) = fmap Ast $ Let <$> mapM noLamb ds <*> g t where
     noLamb (name, (fvs, AnnLam ss body)) = do
       n <- genName
       body1 <- g body
-      modify $ second ((n, Lam (fvs ++ ss) body1):)
-      pure (name, foldl' (:@) (Var n) $ Var <$> fvs)
+      modify $ second ((n, Ast $ Lam (fvs ++ ss) body1):)
+      pure (name, foldl' ((Ast .) . (:@)) (Ast $ Var n) $ Ast . Var <$> fvs)
     noLamb (name, a) = (,) name <$> g a
   g (fvs, lam@(AnnLam _ _)) = do
     n <- genName
     g (fvs, AnnLet [(n, (fvs, lam))] ([n], AnnVar n))
   g (_, AnnCas expr as) =
-    Cas <$> g expr <*> mapM (\(p, t) -> (,) <$> g p <*> g t) as
+    fmap Ast $ Cas <$> g expr <*> mapM (\(p, t) -> (,) <$> g p <*> g t) as
   g (_, ann) = pure $ deAnn ann
 
 expandCase :: Ast -> Ast
-expandCase ast = case ast of
+expandCase (Ast ast) = Ast $ case ast of
   u :@ v  -> rec u :@ rec v
   Lam ss a -> Lam ss $ rec a
 
@@ -883,35 +868,35 @@ expandCase ast = case ast of
     rec = expandCase
 
     dupCase e [a] = Cas e $ evalState (expandAlt Nothing [] a) 0
-    dupCase e (a:as) = Cas e $ evalState (expandAlt (Just $ rec $ Cas e as) [] a) 0
+    dupCase e (a:as) = Cas e $ evalState (expandAlt (Just $ rec $ Ast $ Cas e as) [] a) 0
     dupCase _ _ = error "BUG! no case alternatives"
 
     -- TODO: CCall `fromApList` only in last case alternative.
     expandAlt :: Maybe Ast -> [(Ast, Ast)] -> (Ast, Ast) -> State Int [(Ast, Ast)]
     expandAlt onFail deeper (p, a) = do
       case fromApList p of
-        [Var _] -> (:moreCases) . (,) p <$> g deeper a
-        [S s] -> do
+        [Ast (Var _)] -> (:moreCases) . (,) p <$> g deeper a
+        [Ast (S s)] -> do
           v <- genVar
           a1 <- g deeper a
-          pure [(Var v, Cas (Var "String-==" :@ Var v :@ S s) $ (Pack 1 0, a1):moreCases)]
-        [I n] -> do
+          pure [(Ast $ Var v, Ast $ Cas (Ast (Ast (Ast (Var "String-==") :@ Ast (Var v)) :@ Ast (S s))) $ (Ast $ Pack 1 0, a1):moreCases)]
+        [Ast (I n)] -> do
           v <- genVar
           a1 <- g deeper a
-          pure [(Var v, Cas (Var "Int-==" :@ Var v :@ I n) $ (Pack 1 0, a1):maybe [] ((pure . (,) (Pack 0 0))) onFail)]
-        h@(Pack _ _):xs -> (++ moreCases) <$> doPack [h] deeper xs a
+          pure [(Ast $ Var v, Ast $ Cas (Ast (Ast (Ast (Var "Int-==") :@ Ast (Var v)) :@ Ast (I n))) $ (Ast $ Pack 1 0, a1):maybe [] ((pure . (,) (Ast $ Pack 0 0))) onFail)]
+        h@(Ast (Pack _ _)):xs -> (++ moreCases) <$> doPack [h] deeper xs a
         _ -> error $ "bad case: " ++ show p
 
       where
-      moreCases = maybe [] ((pure . (,) (Var "_"))) onFail
-      doPack acc dpr [] body = (:moreCases) . (,) (foldl1 (:@) acc) <$> g dpr body
+      moreCases = maybe [] ((pure . (,) (Ast $ Var "_"))) onFail
+      doPack acc dpr [] body = (:moreCases) . (,) (foldl1 ((Ast .) . (:@)) acc) <$> g dpr body
       doPack acc dpr (h:rest) body = do
-        gv <- Var <$> genVar
+        gv <- Ast . Var <$> genVar
         case h of
-          Var _ -> doPack (acc ++ [h]) dpr rest body
+          Ast (Var _) -> doPack (acc ++ [h]) dpr rest body
           _     -> doPack (acc ++ [gv]) (dpr ++ [(gv, h)]) rest body
       g [] body = pure body
-      g ((v, w):rest) body = Cas v <$> expandAlt onFail rest (w, body)
+      g ((v, w):rest) body = fmap Ast $ Cas v <$> expandAlt onFail rest (w, body)
 
     genVar = do
       n <- get
@@ -919,18 +904,18 @@ expandCase ast = case ast of
       pure $ "c*" ++ show n
 
     fromApList :: Ast -> [Ast]
-    fromApList (a :@ b) = fromApList a ++ [b]
+    fromApList (Ast (a :@ b)) = fromApList a ++ [b]
     fromApList a = [a]
 
 deAnn :: AnnAst' a -> Ast
-deAnn (AnnS s) = S s
-deAnn (AnnI i) = I i
-deAnn (AnnVar v) = Var v
-deAnn (AnnCCall x y) = CCall x y
-deAnn (AnnQual x y) = Qual x y
-deAnn (AnnPack x y) = Pack x y
-deAnn (AnnPlaceholder x y) = Placeholder x y
-deAnn (AnnCas (_, x) as) = Cas (deAnn x) $ (join (***) $ deAnn . snd) <$> as
-deAnn (AnnLam as (_, x)) = Lam as $ deAnn x
-deAnn (AnnLet as (_, x)) = Let (second (deAnn . snd) <$> as) $ deAnn x
-deAnn ((_, x) :@@ (_, y)) = deAnn x :@ deAnn y
+deAnn (AnnS s) = Ast $ S s
+deAnn (AnnI i) = Ast $ I i
+deAnn (AnnVar v) = Ast $ Var v
+deAnn (AnnCCall x y) = Ast $ CCall x y
+deAnn (AnnQual x y) = Ast $ Qual x y
+deAnn (AnnPack x y) = Ast $ Pack x y
+deAnn (AnnPlaceholder x y) = Ast $ Placeholder x y
+deAnn (AnnCas (_, x) as) = Ast $ Cas (deAnn x) $ (join (***) $ deAnn . snd) <$> as
+deAnn (AnnLam as (_, x)) = Ast $ Lam as $ deAnn x
+deAnn (AnnLet as (_, x)) = Ast $ Let (second (deAnn . snd) <$> as) $ deAnn x
+deAnn ((_, x) :@@ (_, y)) = Ast $ deAnn x :@ deAnn y
