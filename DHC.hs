@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE PackageImports #-}
 module DHC (parseContract, Syscalls, AstF(..), Ast(..), AstPlus(..), Type(..), inferType, parseDefs, lexOffside,
@@ -35,9 +36,12 @@ data AstF a = Qual String String | CCall String String
   | Pack Int Int | I Int64 | S ShortByteString | Var String
   | a :@ a | Cas a [(a, a)]
   | Lam [String] a | Let [(String, a)] a
-  | Placeholder String Type deriving (Read, Show, Generic)
+  | Placeholder String Type deriving (Read, Show, Functor, Generic)
 
 newtype Ast = Ast (AstF Ast) deriving (Show, Generic)
+
+unAst :: Ast -> AstF Ast
+unAst (Ast a) = a
 
 infixr 5 :->
 data Type = TC String | TApp Type Type | Type :-> Type
@@ -682,11 +686,8 @@ hacks =
 type Syscalls = (Map String (Int, Type), String -> String -> Maybe Int)
 
 expandSyscalls :: Syscalls -> [(String, Int)] -> Ast -> Ast
-expandSyscalls sys arities (Ast ast) = Ast $ case ast of
-  t :@ u -> rec t :@ rec u
-  Lam xs t -> Lam xs $ rec t
-  Let xs t -> Let (second rec <$> xs) $ rec t
-  Cas x as -> Cas (rec x) (second rec <$> as)
+expandSyscalls sys arities = ffix $ \rec (Ast ast) -> Ast $ case ast of
+  Cas (Ast x) as -> Cas (Ast $ rec x) (second (Ast . rec. unAst) <$> as)
   Var s | Just (n, t) <- M.lookup s (fst sys) -> Ast (Ast (if isIO t then Var "#syscall" else Var "#syscallPure") :@ Ast (I $ argCount t)) :@ Ast (I $ fromIntegral n)
   -- Example:
   --  target.fun 1 2 "three"
@@ -701,10 +702,10 @@ expandSyscalls sys arities (Ast ast) = Ast $ case ast of
   --  #syscall 6 9 "fun" 3 "abc123" 1 2 "three"
   CCall "" f | Just n <- lookup f arities -> foldl1' appIt [Var "#syscall", I (fromIntegral $ n + 3), I 9, S (pack $ c2w <$> f), I (fromIntegral n)]
   CCall c f | Just n <- snd sys c f -> foldl1' appIt [Var "#syscall", I (fromIntegral $ n + 4), I 8, S (pack $ c2w <$> c), S (pack $ c2w <$> f), I (fromIntegral n)]
-  _ -> ast
+  _ -> rec ast
   where
     appIt x y = Ast x :@ Ast y
-    rec = expandSyscalls sys arities
+    --rec = expandSyscalls sys arities
     argCount (_ :-> u) = 1 + argCount u
     argCount _ = 0
     isIO (_ :-> u) = isIO u
@@ -858,12 +859,9 @@ liftLambdas scs = existingDefs ++ newDefs where
   g (_, ann) = pure $ deAnn ann
 
 expandCase :: Ast -> Ast
-expandCase (Ast ast) = Ast $ case ast of
-  u :@ v  -> rec u :@ rec v
-  Lam ss a -> Lam ss $ rec a
-
+expandCase = ffix $ \h (Ast ast) -> Ast $ case ast of
   Cas e alts -> dupCase (rec e) alts
-  _ -> ast
+  _ -> h ast
   where
     rec = expandCase
 
@@ -919,3 +917,8 @@ deAnn (AnnCas (_, x) as) = Ast $ Cas (deAnn x) $ (join (***) $ deAnn . snd) <$> 
 deAnn (AnnLam as (_, x)) = Ast $ Lam as $ deAnn x
 deAnn (AnnLet as (_, x)) = Ast $ Let (second (deAnn . snd) <$> as) $ deAnn x
 deAnn ((_, x) :@@ (_, y)) = Ast $ deAnn x :@ deAnn y
+
+ffix :: Functor f => ((f a -> f b) -> a -> b) -> a -> b
+ffix f = f $ fmap $ ffix f
+
+data AAst a = AAst a (AstF (AAst a))
