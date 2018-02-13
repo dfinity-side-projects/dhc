@@ -47,16 +47,6 @@ infixr 5 :->
 data Type = TC String | TApp Type Type | Type :-> Type
   | TV String | GV String deriving (Read, Show, Eq, Generic)
 
-type AnnAst ann = (ann, AnnAst' ann)
-data AnnAst' ann
-  = AnnVar String | AnnQual String String | AnnCCall String String
-  | AnnPack Int Int | AnnI Int64 | AnnS ShortByteString
-  | AnnAst ann :@@ AnnAst ann
-  | AnnCas (AnnAst ann) [(AnnAst ann, AnnAst ann)]
-  | AnnLam [String] (AnnAst ann) | AnnLet [(String, AnnAst ann)] (AnnAst ann)
-  | AnnPlaceholder String Type
-  deriving Show
-
 data LayoutState = IndentAgain Int | LineStart | LineMiddle | AwaitBrace | Boilerplate deriving (Eq, Show)
 type Parser = Parsec String (LayoutState, [Int])
 
@@ -410,36 +400,40 @@ gather
   -> Globals
   -> [(String, QualType)]
   -> Ast
-  -> Constraints (AnnAst Type)
+  -> Constraints (AAst Type)
 gather findExport prelude env (Ast ast) = case ast of
-  I i -> pure (TC "Int", AnnI i)
-  S s -> pure (TC "String", AnnS s)
+  I i -> pure $ AAst (TC "Int") $ I i
+  S s -> pure $ AAst (TC "String") $ S s
+  Pack m n -> do  -- Only tuples are pre`Pack`ed.
+    xs <- replicateM n newTV
+    let r = foldl' (TApp) (TC "()") xs
+    pure $ AAst (foldr (:->) r xs) $ Pack m n
   Var "_" -> do
     x <- newTV
-    pure (x, AnnVar "_")
+    pure $ AAst x $ Var "_"
   Var v -> case lookup v env of
     Just qt  -> do
       (t1, qs1) <- instantiate qt
-      pure $ foldl' (((,) t1 .) .  (:@@)) (t1, AnnVar v) $ (\(a, b) -> (TC $ "Dict-" ++ a, AnnPlaceholder a (TV b))) <$> qs1
+      pure $ foldl' ((AAst t1 .) . (:@)) (AAst t1 $ Var v) $ (\(a, b) -> AAst (TC $ "Dict-" ++ a) $ Placeholder a (TV b)) <$> qs1
     Nothing -> case M.lookup v methods of
       Just qt -> do
         (t1, [(_, x)]) <- instantiate qt
-        pure (t1, AnnPlaceholder v $ TV x)
+        pure $ AAst t1 $ Placeholder v $ TV x
       Nothing -> case M.lookup v prelude of
-        Just (ma, gt) -> flip (,) (maybe (AnnVar v) (uncurry AnnPack) ma) . fst <$> instantiate (gt, [])
+        Just (ma, gt) -> flip AAst (maybe (Var v) (uncurry Pack) ma) . fst <$> instantiate (gt, [])
         Nothing       -> bad $ "undefined: " ++ v
   t :@ u -> do
-    a@(tt, _) <- rec env t
-    b@(uu, _) <- rec env u
+    a@(AAst tt _) <- rec env t
+    b@(AAst uu _) <- rec env u
     x <- newTV
     addConstraint (tt, uu :-> x)
-    pure (x, a :@@ b)
+    pure $ AAst x $ a :@ b
   Lam args u -> do
     ts <- mapM (const newTV) args
-    a@(tu, _) <- rec ((zip (filter (/= "_") args) $ zip ts $ repeat []) ++ env) u
-    pure (foldr (:->) tu ts, AnnLam args a)
+    a@(AAst tu _) <- rec ((zip (filter (/= "_") args) $ zip ts $ repeat []) ++ env) u
+    pure $ AAst (foldr (:->) tu ts) $ Lam args a
   Cas e as -> do
-    aste@(te, _) <- rec env e
+    aste@(AAst te _) <- rec env e
     x <- newTV
     astas <- forM as $ \(p, a) -> do
       let
@@ -449,34 +443,31 @@ gather findExport prelude env (Ast ast) = case ast of
       when (varsOf p /= nub (varsOf p)) $ bad "multiple binding in pattern"
       envp <- forM (varsOf p) $ \s -> (,) s . flip (,) [] <$> newTV
       -- TODO: Check p is a pattern.
-      astp@(tp, _) <- rec (envp ++ env) p
+      astp@(AAst tp _) <- rec (envp ++ env) p
       addConstraint (te, tp)
-      asta@(ta, _) <- rec (envp ++ env) a
+      asta@(AAst ta _) <- rec (envp ++ env) a
       addConstraint (x, ta)
       pure (astp, asta)
-    pure (x, AnnCas aste astas)
+    pure $ AAst x $ Cas aste astas
   Let ds body -> do
     es <- forM (fst <$> ds) $ \s -> (,) s <$> newTV
     let envLet = (second (flip (,) []) <$> es) ++ env
     ts <- forM (snd <$> ds) $ rec envLet
-    mapM_ addConstraint $ zip (snd <$> es) (fst <$> ts)
-    body1@(t, _) <- rec envLet body
-    pure (t, AnnLet (zip (fst <$> ds) ts) body1)
-  Pack m n -> do  -- Only tuples are pre`Pack`ed.
-    xs <- replicateM n newTV
-    let r = foldl' (TApp) (TC "()") xs
-    pure (foldr (:->) r xs, AnnPack m n)
--- TODO: Type classes for CCall and Qual.
+    mapM_ addConstraint $ zip (snd <$> es) (afst <$> ts)
+    body1@(AAst t _) <- rec envLet body
+    pure $ AAst t $ Let (zip (fst <$> ds) ts) body1
+  -- TODO: Type classes for CCall and Qual.
   CCall c f -> case findExport c f of
     Left err -> bad err
-    Right t -> flip (,) (AnnCCall c f) . (TC "String" :->) .fst <$> instantiate (t, [])
+    Right t -> flip AAst (CCall c f) . (TC "String" :->) . fst <$> instantiate (t, [])
   Qual c f -> case findExport c f of
     Left err -> bad err
-    Right t -> flip (,) (AnnQual c f) . fst <$> instantiate (t, [])
+    Right t -> flip AAst (Qual c f) . fst <$> instantiate (t, [])
   _ -> fail $ "BUG! unhandled: " ++ show ast
   where
-    bad = Constraints . const . Left
     rec = gather findExport prelude
+    bad = Constraints . const . Left
+    afst (AAst t _) = t
 
 -- | Instantiate generalized variables.
 -- Returns type where all generalized variables have been instantiated along
@@ -504,8 +495,8 @@ instantiate (ty, qs) = do
     pure $ (m2, t' `TApp` u')
   f m t = pure (m, t)
 
-generalize :: [(String, Type)] -> Map String [String] -> AnnAst Type -> (QualType, Ast)
-generalize soln ctx (t0, a0) = ((t, qs), dictSolve dsoln soln ast) where
+generalize :: [(String, Type)] -> Map String [String] -> AAst Type -> (QualType, Ast)
+generalize soln ctx a0@(AAst t0 _) = ((t, qs), dictSolve dsoln soln ast) where
   (t, qs) = runState (generalize' ctx $ typeSolve soln t0) []
   dsoln = zip qs $ ("#d" ++) . show <$> [(0::Int)..]
   ast = case deAnn a0 of
@@ -705,7 +696,6 @@ expandSyscalls sys arities = ffix $ \rec (Ast ast) -> Ast $ case ast of
   _ -> rec ast
   where
     appIt x y = Ast x :@ Ast y
-    --rec = expandSyscalls sys arities
     argCount (_ :-> u) = 1 + argCount u
     argCount _ = 0
     isIO (_ :-> u) = isIO u
@@ -748,18 +738,19 @@ inferType
 inferType findExport globs ds = foldM inferMutual [] $ map (map (\k -> (k, fromJust $ lookup k ds))) sortedDefs where
   -- Groups of definitions, sorted in the order we should infer their types.
   sortedDefs = reverse $ scc (callees ds) $ fst <$> ds
-  -- inferMutual :: [(String, AnnAst Type)] -> [(String, Ast)] -> Either String [(String, AnnAst Type)]
+  -- inferMutual :: [(String, AAst Type)] -> [(String, Ast)] -> Either String [(String, AAst Type)]
   inferMutual acc grp = do
     (bs, ConState _ cs m) <- buildConstraints $ do
       ts <- mapM (gather findExport globs env) $ snd <$> grp
       when ("main" `elem` (fst <$> grp)) $ do
         r <- newTV
         addConstraint (TV "*main", TApp (TC "IO") r)
-      mapM_ addConstraint $ zip tvs $ fst <$> ts
+      mapM_ addConstraint $ zip tvs $ annOf <$> ts
       pure ts
     (soln, ctx) <- runStateT (unify cs) m
     pure $ (++ acc) $ zip (fst <$> grp) $ generalize soln ctx <$> bs
     where
+      annOf (AAst a _) = a
       buildConstraints (Constraints f) = f $ ConState 0 [] M.empty
       tvs = TV . ('*':) . fst <$> grp
       env = zip (fst <$> grp) (zip tvs $ repeat $ []) ++ map (second fst) acc
@@ -793,34 +784,34 @@ topo suc vs = fst $ foldl' visit ([], []) vs where
     | otherwise = (\(xs, x:ys) -> (x:xs, ys)) $
       foldl' visit (done, v:doing) (suc v)
 
-freeV :: [(String, Ast)] -> [(String, AnnAst [String])]
+freeV :: [(String, Ast)] -> [(String, AAst [String])]
 freeV scs = map f scs where
   f (d, Ast ast) = (d, g [] ast)
-  g :: [String] -> AstF Ast -> AnnAst [String]
-  g cand (Lam ss (Ast a)) = (vs \\ ss, AnnLam ss a1) where
-    a1@(vs, _) = g (union cand ss) a
-  g cand (Ast x :@ Ast y) = (fst x1 `union` fst y1, x1 :@@ y1) where
-    x1 = g cand x
-    y1 = g cand y
-  g cand (Var v) | v `elem` cand = ([v], AnnVar v)
-                 | otherwise     = ([],  AnnVar v)
-  g cand (Cas (Ast x) as) = (foldl' union (fst x1) $ fst <$> as1, AnnCas x1 $ snd <$> as1) where
-    x1 = g cand x
+  g :: [String] -> AstF Ast -> AAst [String]
+  g cand (Lam ss (Ast a)) = AAst (vs \\ ss) $ Lam ss a1 where
+    a1@(AAst vs _) = g (union cand ss) a
+  g cand (Ast x :@ Ast y) = AAst (xv `union` yv) $ x1 :@ y1 where
+    x1@(AAst xv _) = g cand x
+    y1@(AAst yv _) = g cand y
+  g cand (Var v) | v `elem` cand = AAst [v] $ Var v
+                 | otherwise     = AAst []  $ Var v
+  g cand (Cas (Ast x) as) = AAst (foldl' union xv $ fst <$> as1) $ Cas x1 $ snd <$> as1 where
+    x1@(AAst xv _) = g cand x
     as1 = map h as
-    h (Ast p, Ast e) = (vs1, (g [] p, (vs, e1))) where
-      (vs, e1) = g (cand `union` caseVars p) e
+    h (Ast p, Ast e) = (vs1, (g [] p, e1)) where
+      e1@(AAst vs _) = g (cand `union` caseVars p) e
       vs1 = vs \\ caseVars p
-  g cand (Let ds (Ast e)) = (fst e1 \\ binders, AnnLet ds1 e1) where
-    e1 = g (cand `union` binders) e
+  g cand (Let ds (Ast e)) = AAst (ev \\ binders) $ Let ds1 e1 where
+    e1@(AAst ev _) = g (cand `union` binders) e
     binders = fst <$> ds
     ds1 = map h ds
     h (s, Ast x) = (s, g (cand `union` binders) x)
-  g _    (I i) = ([], AnnI i)
-  g _    (S s) = ([], AnnS s)
-  g _    (Pack m n) = ([], AnnPack m n)
-  g _    (Qual x y) = ([], AnnQual x y)
-  g _    (CCall x y) = ([], AnnCCall x y)
-  g _    (Placeholder x y) = ([], AnnPlaceholder x y)
+  g _    (I i) = AAst [] $ I i
+  g _    (S s) = AAst [] $ S s
+  g _    (Pack m n) = AAst [] $ Pack m n
+  g _    (Qual x y) = AAst [] $ Qual x y
+  g _    (CCall x y) = AAst [] $ CCall x y
+  g _    (Placeholder x y) = AAst [] $ Placeholder x y
 
 caseVars :: AstF Ast -> [String]
 caseVars (Var v) = [v]
@@ -830,7 +821,7 @@ caseVars _ = []
 liftLambdas :: [(String, Ast)] -> [(String, Ast)]
 liftLambdas scs = existingDefs ++ newDefs where
   (existingDefs, (_, newDefs)) = runState (mapM f $ freeV scs) ([], [])
-  f (s, (_, AnnLam args body)) = do
+  f (s, (AAst _ (Lam args body))) = do
     modify $ first $ const [s]
     body1 <- g body
     pure (s, Ast $ Lam args body1)
@@ -843,20 +834,20 @@ liftLambdas scs = existingDefs ++ newDefs where
         (++ ('$':last names)) . show <$> [(0::Int)..]
     put (n:names, ys)
     pure n
-  g (_, x :@@ y) = fmap Ast $ (:@) <$> g x <*> g y
-  g (_, AnnLet ds t) = fmap Ast $ Let <$> mapM noLamb ds <*> g t where
-    noLamb (name, (fvs, AnnLam ss body)) = do
+  g (AAst _ (x :@ y)) = fmap Ast $ (:@) <$> g x <*> g y
+  g (AAst _ (Let ds t)) = fmap Ast $ Let <$> mapM noLamb ds <*> g t where
+    noLamb (name, (AAst fvs (Lam ss body))) = do
       n <- genName
       body1 <- g body
       modify $ second ((n, Ast $ Lam (fvs ++ ss) body1):)
       pure (name, foldl' ((Ast .) . (:@)) (Ast $ Var n) $ Ast . Var <$> fvs)
     noLamb (name, a) = (,) name <$> g a
-  g (fvs, lam@(AnnLam _ _)) = do
+  g (AAst fvs lam@(Lam _ _)) = do
     n <- genName
-    g (fvs, AnnLet [(n, (fvs, lam))] ([n], AnnVar n))
-  g (_, AnnCas expr as) =
+    g $ AAst fvs $ Let [(n, AAst fvs lam)] (AAst [n] $ Var n)
+  g (AAst _ (Cas expr as)) =
     fmap Ast $ Cas <$> g expr <*> mapM (\(p, t) -> (,) <$> g p <*> g t) as
-  g (_, ann) = pure $ deAnn ann
+  g ann = pure $ deAnn ann
 
 expandCase :: Ast -> Ast
 expandCase = ffix $ \h (Ast ast) -> Ast $ case ast of
@@ -905,20 +896,10 @@ expandCase = ffix $ \h (Ast ast) -> Ast $ case ast of
     fromApList (Ast (a :@ b)) = fromApList a ++ [b]
     fromApList a = [a]
 
-deAnn :: AnnAst' a -> Ast
-deAnn (AnnS s) = Ast $ S s
-deAnn (AnnI i) = Ast $ I i
-deAnn (AnnVar v) = Ast $ Var v
-deAnn (AnnCCall x y) = Ast $ CCall x y
-deAnn (AnnQual x y) = Ast $ Qual x y
-deAnn (AnnPack x y) = Ast $ Pack x y
-deAnn (AnnPlaceholder x y) = Ast $ Placeholder x y
-deAnn (AnnCas (_, x) as) = Ast $ Cas (deAnn x) $ (join (***) $ deAnn . snd) <$> as
-deAnn (AnnLam as (_, x)) = Ast $ Lam as $ deAnn x
-deAnn (AnnLet as (_, x)) = Ast $ Let (second (deAnn . snd) <$> as) $ deAnn x
-deAnn ((_, x) :@@ (_, y)) = Ast $ deAnn x :@ deAnn y
+deAnn :: AAst a -> Ast
+deAnn = ffix $ \h (AAst _ ast) -> Ast $ h ast
 
 ffix :: Functor f => ((f a -> f b) -> a -> b) -> a -> b
 ffix f = f $ fmap $ ffix f
 
-data AAst a = AAst a (AstF (AAst a))
+data AAst a = AAst a (AstF (AAst a)) deriving Functor
