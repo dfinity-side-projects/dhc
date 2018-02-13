@@ -40,8 +40,14 @@ data AstF a = Qual String String | CCall String String
 
 newtype Ast = Ast (AstF Ast) deriving (Show, Generic)
 
-unAst :: Ast -> AstF Ast
-unAst (Ast a) = a
+-- Annotated AST.
+data AAst a = AAst a (AstF (AAst a)) deriving Functor
+
+deAnn :: AAst a -> Ast
+deAnn = ffix $ \h (AAst _ ast) -> Ast $ h ast
+
+ffix :: Functor f => ((f a -> f b) -> a -> b) -> a -> b
+ffix f = f $ fmap $ ffix f
 
 infixr 5 :->
 data Type = TC String | TApp Type Type | Type :-> Type
@@ -676,9 +682,18 @@ hacks =
 
 type Syscalls = (Map String (Int, Type), String -> String -> Maybe Int)
 
+{-
+unAst :: Ast -> AstF Ast
+unAst (Ast a) = a
+-}
+
 expandSyscalls :: Syscalls -> [(String, Int)] -> Ast -> Ast
 expandSyscalls sys arities = ffix $ \rec (Ast ast) -> Ast $ case ast of
+
+{-
   Cas (Ast x) as -> Cas (Ast $ rec x) (second (Ast . rec. unAst) <$> as)
+-}
+
   Var s | Just (n, t) <- M.lookup s (fst sys) -> Ast (Ast (if isIO t then Var "#syscall" else Var "#syscallPure") :@ Ast (I $ argCount t)) :@ Ast (I $ fromIntegral n)
   -- Example:
   --  target.fun 1 2 "three"
@@ -895,11 +910,3 @@ expandCase = ffix $ \h (Ast ast) -> Ast $ case ast of
     fromApList :: Ast -> [Ast]
     fromApList (Ast (a :@ b)) = fromApList a ++ [b]
     fromApList a = [a]
-
-deAnn :: AAst a -> Ast
-deAnn = ffix $ \h (AAst _ ast) -> Ast $ h ast
-
-ffix :: Functor f => ((f a -> f b) -> a -> b) -> a -> b
-ffix f = f $ fmap $ ffix f
-
-data AAst a = AAst a (AstF (AAst a)) deriving Functor

@@ -703,7 +703,7 @@ astToIns (AstPlus es ws storage ds ts) = (((es, funs), second compile <$> ds), w
   -- For JS demos.
   -- translateType (TC "Int") = I32
   translateType (TC "Int") = I64
-  translateType (TC "Port") = I32
+  translateType (TC "Port") = Ref "Port"
   translateType t = error $ "no corresponding wasm type: " ++ show t
   ps = zipWith (\p i -> (primName p, (primArity p, i))) prims [0..]
   funs = M.fromList $ ps ++ zipWith (\(name, Ast (Lam as _)) i -> (name, (length as, i))) ds [length prims..]
@@ -796,6 +796,8 @@ insToBin (((exs, funs), m), wrapme) = (,) ((\s -> (s, fst $ getGlobal funs s)) <
   fs = predefs
     ++ ((,) (1, 0) . primAsm <$> prims)
     ++ ((,) (1, 0) . (++ [End]) . concatMap (fromInsWith $ getGlobal funs) . snd <$> m)
+  refToI32 (Ref _) = I32
+  refToI32 t = t
   wrap (f, (ins, outs)) =
     -- Anticipate UpdatePop.
     [ Get_global sp  -- [sp] = hp
@@ -812,10 +814,10 @@ insToBin (((exs, funs), m), wrapme) = (,) ((\s -> (s, fst $ getGlobal funs s)) <
     ]
     -- Input arguments are local variables.
     -- We move these to our stack in reverse order.
-    ++ concat (reverse $ zipWith wdeclIn ins [0..])
+    ++ concat (reverse $ zipWith wdeclIn (refToI32 <$> ins) [0..])
     ++ [Call $ 1 + length predefs + snd (getGlobal funs f)]
     -- Push the result to the WebAssembly stack.
-    ++ concatMap wdeclOut outs
+    ++ concatMap wdeclOut (refToI32 <$> outs)
     ++ [End]
   wdeclIn I64 i =
     [ Get_global sp  -- [sp] = hp
@@ -917,6 +919,7 @@ insToBin (((exs, funs), m), wrapme) = (,) ((\s -> (s, fst $ getGlobal funs s)) <
   encProcedure ((_, locCount), body) = lenc $ ([1, locCount, encType I32] ++) $ concatMap encWasmOp body
   encType I32 = 0x7f
   encType I64 = 0x7e
+  encType (Ref _) = encType I32
   encType _ = error "TODO"
   -- | Encodes function signature.
   encSig ins outs = 0x60 : lenc (encType <$> ins) ++ lenc (encType <$> outs)
