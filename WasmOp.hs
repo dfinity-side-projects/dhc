@@ -1,9 +1,13 @@
-module WasmOp where
+{-# LANGUAGE DeriveGeneric #-}
+module WasmOp (WasmType(..), WasmOp(..), zeroOperandOps, rZeroOps) where
+import Data.Binary (Binary)
 import Data.Int
+import GHC.Generics (Generic)
 
 data WasmType = I32 | I64 | F32 | F64 | Func | AnyFunc | Nada
   | Ref String  -- Custom types used by Dfinity.
-  deriving (Show, Eq)
+  deriving (Read, Show, Eq, Generic)
+instance Binary WasmType
 
 -- Much of this file was generated from:
 --   http://webassembly.org/docs/binary-encoding/

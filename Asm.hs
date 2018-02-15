@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE PackageImports #-}
 module Asm (hsToWasm, Ins(..),
+  WasmType(Ref),  -- Re-export from WasmOp.
   hsToGMachineWebDemo, hsToWasmWebDemo) where
 import Control.Arrow
 import qualified Data.Map as M
@@ -679,7 +680,12 @@ hsToWasmWebDemo prog = snd <$> hsToWasm webDemoSys prog
 hsToGMachineWebDemo :: String -> Either String (GlobalTable, [(String, [Ins])])
 hsToGMachineWebDemo haskell = fst . astToIns <$> hsToAst webDemoSys haskell
 
-hsToWasm :: Syscalls -> String -> Either String ([(String, Int)], [Int])
+-- | Returns
+--   ( arities of synchronous exports
+--   , types of asynchronous exports
+--   , WebAssembly binary
+--   )
+hsToWasm :: Syscalls -> String -> Either String (([(String, Int)], [(String, ([WasmType], [WasmType]))]), [Int])
 hsToWasm sys prog = insToBin . astToIns <$> hsToAst sys prog
 
 webDemoSys :: Syscalls
@@ -704,6 +710,7 @@ astToIns (AstPlus es ws storage ds ts) = (((es, funs), second compile <$> ds), w
   -- translateType (TC "Int") = I32
   translateType (TC "Int") = I64
   translateType (TC "Port") = Ref "Port"
+  translateType (TC "Databuf") = Ref "Databuf"
   translateType t = error $ "no corresponding wasm type: " ++ show t
   ps = zipWith (\p i -> (primName p, (primArity p, i))) prims [0..]
   funs = M.fromList $ ps ++ zipWith (\(name, Ast (Lam as _)) i -> (name, (length as, i))) ds [length prims..]
@@ -717,64 +724,65 @@ getGlobal funs v = case M.lookup v funs of
   Nothing -> error $ "no such global: " ++ v
   Just (i, j) -> (i, j)
 
-insToBin :: ((GlobalTable, [(String, [Ins])]), [(String, ([WasmType], [WasmType]))]) -> ([(String, Int)], [Int])
-insToBin (((exs, funs), m), wrapme) = (,) ((\s -> (s, fst $ getGlobal funs s)) <$> exs) $ concat
-  [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
-  , sect 1  -- Type section.
-    $
-    [ encSig [I32, I32, I32] []  -- Type of syscall.
-    , encSig [] []  -- Most functions have type () -> ().
-    , encSig [] [I32]  -- Next two are for getters and setters.
-    , encSig [I32] []
-    ] ++ (uncurry encSig . snd <$> wrapme)
-  -- Import section.
-  -- [0, 0] = external_kind Function, index 0.
-  , sect 2 [encStr "i" ++ encStr "f" ++ [0, 0]]
-  , sect 3  -- Function section.
-    $ (pure . fst . fst <$> fs)  -- Top-level functions.
-    ++ [[1]]  -- Outer "main".
-    ++ (pure <$> take (length wrapme) [4..])  -- The wdecl functions.
-  , sect 5 [[0, nPages]]  -- Memory section (0 = no-maximum).
-  , sect 6  -- Global section (1 = mutable).
-    [ [encType I32, 1, 0x41] ++ leb128 (65536*nPages - 4) ++ [0xb]  -- SP
-    , [encType I32, 1, 0x41, 0, 0xb]  -- HP
-    , [encType I32, 1, 0x41, 0, 0xb]  -- BP
-    ]
-  -- Export section.
-  , sect 7 $
-    -- 0 = external_kind Function, n = function index.
-    [ encStr "main" ++ [0, length fs + 1]
-    , encStr "getsp" ++ [0, 3]
-    , encStr "setsp" ++ [0, 4]
-    , encStr "gethp" ++ [0, 5]
-    , encStr "sethp" ++ [0, 6]
-    -- 2 = external_kind Memory, 0 = memory index
-    , encStr "mem" ++ [2, 0]
-    ]
-    -- The "contract" functions are exported with "_" prepended.
-    ++ [encStr ('_':s) ++ [0, 1 + length predefs + snd (getGlobal funs s)] | s <- exs]
-    -- The "wdecl" functions are exported with "w_" prepended.
-    ++ [encStr ('w':'_':s) ++ [0, 1 + length fs + 1 + k] | k <- [0..length wrapme - 1], let (s, _) = wrapme !! k]
-  , sect 10 $ encProcedure <$>  -- Code section.
-    (fs  -- Top-level functions.
-    -- Outer "main" function. It calls the internal "main" function (which
-    -- is "_main" if exported).
-    ++ [((1, 0),
-      -- The magic constant 42 represents the RealWorld.
-      [ Get_global sp  -- [sp] = 42
-      , I32_const 42
-      , I32_store 2 0
-      , Get_global sp  -- sp = sp - 4
-      , I32_const 4
-      , I32_sub
-      , Set_global sp
+insToBin :: ((GlobalTable, [(String, [Ins])]), [(String, ([WasmType], [WasmType]))]) -> (([(String, Int)], [(String, ([WasmType], [WasmType]))]), [Int])
+insToBin (((exs, funs), m), wrapme) = ((((\s -> (s, fst $ getGlobal funs s)) <$> exs), wrapme), wasm) where
+  wasm = concat
+    [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
+    , sect 1  -- Type section.
+      $
+      [ encSig [I32, I32, I32] []  -- Type of syscall.
+      , encSig [] []  -- Most functions have type () -> ().
+      , encSig [] [I32]  -- Next two are for getters and setters.
+      , encSig [I32] []
+      ] ++ (uncurry encSig . snd <$> wrapme)
+    -- Import section.
+    -- [0, 0] = external_kind Function, index 0.
+    , sect 2 [encStr "i" ++ encStr "f" ++ [0, 0]]
+    , sect 3  -- Function section.
+      $ (pure . fst . fst <$> fs)  -- Top-level functions.
+      ++ [[1]]  -- Outer "main".
+      ++ (pure <$> take (length wrapme) [4..])  -- The wdecl functions.
+    , sect 5 [[0, nPages]]  -- Memory section (0 = no-maximum).
+    , sect 6  -- Global section (1 = mutable).
+      [ [encType I32, 1, 0x41] ++ leb128 (65536*nPages - 4) ++ [0xb]  -- SP
+      , [encType I32, 1, 0x41, 0, 0xb]  -- HP
+      , [encType I32, 1, 0x41, 0, 0xb]  -- BP
       ]
-      ++ concatMap (fromInsWith $ getGlobal funs) [PushGlobal "main", MkAp]
-      ++ [ Call 1, End ]
-    )]
-    -- Wrappers for functions in "wdecl" section.
-    ++ (zip (flip (,) 0 <$> [4..]) $ wrap <$> wrapme))
-  ] where
+    -- Export section.
+    , sect 7 $
+      -- 0 = external_kind Function, n = function index.
+      [ encStr "main" ++ [0, length fs + 1]
+      , encStr "getsp" ++ [0, 3]
+      , encStr "setsp" ++ [0, 4]
+      , encStr "gethp" ++ [0, 5]
+      , encStr "sethp" ++ [0, 6]
+      -- 2 = external_kind Memory, 0 = memory index
+      , encStr "mem" ++ [2, 0]
+      ]
+      -- The "contract" functions are exported with "_" prepended.
+      ++ [encStr ('_':s) ++ [0, 1 + length predefs + snd (getGlobal funs s)] | s <- exs]
+      -- The "wdecl" functions are exported with "w_" prepended.
+      ++ [encStr ('w':'_':s) ++ [0, 1 + length fs + 1 + k] | k <- [0..length wrapme - 1], let (s, _) = wrapme !! k]
+    , sect 10 $ encProcedure <$>  -- Code section.
+      (fs  -- Top-level functions.
+      -- Outer "main" function. It calls the internal "main" function (which
+      -- is "_main" if exported).
+      ++ [((1, 0),
+        -- The magic constant 42 represents the RealWorld.
+        [ Get_global sp  -- [sp] = 42
+        , I32_const 42
+        , I32_store 2 0
+        , Get_global sp  -- sp = sp - 4
+        , I32_const 4
+        , I32_sub
+        , Set_global sp
+        ]
+        ++ concatMap (fromInsWith $ getGlobal funs) [PushGlobal "main", MkAp]
+        ++ [ Call 1, End ]
+      )]
+      -- Wrappers for functions in "wdecl" section.
+      ++ (zip (flip (,) 0 <$> [4..]) $ wrap <$> wrapme))
+    ]
   -- Function 0: import function which we send our outputs.
   -- Function 1: Eval (reduce to weak head normal form).
   -- Function 2: syscall

@@ -81,7 +81,7 @@ syscall e n sp hp
   | n == 21 = do
     addr <- load32 $ sp + 4
     tag <- load8 addr
-    when (tag /= 5) $ error $ "BUG! want string (tag 5), got " ++ show tag
+    when (tag /= 6) $ error $ "BUG! want string (tag 6), got " ++ show tag
     slen <- load32 $ addr + 4
     s <- mapM load8 [addr + 8 + i | i <- [0..slen - 1]]
     append e $ chr <$> s

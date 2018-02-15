@@ -743,7 +743,7 @@ hsToAst sys prog = do
     genTypes storage = preludeMinimal
       `M.union` (first (const Nothing) <$> fst sys)
       `M.union` (M.fromList $ storageTypeConstraintHack <$> storage)
-    storageTypeConstraintHack s = (s, (Nothing, TC "Map" `TApp` TV ('#':s)))
+    storageTypeConstraintHack s = (s, (Nothing, TC "Map" `TApp` TV ('@':s)))
 
 inferType
   :: (String -> String -> Either String Type)
@@ -753,7 +753,7 @@ inferType
 inferType findExport globs ds = foldM inferMutual [] $ map (map (\k -> (k, fromJust $ lookup k ds))) sortedDefs where
   -- Groups of definitions, sorted in the order we should infer their types.
   sortedDefs = reverse $ scc (callees ds) $ fst <$> ds
-  -- inferMutual :: [(String, AAst Type)] -> [(String, Ast)] -> Either String [(String, AAst Type)]
+  inferMutual :: [(String, (QualType, Ast))] -> [(String, Ast)] -> Either String [(String, (QualType, Ast))]
   inferMutual acc grp = do
     (bs, ConState _ cs m) <- buildConstraints $ do
       ts <- mapM (gather findExport globs env) $ snd <$> grp
