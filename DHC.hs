@@ -728,8 +728,9 @@ getContractExport (_, f) _ c v = case f c v of
 hsToAst :: Syscalls -> String -> Either String AstPlus
 hsToAst sys prog = do
   a@(AstPlus es _ storage ds _) <- showErr $ parseContract prog
-  inferred <- inferType (getContractExport sys es) (genTypes storage) (ds ++ hacks)
+  (preStorageInferred, storageCons) <- inferType (getContractExport sys es) (genTypes storage) (ds ++ hacks)
   let
+    inferred = constrainStorage storageCons preStorageInferred
     arities = second (countArgs . fst . fst) <$> inferred
     countArgs (_ :-> b) = 1 + countArgs b
     countArgs _ = 0
@@ -745,16 +746,27 @@ hsToAst sys prog = do
       `M.union` (M.fromList $ storageTypeConstraintHack <$> storage)
     storageTypeConstraintHack s = (s, (Nothing, TC "Map" `TApp` TV ('@':s)))
 
+constrainStorage :: [(String, Type)] -> [(String, (QualType, Ast))] -> [(String, (QualType, Ast))]
+constrainStorage cons ds = second (first (first rewriteType)) <$> ds where
+  rewriteType (GV ('@':x)) = case typeSolve cons $ TV ('@':x) of
+    TC t -> TC t
+    _    -> TC "String"
+  rewriteType (t :-> u) = rec t :-> rec u
+  rewriteType (TApp t u) = TApp (rec t) (rec u)
+  rewriteType t = t
+  rec = rewriteType
+
 inferType
   :: (String -> String -> Either String Type)
   -> Globals
   -> [(String, Ast)]
-  -> Either String [(String, (QualType, Ast))]
-inferType findExport globs ds = foldM inferMutual [] $ map (map (\k -> (k, fromJust $ lookup k ds))) sortedDefs where
+  -- | Returns types of definitions and storage maps.
+  -> Either String ([(String, (QualType, Ast))], [(String, Type)])
+inferType findExport globs ds = foldM inferMutual ([], []) $ map (map (\k -> (k, fromJust $ lookup k ds))) sortedDefs where
   -- Groups of definitions, sorted in the order we should infer their types.
   sortedDefs = reverse $ scc (callees ds) $ fst <$> ds
-  inferMutual :: [(String, (QualType, Ast))] -> [(String, Ast)] -> Either String [(String, (QualType, Ast))]
-  inferMutual acc grp = do
+  inferMutual :: ([(String, (QualType, Ast))], [(String, Type)]) -> [(String, Ast)] -> Either String ([(String, (QualType, Ast))], [(String, Type)])
+  inferMutual (acc, accStorage) grp = do
     (bs, ConState _ cs m) <- buildConstraints $ do
       ts <- mapM (gather findExport globs env) $ snd <$> grp
       when ("main" `elem` (fst <$> grp)) $ do
@@ -763,7 +775,9 @@ inferType findExport globs ds = foldM inferMutual [] $ map (map (\k -> (k, fromJ
       mapM_ addConstraint $ zip tvs $ annOf <$> ts
       pure ts
     (soln, ctx) <- runStateT (unify cs) m
-    pure $ (++ acc) $ zip (fst <$> grp) $ generalize soln ctx <$> bs
+    let storageCons = second (typeSolve soln) <$> filter (('@' ==) . head . fst) soln
+    -- TODO: Look for conflicting storage constraints.
+    pure ((++ acc) $ zip (fst <$> grp) $ generalize soln ctx <$> bs, accStorage ++ storageCons)
     where
       annOf (AAst a _) = a
       buildConstraints (Constraints f) = f $ ConState 0 [] M.empty
