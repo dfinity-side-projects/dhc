@@ -730,24 +730,13 @@ callEval = Call 1
 
 insToBin :: ((GlobalTable, [(String, [Ins])]), [(String, ([WasmType], [WasmType]))]) -> (([(String, Int)], [(String, ([WasmType], [WasmType]))]), [Int])
 insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs s)) <$> exs), wrapme), wasm) where
-  typeNo ins outs = typeMap BM.!> (ins, outs)
-  typeMap = BM.fromList $ zip [0..] $ nub $
-    [ ([I32, I32, I32], [])  -- Syscall type.
-    , ([], [])  -- Most internal functions have type () -> ().
-    , ([], [I32])  -- gethp, getsp.
-    , ([I32], [])  -- sethp, setsp.
-    ] ++ (snd <$> wrapme)  -- wdecl functions.
-
   wasm = concat
     [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
     , sect 1 $ uncurry encSig . snd <$> BM.assocs typeMap  -- Type section.
     -- Import section.
     -- 0 = external_kind Function.
     , sect 2 [encStr "i" ++ encStr "f" ++ [0, typeNo [I32, I32, I32] []]]
-    , sect 3  -- Function section.
-      $ fmap pure $ (fst . fst <$> fs)  -- Top-level functions.
-        ++ [typeNo [] []]  -- Outer "main".
-        ++ (uncurry typeNo . snd <$> wrapme)  -- The wdecl functions.
+    , sect 3 $ pure . fst . fst . snd <$> wasmFuns  -- Function section.
     , sect 5 [[0, nPages]]  -- Memory section (0 = no-maximum).
     , sect 6  -- Global section (1 = mutable).
       [ [encType I32, 1, 0x41] ++ leb128 (65536*nPages - 4) ++ [0xb]  -- SP
@@ -756,24 +745,46 @@ insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs 
       ]
     -- Export section.
     , sect 7 $
-      -- 0 = external_kind Function, n = function index.
-      [ encStr "main" ++ [0, length fs + 1]
-      , encStr "getsp" ++ [0, 3]
-      , encStr "setsp" ++ [0, 4]
-      , encStr "gethp" ++ [0, 5]
-      , encStr "sethp" ++ [0, 6]
-      -- 2 = external_kind Memory, 0 = memory index
-      , encStr "mem" ++ [2, 0]
+      [ encStr "mem" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
+      , exportFun "main" "#main"
+      , exportFun "getsp" "#getsp"
+      , exportFun "setsp" "#setsp"
+      , exportFun "gethp" "#gethp"
+      , exportFun "sethp" "#sethp"
       ]
       -- The "contract" functions are exported with "_" prepended.
-      ++ [encStr ('_':s) ++ [0, 1 + length predefs + snd (getGlobal funs s)] | s <- exs]
+      ++ [exportFun ('_':s) s | s <- exs]
       -- The "wdecl" functions are exported with "w_" prepended.
-      ++ [encStr ('w':'_':s) ++ [0, 1 + length fs + 1 + k] | k <- [0..length wrapme - 1], let (s, _) = wrapme !! k]
-    , sect 10 $ encProcedure <$>  -- Code section.
-      (fs  -- Top-level functions.
-      -- Outer "main" function. It calls the internal "main" function (which
-      -- is "_main" if exported).
-      ++ [((typeNo [] [], 0),
+      ++ [exportFun ('w':'_':s) ('@':s) | (s, _) <- wrapme]
+    , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
+    ]
+  typeNo ins outs = typeMap BM.!> (ins, outs)
+  typeMap = BM.fromList $ zip [0..] $ nub $
+    [ ([I32, I32, I32], [])  -- Syscall type.
+    , ([], [])  -- Most internal functions have type () -> ().
+    , ([], [I32])  -- gethp, getsp.
+    , ([I32], [])  -- sethp, setsp.
+    ] ++ (snd <$> wrapme)  -- wdecl functions.
+  -- 0 = external_kind Function.
+  exportFun name internal = encStr name ++ [0, wasmFunNo internal]
+  wasmFuns =
+    [ ("#eval", ((typeNo [] [], 0), evalAsm))
+    , ("#syscall", ((typeNo [] [], 2), syscallAsm))
+    , ("#getsp", ((typeNo [] [I32], 0), [Get_global sp, End]))
+    , ("#setsp", ((typeNo [I32] [], 0), [Get_local 0, Set_global sp, End]))
+    , ("#gethp", ((typeNo [] [I32], 0), [Get_global hp, End]))
+    , ("#sethp", ((typeNo [I32] [], 0), [Get_local 0, Set_global hp, End]))
+    , ("#syscallpure", ((typeNo [] [], 2), syscallPureAsm))
+    ]
+    -- Primitive functions.
+    -- The assembly for "#eval" requires that the primitive functions
+    -- directly precede those defined in the program.
+    ++ ((\p -> (primName p, ((typeNo [] [], 0), primAsm p))) <$> prims)
+    -- Functions from the program.
+    ++ ((\(f, g) -> (f, ((typeNo [] [], 0), (++ [End]) $ concatMap (fromInsWith $ getGlobal funs) g))) <$> gmachine)
+    -- Outer "main" function. It calls the internal "main" function (which
+    -- is "_main" if exported).
+    ++ [("#main", ((typeNo [] [], 0),
         -- The magic constant 42 represents the RealWorld.
         [ Get_global sp  -- [sp] = 42
         , I32_const 42
@@ -785,38 +796,15 @@ insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs 
         ]
         ++ concatMap (fromInsWith $ getGlobal funs) [PushGlobal "main", MkAp]
         ++ [ callEval, End ]
-      )]
-      -- Wrappers for functions in "wdecl" section.
-      ++ (wrap <$> wrapme))
-    ]
+      ))]
+    -- Wrappers for functions in "wdecl" section.
+    ++ (wrap <$> wrapme)
+  wasmFunMap = M.fromList $ zip (fst <$> wasmFuns) [0..]
   -- Function 0: import function which we send our outputs.
-  -- Function 1: Eval (reduce to weak head normal form).
-  -- Function 2: syscall
-  -- Function 3: getsp
-  -- Function 4: setsp
-  -- Function 5: gethp
-  -- Function 6: sethp
-  -- Function 7: pure syscall
-  -- Afterwards:
-  --  * primitive functions
-  --  * functions in the program
-  --  * outer main function
-  --  * wdecl function wrappers
-  predefs =
-    [ ((typeNo [] [], 0), evalAsm (length prims + length gmachine))
-    , ((typeNo [] [], 2), syscallAsm)
-    , ((typeNo [] [I32], 0), [Get_global sp, End])
-    , ((typeNo [I32] [], 0), [Get_local 0, Set_global sp, End])
-    , ((typeNo [] [I32], 0), [Get_global hp, End])
-    , ((typeNo [I32] [], 0), [Get_local 0, Set_global hp, End])
-    , ((typeNo [] [], 2), syscallPureAsm)
-    ]
-  fs = predefs
-    ++ ((,) (typeNo [] [], 0) . primAsm <$> prims)
-    ++ ((,) (typeNo [] [], 0) . (++ [End]) . concatMap (fromInsWith $ getGlobal funs) . snd <$> gmachine)
+  wasmFunNo s = (wasmFunMap M.! s) + 1
   refToI32 (Ref _) = I32
   refToI32 t = t
-  wrap (f, (ins, outs)) = (,) (typeNo ins outs, 0) $
+  wrap (f, (ins, outs)) = (,) ('@':f) $ (,) (typeNo ins outs, 0) $
     -- Anticipate UpdatePop.
     [ Get_global sp  -- [sp] = hp
     , Get_global hp
@@ -833,7 +821,7 @@ insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs 
     -- Input arguments are local variables.
     -- We move these to our stack in reverse order.
     ++ concat (reverse $ zipWith wdeclIn (refToI32 <$> ins) [0..])
-    ++ [Call $ 1 + length predefs + snd (getGlobal funs f)]
+    ++ [Call $ wasmFunNo f]
     -- Push the result to the WebAssembly stack.
     ++ concatMap wdeclOut (refToI32 <$> outs)
     ++ [End]
@@ -941,7 +929,7 @@ insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs 
   encType _ = error "TODO"
   -- | Encodes function signature.
   encSig ins outs = 0x60 : lenc (encType <$> ins) ++ lenc (encType <$> outs)
-  evalAsm n =
+  evalAsm =
     [ Block Nada
       [ Loop Nada
         [ Get_global sp  -- bp = [sp + 4]
@@ -1017,6 +1005,8 @@ insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs 
     , Set_global bp
     ] ++ nest n ++ [End]
     where
+      n = length prims + length gmachine
+      offset = wasmFunNo (primName $ head prims) - 1
       nest 0 =
         [ Get_global bp  -- case [bp + 4]
         , I32_const 4
@@ -1024,7 +1014,7 @@ insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs 
         , I32_load 2 0
         , Br_table [0..n-1] n
         ]
-      nest k = [Block Nada $ nest $ k - 1, Call $ length predefs + k, Br $ n - k]
+      nest k = [Block Nada $ nest $ k - 1, Call $ offset + k, Br $ n - k]
 
 leb128 :: Int -> [Int]
 leb128 n | n < 64    = [n]
