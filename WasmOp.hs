@@ -6,7 +6,7 @@ import GHC.Generics (Generic)
 
 data WasmType = I32 | I64 | F32 | F64 | Func | AnyFunc | Nada
   | Ref String  -- Custom types used by Dfinity.
-  deriving (Read, Show, Eq, Generic)
+  deriving (Read, Show, Eq, Ord, Generic)
 instance Binary WasmType
 
 -- Much of this file was generated from:

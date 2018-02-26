@@ -14,6 +14,7 @@ import Control.Monad.State
 import Data.ByteString.Short (ShortByteString)
 import qualified Data.ByteString.Short as SBS
 #endif
+import qualified Data.Bimap as BM
 import Data.Char
 import Data.Int
 import Data.List
@@ -149,7 +150,7 @@ intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
   , I32_const 16
   , I32_add
   , Set_global hp
-  ] ++ fromIns (UpdatePop 2) ++ [Call 1, End]
+  ] ++ fromIns (UpdatePop 2) ++ [callEval, End]
 
 cmpAsm :: WasmOp -> [WasmOp]
 cmpAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
@@ -189,7 +190,7 @@ cmpAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
   , I32_const 8
   , I32_add
   , Set_global hp
-  ] ++ fromIns (UpdatePop 2) ++ [Call 1, End]
+  ] ++ fromIns (UpdatePop 2) ++ [callEval, End]
 
 boolAsm :: WasmOp -> [WasmOp]
 boolAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
@@ -229,7 +230,7 @@ boolAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
   , I32_const 8
   , I32_add
   , Set_global hp
-  ] ++ fromIns (UpdatePop 2) ++ [Call 1, End]
+  ] ++ fromIns (UpdatePop 2) ++ [callEval, End]
 
 catAsm :: [WasmOp]
 catAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
@@ -345,7 +346,7 @@ catAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
   , Get_global hp
   , I32_add
   , Set_global hp
-  ] ++ fromIns (UpdatePop 2) ++ [Call 1, End]
+  ] ++ fromIns (UpdatePop 2) ++ [callEval, End]
 
 strEqAsm :: [WasmOp]
 strEqAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
@@ -431,7 +432,7 @@ strEqAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
   , I32_const 8
   , I32_add
   , Set_global hp
-  ] ++ fromIns (UpdatePop 2) ++ [Call 1, End]
+  ] ++ fromIns (UpdatePop 2) ++ [callEval, End]
 
 -- Primitive functions.
 data Prim = Prim
@@ -499,7 +500,7 @@ syscallPureAsm =
       , I32_sub
       , Set_global sp
       -- ... then evaluate. TODO: Reduce to normal form.
-      , Call 1
+      , callEval
       , Get_local 0
       , I32_const 1
       , I32_sub
@@ -601,7 +602,7 @@ syscallAsm =
       , I32_sub
       , Set_global sp
       -- ... then evaluate. TODO: Reduce to normal form.
-      , Call 1
+      , callEval
       , Get_local 0
       , I32_const 1
       , I32_sub
@@ -614,7 +615,7 @@ syscallAsm =
   , Get_global sp  -- #syscall(syscall_number, sp, hp)
   , Get_global hp
   , Call 0
-  -- Because the syscall cannot modify sp or hp, our convention is that
+  -- Our convention:
   --   [sp] = result ; [sp - 4] = hp_new
   -- We update the globals here, in WebAssembly.
   , Get_global sp  -- hp = [sp - 4]
@@ -724,24 +725,29 @@ getGlobal funs v = case M.lookup v funs of
   Nothing -> error $ "no such global: " ++ v
   Just (i, j) -> (i, j)
 
+callEval :: WasmOp
+callEval = Call 1
+
 insToBin :: ((GlobalTable, [(String, [Ins])]), [(String, ([WasmType], [WasmType]))]) -> (([(String, Int)], [(String, ([WasmType], [WasmType]))]), [Int])
-insToBin (((exs, funs), m), wrapme) = ((((\s -> (s, fst $ getGlobal funs s)) <$> exs), wrapme), wasm) where
+insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs s)) <$> exs), wrapme), wasm) where
+  typeNo ins outs = typeMap BM.!> (ins, outs)
+  typeMap = BM.fromList $ zip [0..] $ nub $
+    [ ([I32, I32, I32], [])  -- Syscall type.
+    , ([], [])  -- Most internal functions have type () -> ().
+    , ([], [I32])  -- gethp, getsp.
+    , ([I32], [])  -- sethp, setsp.
+    ] ++ (snd <$> wrapme)  -- wdecl functions.
+
   wasm = concat
     [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
-    , sect 1  -- Type section.
-      $
-      [ encSig [I32, I32, I32] []  -- Type of syscall.
-      , encSig [] []  -- Most functions have type () -> ().
-      , encSig [] [I32]  -- Next two are for getters and setters.
-      , encSig [I32] []
-      ] ++ (uncurry encSig . snd <$> wrapme)
+    , sect 1 $ uncurry encSig . snd <$> BM.assocs typeMap  -- Type section.
     -- Import section.
-    -- [0, 0] = external_kind Function, index 0.
-    , sect 2 [encStr "i" ++ encStr "f" ++ [0, 0]]
+    -- 0 = external_kind Function.
+    , sect 2 [encStr "i" ++ encStr "f" ++ [0, typeNo [I32, I32, I32] []]]
     , sect 3  -- Function section.
-      $ (pure . fst . fst <$> fs)  -- Top-level functions.
-      ++ [[1]]  -- Outer "main".
-      ++ (pure <$> take (length wrapme) [4..])  -- The wdecl functions.
+      $ fmap pure $ (fst . fst <$> fs)  -- Top-level functions.
+        ++ [typeNo [] []]  -- Outer "main".
+        ++ (uncurry typeNo . snd <$> wrapme)  -- The wdecl functions.
     , sect 5 [[0, nPages]]  -- Memory section (0 = no-maximum).
     , sect 6  -- Global section (1 = mutable).
       [ [encType I32, 1, 0x41] ++ leb128 (65536*nPages - 4) ++ [0xb]  -- SP
@@ -767,7 +773,7 @@ insToBin (((exs, funs), m), wrapme) = ((((\s -> (s, fst $ getGlobal funs s)) <$>
       (fs  -- Top-level functions.
       -- Outer "main" function. It calls the internal "main" function (which
       -- is "_main" if exported).
-      ++ [((1, 0),
+      ++ [((typeNo [] [], 0),
         -- The magic constant 42 represents the RealWorld.
         [ Get_global sp  -- [sp] = 42
         , I32_const 42
@@ -778,10 +784,10 @@ insToBin (((exs, funs), m), wrapme) = ((((\s -> (s, fst $ getGlobal funs s)) <$>
         , Set_global sp
         ]
         ++ concatMap (fromInsWith $ getGlobal funs) [PushGlobal "main", MkAp]
-        ++ [ Call 1, End ]
+        ++ [ callEval, End ]
       )]
       -- Wrappers for functions in "wdecl" section.
-      ++ (zip (flip (,) 0 <$> [4..]) $ wrap <$> wrapme))
+      ++ (wrap <$> wrapme))
     ]
   -- Function 0: import function which we send our outputs.
   -- Function 1: Eval (reduce to weak head normal form).
@@ -791,22 +797,26 @@ insToBin (((exs, funs), m), wrapme) = ((((\s -> (s, fst $ getGlobal funs s)) <$>
   -- Function 5: gethp
   -- Function 6: sethp
   -- Function 7: pure syscall
-  -- Afterwards, the primitive functions, then the functions in the program.
+  -- Afterwards:
+  --  * primitive functions
+  --  * functions in the program
+  --  * outer main function
+  --  * wdecl function wrappers
   predefs =
-    [ ((1, 0), evalAsm (length prims + length m))
-    , ((1, 2), syscallAsm)
-    , ((2, 0), [Get_global sp, End])
-    , ((3, 0), [Get_local 0, Set_global sp, End])
-    , ((2, 0), [Get_global hp, End])
-    , ((3, 0), [Get_local 0, Set_global hp, End])
-    , ((1, 2), syscallPureAsm)
+    [ ((typeNo [] [], 0), evalAsm (length prims + length gmachine))
+    , ((typeNo [] [], 2), syscallAsm)
+    , ((typeNo [] [I32], 0), [Get_global sp, End])
+    , ((typeNo [I32] [], 0), [Get_local 0, Set_global sp, End])
+    , ((typeNo [] [I32], 0), [Get_global hp, End])
+    , ((typeNo [I32] [], 0), [Get_local 0, Set_global hp, End])
+    , ((typeNo [] [], 2), syscallPureAsm)
     ]
   fs = predefs
-    ++ ((,) (1, 0) . primAsm <$> prims)
-    ++ ((,) (1, 0) . (++ [End]) . concatMap (fromInsWith $ getGlobal funs) . snd <$> m)
+    ++ ((,) (typeNo [] [], 0) . primAsm <$> prims)
+    ++ ((,) (typeNo [] [], 0) . (++ [End]) . concatMap (fromInsWith $ getGlobal funs) . snd <$> gmachine)
   refToI32 (Ref _) = I32
   refToI32 t = t
-  wrap (f, (ins, outs)) =
+  wrap (f, (ins, outs)) = (,) (typeNo ins outs, 0) $
     -- Anticipate UpdatePop.
     [ Get_global sp  -- [sp] = hp
     , Get_global hp
@@ -1046,7 +1056,7 @@ fromIns = fromInsWith (error . show)
 fromInsWith :: (String -> (Int, Int)) -> Ins -> [WasmOp]
 fromInsWith lookupGlobal instruction = case instruction of
   Trap -> [ Unreachable ]
-  Eval -> [ Call 1 ]  -- (Tail call.)
+  Eval -> [ callEval ]  -- (Tail call.)
   PushInt n ->
     [ Get_global sp  -- [sp] = hp
     , Get_global hp
