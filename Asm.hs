@@ -112,6 +112,11 @@ encWasmOp op = case op of
   Loop _ as -> [3, 0x40] ++ concatMap encWasmOp as ++ [0xb]
   _ -> maybe (error $ "unsupported: " ++ show op) pure $ lookup op rZeroOps
 
+-- Evals (reducing to WHNF) are represented as the WebAssembly opcode Call 1.
+-- These may be remapped to a different call because of imports.
+callEval :: WasmOp
+callEval = Call 1
+
 intAsm :: WasmOp -> [WasmOp]
 intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
   [ Get_global hp  -- [hp] = TagInt
@@ -434,13 +439,6 @@ strEqAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
   , Set_global hp
   ] ++ fromIns (UpdatePop 2) ++ [callEval, End]
 
--- Primitive functions.
-data Prim = Prim
-  { primName :: String
-  , primArity :: Int
-  , primAsm :: [WasmOp]
-  }
-
 syscallPureAsm :: [WasmOp]
 syscallPureAsm =
   -- Example:
@@ -649,6 +647,13 @@ syscallAsm =
   [ End
   ]
 
+-- Primitive functions.
+data Prim = Prim
+  { primName :: String
+  , primArity :: Int
+  , primAsm :: [WasmOp]
+  }
+
 prims :: [Prim]
 prims = fmap mkPrim
   [ ("+", intAsm I64_add)
@@ -665,8 +670,8 @@ prims = fmap mkPrim
   , ("||", boolAsm I32_or)
   , ("++", catAsm)
   , ("String-==", strEqAsm)
-  , ("#syscall", [Call 2, End])
-  , ("#syscallPure", [Call 7, End])
+  , ("#syscall", syscallAsm)
+  , ("#syscallPure", syscallPureAsm)
   ]
   where mkPrim (s, as) = Prim { primName = s, primArity = 2, primAsm = as }
 
@@ -725,17 +730,12 @@ getGlobal funs v = case M.lookup v funs of
   Nothing -> error $ "no such global: " ++ v
   Just (i, j) -> (i, j)
 
-callEval :: WasmOp
-callEval = Call 1
-
 insToBin :: ((GlobalTable, [(String, [Ins])]), [(String, ([WasmType], [WasmType]))]) -> (([(String, Int)], [(String, ([WasmType], [WasmType]))]), [Int])
 insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs s)) <$> exs), wrapme), wasm) where
   wasm = concat
     [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
     , sect 1 $ uncurry encSig . snd <$> BM.assocs typeMap  -- Type section.
-    -- Import section.
-    -- 0 = external_kind Function.
-    , sect 2 [encStr "i" ++ encStr "f" ++ [0, typeNo [I32, I32, I32] []]]
+    , sect 2 $ importFun <$> imps  -- Import section.
     , sect 3 $ pure . fst . fst . snd <$> wasmFuns  -- Function section.
     , sect 5 [[0, nPages]]  -- Memory section (0 = no-maximum).
     , sect 6  -- Global section (1 = mutable).
@@ -743,8 +743,7 @@ insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs 
       , [encType I32, 1, 0x41, 0, 0xb]  -- HP
       , [encType I32, 1, 0x41, 0, 0xb]  -- BP
       ]
-    -- Export section.
-    , sect 7 $
+    , sect 7 $  -- Export section.
       [ encStr "mem" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
       , exportFun "main" "#main"
       , exportFun "getsp" "#getsp"
@@ -758,6 +757,9 @@ insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs 
       ++ [exportFun ('w':'_':s) ('@':s) | (s, _) <- wrapme]
     , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
     ]
+  imps = [("i", "f", [I32, I32, I32], [])]
+  -- 0 = external_kind Function.
+  importFun (m, f, i, o) = encStr m ++ encStr f ++ [0, typeNo i o]
   typeNo ins outs = typeMap BM.!> (ins, outs)
   typeMap = BM.fromList $ zip [0..] $ nub $
     [ ([I32, I32, I32], [])  -- Syscall type.
@@ -765,21 +767,22 @@ insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs 
     , ([], [I32])  -- gethp, getsp.
     , ([I32], [])  -- sethp, setsp.
     ] ++ (snd <$> wrapme)  -- wdecl functions.
-  -- 0 = external_kind Function.
   exportFun name internal = encStr name ++ [0, wasmFunNo internal]
+  -- Only two primitives need local variables.
+  localCount "#syscall" = 2
+  localCount "#syscallPure" = 2
+  localCount _ = 0
   wasmFuns =
     [ ("#eval", ((typeNo [] [], 0), evalAsm))
-    , ("#syscall", ((typeNo [] [], 2), syscallAsm))
     , ("#getsp", ((typeNo [] [I32], 0), [Get_global sp, End]))
     , ("#setsp", ((typeNo [I32] [], 0), [Get_local 0, Set_global sp, End]))
     , ("#gethp", ((typeNo [] [I32], 0), [Get_global hp, End]))
     , ("#sethp", ((typeNo [I32] [], 0), [Get_local 0, Set_global hp, End]))
-    , ("#syscallpure", ((typeNo [] [], 2), syscallPureAsm))
     ]
     -- Primitive functions.
     -- The assembly for "#eval" requires that the primitive functions
     -- directly precede those defined in the program.
-    ++ ((\p -> (primName p, ((typeNo [] [], 0), primAsm p))) <$> prims)
+    ++ ((\p -> (primName p, ((typeNo [] [], localCount $ primName p), primAsm p))) <$> prims)
     -- Functions from the program.
     ++ ((\(f, g) -> (f, ((typeNo [] [], 0), (++ [End]) $ concatMap (fromInsWith $ getGlobal funs) g))) <$> gmachine)
     -- Outer "main" function. It calls the internal "main" function (which
@@ -801,7 +804,7 @@ insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs 
     ++ (wrap <$> wrapme)
   wasmFunMap = M.fromList $ zip (fst <$> wasmFuns) [0..]
   -- Function 0: import function which we send our outputs.
-  wasmFunNo s = (wasmFunMap M.! s) + 1
+  wasmFunNo s = (wasmFunMap M.! s) + length imps
   refToI32 (Ref _) = I32
   refToI32 t = t
   wrap (f, (ins, outs)) = (,) ('@':f) $ (,) (typeNo ins outs, 0) $
@@ -921,8 +924,13 @@ insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs 
   wdeclOut _ = error "TODO"
   sect t xs = t : lenc (varlen xs ++ concat xs)
   encStr s = lenc $ ord <$> s
-  encProcedure ((_, 0), body) = lenc $ 0:concatMap encWasmOp body
-  encProcedure ((_, locCount), body) = lenc $ ([1, locCount, encType I32] ++) $ concatMap encWasmOp body
+  encProcedure ((_, 0), body) = lenc $ 0:concatMap encWasmOp (remap <$> body)
+  encProcedure ((_, locCount), body) = lenc $ ([1, locCount, encType I32] ++) $ concatMap encWasmOp (remap <$> body)
+  remap (Call 1) = Call $ wasmFunNo "#eval"
+  remap (If x as) = If x $ remap <$> as
+  remap (Block x as) = Block x $ remap <$> as
+  remap (Loop x as) = Loop x $ remap <$> as
+  remap o = o
   encType I32 = 0x7f
   encType I64 = 0x7e
   encType (Ref _) = encType I32
