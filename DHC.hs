@@ -3,7 +3,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE PackageImports #-}
 module DHC (parseContract, Syscalls, AstF(..), Ast(..), AstPlus(..), Type(..), inferType, parseDefs, lexOffside,
-  preludeMinimal, hsToAst, liftLambdas) where
+  preludeMinimal, arityFromType,  hsToAst, liftLambdas) where
 
 import Control.Arrow
 import Control.Monad
@@ -653,6 +653,12 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
   , ("||", TC "Bool" :-> TC "Bool" :-> TC "Bool")
   , ("++", TC "String" :-> TC "String" :-> TC "String")
   , ("undefined", a)
+  -- | Programmers cannot call the following directly.
+  -- We keep their types around for various checks.
+  , ("Int-==", TC "Int" :-> TC "Int" :-> TC "Bool")
+  , ("String-==", TC "String" :-> TC "String" :-> TC "Bool")
+  , ("#syscall", TC "Int" :-> TC "Int" :-> TApp (TC "IO") a)
+  , ("#syscallPure", TC "Int" :-> TC "Int" :-> a)
   ]) ++
   [ ("False",   (jp 0 0, TC "Bool"))
   , ("True",    (jp 1 0, TC "Bool"))
@@ -667,6 +673,11 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
     jp m n = Just (m, n)
     a = GV "a"
     b = GV "b"
+
+arityFromType :: Type -> Int
+arityFromType = f 0 where
+  f acc (_ :-> r) = f (acc + 1) r
+  f acc _ = acc
 
 -- TODO: These dictionaries should not be built-in!
 hacks :: [(String, Ast)]

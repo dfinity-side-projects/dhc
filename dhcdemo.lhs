@@ -24,7 +24,7 @@ function load8(addr) { return dv.getUint8(addr); }
 function load32(addr) { return dv.getUint32(addr, true); }
 function store32(addr, x) { dv.setUint32(addr, x, true); }
 function runWasmInts(a){WebAssembly.instantiate(new Uint8Array(a),
-{i:{f:(n,sp,hp) => { return Haste.syscall(n,sp,hp); } }}).then(x => {
+{dhc:{system:(n,sp,hp) => { return Haste.syscall(n,sp,hp); } }}).then(x => {
 expo = x.instance.exports;
 dv = new DataView(expo.mem.buffer);
 document.getElementById('out').innerHTML ="";

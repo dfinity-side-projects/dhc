@@ -155,7 +155,7 @@ intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
   , I32_const 16
   , I32_add
   , Set_global hp
-  ] ++ fromIns (UpdatePop 2) ++ [callEval, End]
+  ] ++ concatMap fromIns [UpdatePop 2, Eval] ++ [End]
 
 cmpAsm :: WasmOp -> [WasmOp]
 cmpAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
@@ -195,7 +195,7 @@ cmpAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
   , I32_const 8
   , I32_add
   , Set_global hp
-  ] ++ fromIns (UpdatePop 2) ++ [callEval, End]
+  ] ++ concatMap fromIns [UpdatePop 2, Eval] ++ [End]
 
 boolAsm :: WasmOp -> [WasmOp]
 boolAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
@@ -235,7 +235,7 @@ boolAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
   , I32_const 8
   , I32_add
   , Set_global hp
-  ] ++ fromIns (UpdatePop 2) ++ [callEval, End]
+  ] ++ concatMap fromIns [UpdatePop 2, Eval] ++ [End]
 
 catAsm :: [WasmOp]
 catAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
@@ -359,7 +359,7 @@ catAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
   , Get_global hp
   , I32_add
   , Set_global hp
-  ] ++ fromIns (UpdatePop 2) ++ [callEval, End]
+  ] ++ concatMap fromIns [UpdatePop 2, Eval] ++ [End]
 
 strEqAsm :: [WasmOp]
 strEqAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
@@ -445,7 +445,7 @@ strEqAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
   , I32_const 8
   , I32_add
   , Set_global hp
-  ] ++ fromIns (UpdatePop 2) ++ [callEval, End]
+  ] ++ concatMap fromIns [UpdatePop 2, Eval] ++ [End]
 
 syscallPureAsm :: [WasmOp]
 syscallPureAsm =
@@ -656,14 +656,8 @@ syscallAsm =
   ]
 
 -- Primitive functions.
-data Prim = Prim
-  { primName :: String
-  , primArity :: Int
-  , primAsm :: [WasmOp]
-  }
-
-prims :: [Prim]
-prims = fmap mkPrim
+prims :: [(String, [WasmOp])]
+prims =
   [ ("+", intAsm I64_add)
   , ("-", intAsm I64_sub)
   , ("*", intAsm I64_mul)
@@ -681,18 +675,19 @@ prims = fmap mkPrim
   , ("#syscall", syscallAsm)
   , ("#syscallPure", syscallPureAsm)
   ]
-  where mkPrim (s, as) = Prim { primName = s, primArity = 2, primAsm = as }
 
--- | First element is the list of exported functions.
--- The second contains the arity and index of each global, both predefined
--- primitives and user-defined functions, exported or not.
-type GlobalTable = ([String], M.Map String (Int, Int))
+-- | Tuple of:
+--   1. List of exported functions.
+--   2. Arity of each user-defined function, whether exported or not.
+--   3. List of wdecl functions.
+-- Hopefully, the third item will soon supersede the other two.
+type GlobalTable = ([String], M.Map String Int, [(String, ([WasmType], [WasmType]))])
 
 hsToWasmWebDemo :: String -> Either String [Int]
 hsToWasmWebDemo prog = snd <$> hsToWasm webDemoSys prog
 
 hsToGMachineWebDemo :: String -> Either String (GlobalTable, [(String, [Ins])])
-hsToGMachineWebDemo haskell = fst . astToIns <$> hsToAst webDemoSys haskell
+hsToGMachineWebDemo haskell = astToIns <$> hsToAst webDemoSys haskell
 
 -- | Returns
 --   ( arities of synchronous exports
@@ -709,8 +704,8 @@ webDemoSys = (M.fromList
   ], \_ _ -> Nothing)
   where io = TApp (TC "IO")
 
-astToIns :: AstPlus -> ((GlobalTable, [(String, [Ins])]), [(String, ([WasmType], [WasmType]))])
-astToIns (AstPlus es ws storage ds ts) = (((es, funs), second compile <$> ds), wrapme) where
+astToIns :: AstPlus -> (GlobalTable, [(String, [Ins])])
+astToIns (AstPlus es ws storage ds ts) = ((es, funs, wrapme), second compile <$> ds) where
   compile d = evalState (mk1 storage d) []
   wrapme = wasmize <$> ws
   wasmize w = (w, wasmType [] $ fst $ fromJust $ lookup w ts)
@@ -726,20 +721,13 @@ astToIns (AstPlus es ws storage ds ts) = (((es, funs), second compile <$> ds), w
   translateType (TC "Port") = Ref "Port"
   translateType (TC "Databuf") = Ref "Databuf"
   translateType t = error $ "no corresponding wasm type: " ++ show t
-  ps = zipWith (\p i -> (primName p, (primArity p, i))) prims [0..]
-  funs = M.fromList $ ps ++ zipWith (\(name, Ast (Lam as _)) i -> (name, (length as, i))) ds [length prims..]
+  funs = M.fromList $ ((\(name, Ast (Lam as _)) -> (name, length as)) <$> ds)
 
 tag_const :: Tag -> WasmOp
 tag_const = I32_const . fromIntegral . fromEnum
 
--- | Returns arity and index of given global function.
-getGlobal :: M.Map String (Int, Int) -> String -> (Int, Int)
-getGlobal funs v = case M.lookup v funs of
-  Nothing -> error $ "no such global: " ++ v
-  Just (i, j) -> (i, j)
-
-insToBin :: ((GlobalTable, [(String, [Ins])]), [(String, ([WasmType], [WasmType]))]) -> (([(String, Int)], [(String, ([WasmType], [WasmType]))]), [Int])
-insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs s)) <$> exs), wrapme), wasm) where
+insToBin :: (GlobalTable, [(String, [Ins])]) -> (([(String, Int)], [(String, ([WasmType], [WasmType]))]), [Int])
+insToBin ((exs, funs, wrapme), gmachine) = ((((\s -> (s, fst $ getGlobal s)) <$> exs), wrapme), wasm) where
   wasm = concat
     [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
     , sect 1 $ uncurry encSig . snd <$> BM.assocs typeMap  -- Type section.
@@ -765,7 +753,7 @@ insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs 
       ++ [exportFun ('w':'_':s) ('@':s) | (s, _) <- wrapme]
     , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
     ]
-  imps = [("i", "f", [I32, I32, I32], [])]
+  imps = [("dhc", "system", [I32, I32, I32], [])]
   -- 0 = external_kind Function.
   importFun (m, f, i, o) = encStr m ++ encStr f ++ [0, typeNo i o]
   typeNo ins outs = typeMap BM.!> (ins, outs)
@@ -780,6 +768,11 @@ insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs 
   localCount "#syscall" = 2
   localCount "#syscallPure" = 2
   localCount _ = 0
+  -- Returns arity and 0-indexed number of given global function.
+  getGlobal s = case M.lookup s funs of
+    Just arity -> (arity, wasmFunNo s - firstPrim)
+    Nothing -> (arityFromType $ snd $ preludeMinimal M.! s, wasmFunNo s - firstPrim)
+  firstPrim = wasmFunNo $ fst $ head prims
   wasmFuns =
     [ ("#eval", ((typeNo [] [], 0), evalAsm))
     , ("#getsp", ((typeNo [] [I32], 0), [Get_global sp, End]))
@@ -790,9 +783,9 @@ insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs 
     -- Primitive functions.
     -- The assembly for "#eval" requires that the primitive functions
     -- directly precede those defined in the program.
-    ++ ((\p -> (primName p, ((typeNo [] [], localCount $ primName p), primAsm p))) <$> prims)
+    ++ ((\(s, p) -> (s, ((typeNo [] [], localCount s), p))) <$> prims)
     -- Functions from the program.
-    ++ ((\(f, g) -> (f, ((typeNo [] [], 0), (++ [End]) $ concatMap (fromInsWith $ getGlobal funs) g))) <$> gmachine)
+    ++ ((\(f, g) -> (f, ((typeNo [] [], 0), (++ [End]) $ concatMap (fromInsWith getGlobal) g))) <$> gmachine)
     -- Outer "main" function. It calls the internal "main" function (which
     -- is "_main" if exported).
     ++ [("#main", ((typeNo [] [], 0),
@@ -805,8 +798,8 @@ insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs 
         , I32_sub
         , Set_global sp
         ]
-        ++ concatMap (fromInsWith $ getGlobal funs) [PushGlobal "main", MkAp]
-        ++ [ callEval, End ]
+        ++ concatMap (fromInsWith getGlobal) [PushGlobal "main", MkAp, Eval]
+        ++ [End]
       ))]
     -- Wrappers for functions in "wdecl" section.
     ++ (wrap <$> wrapme)
@@ -1022,7 +1015,6 @@ insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs 
     ] ++ nest n ++ [End]
     where
       n = length prims + length gmachine
-      offset = wasmFunNo (primName $ head prims) - 1
       nest 0 =
         [ Get_global bp  -- case [bp + 4]
         , I32_const 4
@@ -1030,7 +1022,7 @@ insToBin (((exs, funs), gmachine), wrapme) = ((((\s -> (s, fst $ getGlobal funs 
         , I32_load 2 0
         , Br_table [0..n-1] n
         ]
-      nest k = [Block Nada $ nest $ k - 1, Call $ offset + k, Br $ n - k]
+      nest k = [Block Nada $ nest $ k - 1, Call $ firstPrim + k - 1, Br $ n - k]
 
 leb128 :: Int -> [Int]
 leb128 n | n < 64    = [n]
