@@ -112,570 +112,6 @@ encWasmOp op = case op of
   Loop _ as -> [3, 0x40] ++ concatMap encWasmOp as ++ [0xb]
   _ -> maybe (error $ "unsupported: " ++ show op) pure $ lookup op rZeroOps
 
--- Evals (reducing to WHNF) are represented as the WebAssembly opcode Call 1.
--- These may be remapped to a different call because of imports.
-callEval :: WasmOp
-callEval = Call 1
-
-intAsm :: WasmOp -> [WasmOp]
-intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
-  [ Get_global hp  -- [hp] = TagInt
-  , tag_const TagInt
-  , I32_store 2 0
-  -- [hp + 8] = [[sp + 4] + 8] `op` [[sp + 8] + 8]
-  , Get_global hp  -- PUSH hp + 8
-  , I32_const 8
-  , I32_add
-  , Get_global sp  -- PUSH [[sp + 4] + 8]
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , I32_const 8
-  , I32_add
-  , I64_load 3 0
-  , Get_global sp  -- PUSH [[sp + 8] + 8]
-  , I32_const 8
-  , I32_add
-  , I32_load 2 0
-  , I32_const 8
-  , I32_add
-  , I64_load 3 0
-  , op
-  , I64_store 3 0
-  , Get_global sp  -- [sp + 8] = hp
-  , I32_const 8
-  , I32_add
-  , Get_global hp
-  , I32_store 2 0
-  , Get_global sp  -- sp = sp + 4
-  , I32_const 4
-  , I32_add
-  , Set_global sp
-  , Get_global hp  -- hp = hp + 16
-  , I32_const 16
-  , I32_add
-  , Set_global hp
-  ] ++ concatMap fromIns [UpdatePop 2, Eval] ++ [End]
-
-cmpAsm :: WasmOp -> [WasmOp]
-cmpAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
-  [ Get_global hp  -- [hp] = TagSum
-  , tag_const TagSum
-  , I32_store 2 0
-  -- [hp + 4] = [[sp + 4] + 8] == [[sp + 8] + 8]
-  , Get_global hp  -- PUSH hp + 4
-  , I32_const 4
-  , I32_add
-  , Get_global sp  -- PUSH [[sp + 4] + 8]
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , I32_const 8
-  , I32_add
-  , I64_load 3 0
-  , Get_global sp  -- PUSH [[sp + 8] + 8]
-  , I32_const 8
-  , I32_add
-  , I32_load 2 0
-  , I32_const 8
-  , I32_add
-  , I64_load 3 0
-  , op
-  , I32_store 2 0
-  , Get_global sp  -- [sp + 8] = hp
-  , I32_const 8
-  , I32_add
-  , Get_global hp
-  , I32_store 2 0
-  , Get_global sp  -- sp = sp + 4
-  , I32_const 4
-  , I32_add
-  , Set_global sp
-  , Get_global hp  -- hp = hp + 8
-  , I32_const 8
-  , I32_add
-  , Set_global hp
-  ] ++ concatMap fromIns [UpdatePop 2, Eval] ++ [End]
-
-boolAsm :: WasmOp -> [WasmOp]
-boolAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
-  [ Get_global hp  -- [hp] = TagSum
-  , tag_const TagSum
-  , I32_store 2 0
-  -- [hp + 4] = [[sp + 4] + 4] `op` [[sp + 8] + 4]
-  , Get_global hp
-  , I32_const 4
-  , I32_add
-  , Get_global sp
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , Get_global sp
-  , I32_const 8
-  , I32_add
-  , I32_load 2 0
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , op
-  , I32_store 2 0
-  , Get_global sp  -- [sp + 8] = hp
-  , I32_const 8
-  , I32_add
-  , Get_global hp
-  , I32_store 2 0
-  , Get_global sp  -- sp = sp + 4
-  , I32_const 4
-  , I32_add
-  , Set_global sp
-  , Get_global hp  -- hp = hp + 8
-  , I32_const 8
-  , I32_add
-  , Set_global hp
-  ] ++ concatMap fromIns [UpdatePop 2, Eval] ++ [End]
-
-catAsm :: [WasmOp]
-catAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
-  [ Get_global sp  -- PUSH sp + 8
-  , I32_const 8
-  , I32_add
-  , Get_global hp  -- PUSH hp
-  , Get_global hp  -- [hp] = TagString
-  , tag_const TagString
-  , I32_store 2 0
-
-  , Get_global hp -- [hp + 4] = [[sp + 4] + 4] + [[sp + 8] + 4]
-  , I32_const 4
-  , I32_add
-  , Get_global sp
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , Get_global sp
-  , I32_const 8
-  , I32_add
-  , I32_load 2 0
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , I32_add
-  , I32_store 2 0
-  , Get_global sp  -- bp = [[sp + 4] + 4]
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , Set_global bp
-  , Get_global hp  -- hp = hp + 8
-  , I32_const 8
-  , I32_add
-  , Set_global hp
-  , Get_global bp  -- PUSH bp
-  , Block Nada
-    [ Loop Nada
-      [ Get_global bp  -- if (bp == 0) break;
-      , I32_eqz
-      , Br_if 1
-
-      , Get_global bp  -- bp = bp - 1
-      , I32_const 1
-      , I32_sub
-      , Set_global bp
-
-      , Get_global hp  -- [hp + i] = [[sp + 4] + 8 + i] | i <- [0..bp - 1]
-      , Get_global bp
-      , I32_add
-      , Get_global sp
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
-      , I32_const 8
-      , I32_add
-      , Get_global bp
-      , I32_add
-      , I32_load8_u 0 0
-      , I32_store8 0 0
-      , Br 0
-      ]
-    ]
-  , Get_global hp  -- hp = hp + old_bp  ; Via POP.
-  , I32_add
-  , Set_global hp
-  , Get_global sp  -- bp = [[sp + 8] + 4]
-  , I32_const 8
-  , I32_add
-  , I32_load 2 0
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , Set_global bp
-  , Get_global bp  -- PUSH bp
-  , Block Nada
-    [ Loop Nada
-      [ Get_global bp  -- if (bp == 0) break;
-      , I32_eqz
-      , Br_if 1
-      , Get_global bp  -- bp = bp - 1
-      , I32_const 1
-      , I32_sub
-      , Set_global bp
-      , Get_global hp  -- [hp + i] = [[sp + 8] + 8 + i] | i <- [0..bp - 1]
-      , Get_global bp
-      , I32_add
-      , Get_global sp
-      , I32_const 8
-      , I32_add
-      , I32_load 2 0
-      , I32_const 8
-      , I32_add
-      , Get_global bp
-      , I32_add
-      , I32_load8_u 0 0
-      , I32_store8 0 0
-      , Br 0
-      ]
-    ]
-  , Get_global hp  -- hp = hp + old_bp  ; Via POP.
-  , I32_add
-  , Set_global hp
-  , I32_store 2 0  -- [sp + 8] = old_hp  ; Via POPs.
-  , Get_global sp  -- sp = sp + 4
-  , I32_const 4
-  , I32_add
-  , Set_global sp
-  , I32_const 0  -- Align hp.
-  , Get_global hp
-  , I32_sub
-  , I32_const 3
-  , I32_and
-  , Get_global hp
-  , I32_add
-  , Set_global hp
-  ] ++ concatMap fromIns [UpdatePop 2, Eval] ++ [End]
-
-strEqAsm :: [WasmOp]
-strEqAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
-  [ Get_global sp  -- PUSH sp + 8
-  , I32_const 8
-  , I32_add
-  , Get_global hp  -- PUSH hp
-  , Get_global hp  -- [hp] = TagSum
-  , tag_const TagSum
-  , I32_store 2 0
-  , Get_global hp  -- [hp + 4] = 0
-  , I32_const 4
-  , I32_add
-  , I32_const 0
-  , I32_store 2 0
-
-  , Get_global sp  -- bp = [[sp + 4] + 4]
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , Set_global bp
-
-  , Block Nada
-    [ Get_global sp  -- if bp /= [[sp + 8] + 4] then break
-    , I32_const 8
-    , I32_add
-    , I32_load 2 0
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , Get_global bp
-    , I32_ne
-    , Br_if 0
-
-    , Loop Nada
-      [ Block Nada
-        [ Get_global bp  -- if bp == 0 then break.
-        , I32_eqz
-        , Br_if 0
-        , Get_global bp  -- bp = bp - 1
-        , I32_const 1
-        , I32_sub
-        , Set_global bp
-
-        , Get_global sp  -- [[sp + 4] + 8 + bp].8u /= [[sp + 8] + 8 + bp].8u
-        , I32_const 4
-        , I32_add
-        , I32_load 2 0
-        , I32_const 8
-        , I32_add
-        , Get_global bp
-        , I32_add
-        , I32_load8_u 0 0
-        , Get_global sp
-        , I32_const 8
-        , I32_add
-        , I32_load 2 0
-        , I32_const 8
-        , I32_add
-        , Get_global bp
-        , I32_add
-        , I32_load8_u 0 0
-        , I32_ne
-        , Br_if 2  -- Break if unequal characters found.
-        , Br 1  -- Keep looping.
-        ]
-      ]
-    , Get_global hp  -- [hp + 4] = 1
-    , I32_const 4
-    , I32_add
-    , I32_const 1
-    , I32_store 2 0
-    ]
-  , I32_store 2 0  -- [sp + 8] = old_hp  ; Via POPs.
-  , Get_global sp  -- sp = sp + 4
-  , I32_const 4
-  , I32_add
-  , Set_global sp
-  , Get_global hp  -- hp = hp + 8
-  , I32_const 8
-  , I32_add
-  , Set_global hp
-  ] ++ concatMap fromIns [UpdatePop 2, Eval] ++ [End]
-
-syscallPureAsm :: [WasmOp]
-syscallPureAsm =
-  -- Example:
-  --
-  --   beaconAt 123
-  --
-  -- becomes:
-  --
-  --   (#syscallPure 1 999) (Var "beaconAt" :@ 123)
-  --
-  -- The number of arguments to "beaconAt" is 1.
-  -- The syscall number is 999.
-  --
-  -- After removing the innermost spine, we have:
-  --
-  --   1, 999, (#syscallPure 1 999), (Var "beaconAt" :@ 123)
-  [ Get_global sp  -- sp = sp + 12
-  , I32_const 12
-  , I32_add
-  , Set_global sp
-  , Get_global sp  -- [[sp - 4] + 8] is now the syscall number.
-  , I32_const 4
-  , I32_sub
-  , I32_load 2 0
-  , I32_const 8
-  , I32_add
-  , I32_load 2 0
-  , Get_global sp  -- local0 = [[sp - 8] + 8], the number of arguments.
-  , I32_const 8
-  , I32_sub
-  , I32_load 2 0
-  , I32_const 8
-  , I32_add
-  , I32_load 2 0
-  , Tee_local 0  -- local1 = local0
-  , Set_local 1
-
-  , Block Nada
-    [ Loop Nada  -- Encode all arguments.
-      [ Get_local 0  -- Break if local0 == 0.
-      , I32_eqz
-      , Br_if 1
-      -- Debone next argument...
-      , Get_global sp
-      , Get_global sp
-      , Get_local 1  -- [sp] = [[sp + 4*local1] + 12]
-      , I32_const 4
-      , I32_mul
-      , I32_add
-      , I32_load 2 0
-      , I32_const 12
-      , I32_add
-      , I32_load 2 0
-      , I32_store 2 0
-      , Get_global sp  -- sp = sp - 4
-      , I32_const 4
-      , I32_sub
-      , Set_global sp
-      -- ... then evaluate. TODO: Reduce to normal form.
-      , callEval
-      , Get_local 0
-      , I32_const 1
-      , I32_sub
-      , Set_local 0
-      , Br 0
-      ]
-    ]
-  -- Example stack now holds:
-  --   123, 123
-  , Get_global sp  -- #syscall(syscall_number, sp, hp)
-  , Get_global hp
-  , Call 0
-  -- Because the syscall cannot modify sp or hp, our convention is that
-  --   [sp] = result ; [sp - 4] = hp_new
-  -- We update the globals here, in WebAssembly.
-  , Get_global sp  -- hp = [sp - 4]
-  , I32_const 4
-  , I32_sub
-  , I32_load 2 0
-  , Set_global hp
-  , Get_global sp  -- [sp + 8*argCount] = [sp]
-  , Get_local 1
-  , I32_const 8
-  , I32_mul
-  , I32_add
-  , Get_global sp
-  , I32_load 2 0
-  , I32_store 2 0
-  , Get_global sp  -- sp = sp + 8*argCount - 4
-  , Get_local 1
-  , I32_const 8
-  , I32_mul
-  , I32_add
-  , I32_const 4
-  , I32_sub
-  , Set_global sp
-  -- No update (normal evaluation, not lazy). Hopefully this syscall is cheap!
-  , End
-  ]
-
-syscallAsm :: [WasmOp]
-syscallAsm =
-  -- Example:
-  --
-  --   putStr ("He" ++ "llo")
-  --
-  -- becomes:
-  --
-  --   (#syscall 1 21) ("He" ++ "llo") #RealWorld
-  --
-  -- After removing the innermost spine, we have:
-  --
-  --   1, 21, (#syscall 1 21), (... :@ ("He" ++ "llo")), (... :@ #RealWorld)
-  --
-  -- That is, the last two arguments are still on a spine, and we retain
-  -- a pointer to `#syscall 1 21`. Normally, this pointer enables sharing
-  -- (laziness) but we ignore it in this case because it's a syscall with
-  -- a potential side effect.
-  [ Get_global sp  -- sp = sp + 12
-  , I32_const 12
-  , I32_add
-  , Set_global sp
-  , Get_global sp  -- [[sp - 4] + 8] is now the syscall number.
-  , I32_const 4
-  , I32_sub
-  , I32_load 2 0
-  , I32_const 8
-  , I32_add
-  , I32_load 2 0
-  , Get_global sp  -- local0 = [[sp - 8] + 8], the number of arguments.
-  , I32_const 8
-  , I32_sub
-  , I32_load 2 0
-  , I32_const 8
-  , I32_add
-  , I32_load 2 0
-  , Tee_local 0  -- local1 = local0
-  , Set_local 1
-
-  , Block Nada
-    [ Loop Nada  -- Encode all arguments.
-      [ Get_local 0  -- Break if local0 == 0.
-      , I32_eqz
-      , Br_if 1
-      -- Debone next argument...
-      , Get_global sp
-      , Get_global sp
-      , Get_local 1  -- [sp] = [[sp + 4*local1] + 12]
-      , I32_const 4
-      , I32_mul
-      , I32_add
-      , I32_load 2 0
-      , I32_const 12
-      , I32_add
-      , I32_load 2 0
-      , I32_store 2 0
-      , Get_global sp  -- sp = sp - 4
-      , I32_const 4
-      , I32_sub
-      , Set_global sp
-      -- ... then evaluate. TODO: Reduce to normal form.
-      , callEval
-      , Get_local 0
-      , I32_const 1
-      , I32_sub
-      , Set_local 0
-      , Br 0
-      ]
-    ]
-  -- Example stack now holds:
-  --   "Hello", ("He" ++ "llo"), (... :@ #RealWorld)
-  , Get_global sp  -- #syscall(syscall_number, sp, hp)
-  , Get_global hp
-  , Call 0
-  -- Our convention:
-  --   [sp] = result ; [sp - 4] = hp_new
-  -- We update the globals here, in WebAssembly.
-  , Get_global sp  -- hp = [sp - 4]
-  , I32_const 4
-  , I32_sub
-  , I32_load 2 0
-  , Set_global hp
-  , Get_global sp  -- [sp + 8*argCount] = [sp]
-  , Get_local 1
-  , I32_const 8
-  , I32_mul
-  , I32_add
-  , Get_global sp
-  , I32_load 2 0
-  , I32_store 2 0
-  , Get_global sp  -- sp = sp + 8*argCount - 4
-  , Get_local 1
-  , I32_const 8
-  , I32_mul
-  , I32_add
-  , I32_const 4
-  , I32_sub
-  , Set_global sp
-  -- Return (result, #RealWorld).
-  , Get_global sp  -- [sp + 8] = 42
-  , I32_const 8
-  , I32_add
-  , I32_const 42
-  , I32_store 2 0
-  ] ++ concatMap fromIns [Copro 0 2] ++
-  [ End
-  ]
-
--- Primitive functions.
-prims :: [(String, [WasmOp])]
-prims =
-  [ ("+", intAsm I64_add)
-  , ("-", intAsm I64_sub)
-  , ("*", intAsm I64_mul)
-  , ("div", intAsm I64_div_s)
-  , ("mod", intAsm I64_rem_s)
-  , ("Int-==", cmpAsm I64_eq)
-  , ("<", cmpAsm I64_lt_s)
-  , (">", cmpAsm I64_gt_s)
-  , ("<=", cmpAsm I64_le_s)
-  , (">=", cmpAsm I64_ge_s)
-  , ("&&", boolAsm I32_and)
-  , ("||", boolAsm I32_or)
-  , ("++", catAsm)
-  , ("String-==", strEqAsm)
-  , ("#syscall", syscallAsm)
-  , ("#syscallPure", syscallPureAsm)
-  ]
-
 -- | Tuple of:
 --   1. List of exported functions.
 --   2. Arity of each user-defined function, whether exported or not.
@@ -785,7 +221,7 @@ insToBin ((exs, funs, wrapme), gmachine) = ((((\s -> (s, fst $ getGlobal s)) <$>
     -- directly precede those defined in the program.
     ++ ((\(s, p) -> (s, ((typeNo [] [], localCount s), p))) <$> prims)
     -- Functions from the program.
-    ++ ((\(f, g) -> (f, ((typeNo [] [], 0), (++ [End]) $ concatMap (fromInsWith getGlobal) g))) <$> gmachine)
+    ++ ((\(f, g) -> (f, ((typeNo [] [], 0), (++ [End]) $ concatMap fromIns g))) <$> gmachine)
     -- Outer "main" function. It calls the internal "main" function (which
     -- is "_main" if exported).
     ++ [("#main", ((typeNo [] [], 0),
@@ -798,7 +234,7 @@ insToBin ((exs, funs, wrapme), gmachine) = ((((\s -> (s, fst $ getGlobal s)) <$>
         , I32_sub
         , Set_global sp
         ]
-        ++ concatMap (fromInsWith getGlobal) [PushGlobal "main", MkAp, Eval]
+        ++ concatMap fromIns [PushGlobal "main", MkAp, Eval]
         ++ [End]
       ))]
     -- Wrappers for functions in "wdecl" section.
@@ -925,13 +361,8 @@ insToBin ((exs, funs, wrapme), gmachine) = ((((\s -> (s, fst $ getGlobal s)) <$>
   wdeclOut _ = error "TODO"
   sect t xs = t : lenc (varlen xs ++ concat xs)
   encStr s = lenc $ ord <$> s
-  encProcedure ((_, 0), body) = lenc $ 0:concatMap encWasmOp (remap <$> body)
-  encProcedure ((_, locCount), body) = lenc $ ([1, locCount, encType I32] ++) $ concatMap encWasmOp (remap <$> body)
-  remap (Call 1) = Call $ wasmFunNo "#eval"
-  remap (If x as) = If x $ remap <$> as
-  remap (Block x as) = Block x $ remap <$> as
-  remap (Loop x as) = Loop x $ remap <$> as
-  remap o = o
+  encProcedure ((_, 0), body) = lenc $ 0:concatMap encWasmOp body
+  encProcedure ((_, locCount), body) = lenc $ ([1, locCount, encType I32] ++) $ concatMap encWasmOp body
   encType I32 = 0x7f
   encType I64 = 0x7e
   encType (Ref _) = encType I32
@@ -1024,6 +455,854 @@ insToBin ((exs, funs, wrapme), gmachine) = ((((\s -> (s, fst $ getGlobal s)) <$>
         ]
       nest k = [Block Nada $ nest $ k - 1, Call $ firstPrim + k - 1, Br $ n - k]
 
+  intAsm :: WasmOp -> [WasmOp]
+  intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
+    [ Get_global hp  -- [hp] = TagInt
+    , tag_const TagInt
+    , I32_store 2 0
+    -- [hp + 8] = [[sp + 4] + 8] `op` [[sp + 8] + 8]
+    , Get_global hp  -- PUSH hp + 8
+    , I32_const 8
+    , I32_add
+    , Get_global sp  -- PUSH [[sp + 4] + 8]
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 8
+    , I32_add
+    , I64_load 3 0
+    , Get_global sp  -- PUSH [[sp + 8] + 8]
+    , I32_const 8
+    , I32_add
+    , I32_load 2 0
+    , I32_const 8
+    , I32_add
+    , I64_load 3 0
+    , op
+    , I64_store 3 0
+    , Get_global sp  -- [sp + 8] = hp
+    , I32_const 8
+    , I32_add
+    , Get_global hp
+    , I32_store 2 0
+    , Get_global sp  -- sp = sp + 4
+    , I32_const 4
+    , I32_add
+    , Set_global sp
+    , Get_global hp  -- hp = hp + 16
+    , I32_const 16
+    , I32_add
+    , Set_global hp
+    ] ++ concatMap fromIns [UpdatePop 2, Eval] ++ [End]
+
+  cmpAsm :: WasmOp -> [WasmOp]
+  cmpAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
+    [ Get_global hp  -- [hp] = TagSum
+    , tag_const TagSum
+    , I32_store 2 0
+    -- [hp + 4] = [[sp + 4] + 8] == [[sp + 8] + 8]
+    , Get_global hp  -- PUSH hp + 4
+    , I32_const 4
+    , I32_add
+    , Get_global sp  -- PUSH [[sp + 4] + 8]
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 8
+    , I32_add
+    , I64_load 3 0
+    , Get_global sp  -- PUSH [[sp + 8] + 8]
+    , I32_const 8
+    , I32_add
+    , I32_load 2 0
+    , I32_const 8
+    , I32_add
+    , I64_load 3 0
+    , op
+    , I32_store 2 0
+    , Get_global sp  -- [sp + 8] = hp
+    , I32_const 8
+    , I32_add
+    , Get_global hp
+    , I32_store 2 0
+    , Get_global sp  -- sp = sp + 4
+    , I32_const 4
+    , I32_add
+    , Set_global sp
+    , Get_global hp  -- hp = hp + 8
+    , I32_const 8
+    , I32_add
+    , Set_global hp
+    ] ++ concatMap fromIns [UpdatePop 2, Eval] ++ [End]
+
+  boolAsm :: WasmOp -> [WasmOp]
+  boolAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
+    [ Get_global hp  -- [hp] = TagSum
+    , tag_const TagSum
+    , I32_store 2 0
+    -- [hp + 4] = [[sp + 4] + 4] `op` [[sp + 8] + 4]
+    , Get_global hp
+    , I32_const 4
+    , I32_add
+    , Get_global sp
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , Get_global sp
+    , I32_const 8
+    , I32_add
+    , I32_load 2 0
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , op
+    , I32_store 2 0
+    , Get_global sp  -- [sp + 8] = hp
+    , I32_const 8
+    , I32_add
+    , Get_global hp
+    , I32_store 2 0
+    , Get_global sp  -- sp = sp + 4
+    , I32_const 4
+    , I32_add
+    , Set_global sp
+    , Get_global hp  -- hp = hp + 8
+    , I32_const 8
+    , I32_add
+    , Set_global hp
+    ] ++ concatMap fromIns [UpdatePop 2, Eval] ++ [End]
+
+  catAsm :: [WasmOp]
+  catAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
+    [ Get_global sp  -- PUSH sp + 8
+    , I32_const 8
+    , I32_add
+    , Get_global hp  -- PUSH hp
+    , Get_global hp  -- [hp] = TagString
+    , tag_const TagString
+    , I32_store 2 0
+
+    , Get_global hp -- [hp + 4] = [[sp + 4] + 4] + [[sp + 8] + 4]
+    , I32_const 4
+    , I32_add
+    , Get_global sp
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , Get_global sp
+    , I32_const 8
+    , I32_add
+    , I32_load 2 0
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_add
+    , I32_store 2 0
+    , Get_global sp  -- bp = [[sp + 4] + 4]
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , Set_global bp
+    , Get_global hp  -- hp = hp + 8
+    , I32_const 8
+    , I32_add
+    , Set_global hp
+    , Get_global bp  -- PUSH bp
+    , Block Nada
+      [ Loop Nada
+        [ Get_global bp  -- if (bp == 0) break;
+        , I32_eqz
+        , Br_if 1
+
+        , Get_global bp  -- bp = bp - 1
+        , I32_const 1
+        , I32_sub
+        , Set_global bp
+
+        , Get_global hp  -- [hp + i] = [[sp + 4] + 8 + i] | i <- [0..bp - 1]
+        , Get_global bp
+        , I32_add
+        , Get_global sp
+        , I32_const 4
+        , I32_add
+        , I32_load 2 0
+        , I32_const 8
+        , I32_add
+        , Get_global bp
+        , I32_add
+        , I32_load8_u 0 0
+        , I32_store8 0 0
+        , Br 0
+        ]
+      ]
+    , Get_global hp  -- hp = hp + old_bp  ; Via POP.
+    , I32_add
+    , Set_global hp
+    , Get_global sp  -- bp = [[sp + 8] + 4]
+    , I32_const 8
+    , I32_add
+    , I32_load 2 0
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , Set_global bp
+    , Get_global bp  -- PUSH bp
+    , Block Nada
+      [ Loop Nada
+        [ Get_global bp  -- if (bp == 0) break;
+        , I32_eqz
+        , Br_if 1
+        , Get_global bp  -- bp = bp - 1
+        , I32_const 1
+        , I32_sub
+        , Set_global bp
+        , Get_global hp  -- [hp + i] = [[sp + 8] + 8 + i] | i <- [0..bp - 1]
+        , Get_global bp
+        , I32_add
+        , Get_global sp
+        , I32_const 8
+        , I32_add
+        , I32_load 2 0
+        , I32_const 8
+        , I32_add
+        , Get_global bp
+        , I32_add
+        , I32_load8_u 0 0
+        , I32_store8 0 0
+        , Br 0
+        ]
+      ]
+    , Get_global hp  -- hp = hp + old_bp  ; Via POP.
+    , I32_add
+    , Set_global hp
+    , I32_store 2 0  -- [sp + 8] = old_hp  ; Via POPs.
+    , Get_global sp  -- sp = sp + 4
+    , I32_const 4
+    , I32_add
+    , Set_global sp
+    , I32_const 0  -- Align hp.
+    , Get_global hp
+    , I32_sub
+    , I32_const 3
+    , I32_and
+    , Get_global hp
+    , I32_add
+    , Set_global hp
+    ] ++ concatMap fromIns [UpdatePop 2, Eval] ++ [End]
+
+  strEqAsm :: [WasmOp]
+  strEqAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
+    [ Get_global sp  -- PUSH sp + 8
+    , I32_const 8
+    , I32_add
+    , Get_global hp  -- PUSH hp
+    , Get_global hp  -- [hp] = TagSum
+    , tag_const TagSum
+    , I32_store 2 0
+    , Get_global hp  -- [hp + 4] = 0
+    , I32_const 4
+    , I32_add
+    , I32_const 0
+    , I32_store 2 0
+
+    , Get_global sp  -- bp = [[sp + 4] + 4]
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , Set_global bp
+
+    , Block Nada
+      [ Get_global sp  -- if bp /= [[sp + 8] + 4] then break
+      , I32_const 8
+      , I32_add
+      , I32_load 2 0
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , Get_global bp
+      , I32_ne
+      , Br_if 0
+
+      , Loop Nada
+        [ Block Nada
+          [ Get_global bp  -- if bp == 0 then break.
+          , I32_eqz
+          , Br_if 0
+          , Get_global bp  -- bp = bp - 1
+          , I32_const 1
+          , I32_sub
+          , Set_global bp
+
+          , Get_global sp  -- [[sp + 4] + 8 + bp].8u /= [[sp + 8] + 8 + bp].8u
+          , I32_const 4
+          , I32_add
+          , I32_load 2 0
+          , I32_const 8
+          , I32_add
+          , Get_global bp
+          , I32_add
+          , I32_load8_u 0 0
+          , Get_global sp
+          , I32_const 8
+          , I32_add
+          , I32_load 2 0
+          , I32_const 8
+          , I32_add
+          , Get_global bp
+          , I32_add
+          , I32_load8_u 0 0
+          , I32_ne
+          , Br_if 2  -- Break if unequal characters found.
+          , Br 1  -- Keep looping.
+          ]
+        ]
+      , Get_global hp  -- [hp + 4] = 1
+      , I32_const 4
+      , I32_add
+      , I32_const 1
+      , I32_store 2 0
+      ]
+    , I32_store 2 0  -- [sp + 8] = old_hp  ; Via POPs.
+    , Get_global sp  -- sp = sp + 4
+    , I32_const 4
+    , I32_add
+    , Set_global sp
+    , Get_global hp  -- hp = hp + 8
+    , I32_const 8
+    , I32_add
+    , Set_global hp
+    ] ++ concatMap fromIns [UpdatePop 2, Eval] ++ [End]
+
+  syscallPureAsm :: [WasmOp]
+  syscallPureAsm =
+    -- Example:
+    --
+    --   beaconAt 123
+    --
+    -- becomes:
+    --
+    --   (#syscallPure 1 999) (Var "beaconAt" :@ 123)
+    --
+    -- The number of arguments to "beaconAt" is 1.
+    -- The syscall number is 999.
+    --
+    -- After removing the innermost spine, we have:
+    --
+    --   1, 999, (#syscallPure 1 999), (Var "beaconAt" :@ 123)
+    [ Get_global sp  -- sp = sp + 12
+    , I32_const 12
+    , I32_add
+    , Set_global sp
+    , Get_global sp  -- [[sp - 4] + 8] is now the syscall number.
+    , I32_const 4
+    , I32_sub
+    , I32_load 2 0
+    , I32_const 8
+    , I32_add
+    , I32_load 2 0
+    , Get_global sp  -- local0 = [[sp - 8] + 8], the number of arguments.
+    , I32_const 8
+    , I32_sub
+    , I32_load 2 0
+    , I32_const 8
+    , I32_add
+    , I32_load 2 0
+    , Tee_local 0  -- local1 = local0
+    , Set_local 1
+
+    , Block Nada
+      [ Loop Nada  -- Encode all arguments.
+        [ Get_local 0  -- Break if local0 == 0.
+        , I32_eqz
+        , Br_if 1
+        -- Debone next argument...
+        , Get_global sp
+        , Get_global sp
+        , Get_local 1  -- [sp] = [[sp + 4*local1] + 12]
+        , I32_const 4
+        , I32_mul
+        , I32_add
+        , I32_load 2 0
+        , I32_const 12
+        , I32_add
+        , I32_load 2 0
+        , I32_store 2 0
+        , Get_global sp  -- sp = sp - 4
+        , I32_const 4
+        , I32_sub
+        , Set_global sp
+        -- ... then evaluate. TODO: Reduce to normal form.
+        , Call $ wasmFunNo "#eval"
+        , Get_local 0
+        , I32_const 1
+        , I32_sub
+        , Set_local 0
+        , Br 0
+        ]
+      ]
+    -- Example stack now holds:
+    --   123, 123
+    , Get_global sp  -- #syscall(syscall_number, sp, hp)
+    , Get_global hp
+    , Call 0
+    -- Because the syscall cannot modify sp or hp, our convention is that
+    --   [sp] = result ; [sp - 4] = hp_new
+    -- We update the globals here, in WebAssembly.
+    , Get_global sp  -- hp = [sp - 4]
+    , I32_const 4
+    , I32_sub
+    , I32_load 2 0
+    , Set_global hp
+    , Get_global sp  -- [sp + 8*argCount] = [sp]
+    , Get_local 1
+    , I32_const 8
+    , I32_mul
+    , I32_add
+    , Get_global sp
+    , I32_load 2 0
+    , I32_store 2 0
+    , Get_global sp  -- sp = sp + 8*argCount - 4
+    , Get_local 1
+    , I32_const 8
+    , I32_mul
+    , I32_add
+    , I32_const 4
+    , I32_sub
+    , Set_global sp
+    -- No update (normal evaluation, not lazy). Hopefully this syscall is cheap!
+    , End
+    ]
+
+  syscallAsm :: [WasmOp]
+  syscallAsm =
+    -- Example:
+    --
+    --   putStr ("He" ++ "llo")
+    --
+    -- becomes:
+    --
+    --   (#syscall 1 21) ("He" ++ "llo") #RealWorld
+    --
+    -- After removing the innermost spine, we have:
+    --
+    --   1, 21, (#syscall 1 21), (... :@ ("He" ++ "llo")), (... :@ #RealWorld)
+    --
+    -- That is, the last two arguments are still on a spine, and we retain
+    -- a pointer to `#syscall 1 21`. Normally, this pointer enables sharing
+    -- (laziness) but we ignore it in this case because it's a syscall with
+    -- a potential side effect.
+    [ Get_global sp  -- sp = sp + 12
+    , I32_const 12
+    , I32_add
+    , Set_global sp
+    , Get_global sp  -- [[sp - 4] + 8] is now the syscall number.
+    , I32_const 4
+    , I32_sub
+    , I32_load 2 0
+    , I32_const 8
+    , I32_add
+    , I32_load 2 0
+    , Get_global sp  -- local0 = [[sp - 8] + 8], the number of arguments.
+    , I32_const 8
+    , I32_sub
+    , I32_load 2 0
+    , I32_const 8
+    , I32_add
+    , I32_load 2 0
+    , Tee_local 0  -- local1 = local0
+    , Set_local 1
+
+    , Block Nada
+      [ Loop Nada  -- Encode all arguments.
+        [ Get_local 0  -- Break if local0 == 0.
+        , I32_eqz
+        , Br_if 1
+        -- Debone next argument...
+        , Get_global sp
+        , Get_global sp
+        , Get_local 1  -- [sp] = [[sp + 4*local1] + 12]
+        , I32_const 4
+        , I32_mul
+        , I32_add
+        , I32_load 2 0
+        , I32_const 12
+        , I32_add
+        , I32_load 2 0
+        , I32_store 2 0
+        , Get_global sp  -- sp = sp - 4
+        , I32_const 4
+        , I32_sub
+        , Set_global sp
+        -- ... then evaluate. TODO: Reduce to normal form.
+        , Call $ wasmFunNo "#eval"
+        , Get_local 0
+        , I32_const 1
+        , I32_sub
+        , Set_local 0
+        , Br 0
+        ]
+      ]
+    -- Example stack now holds:
+    --   "Hello", ("He" ++ "llo"), (... :@ #RealWorld)
+    , Get_global sp  -- #syscall(syscall_number, sp, hp)
+    , Get_global hp
+    , Call 0
+    -- Our convention:
+    --   [sp] = result ; [sp - 4] = hp_new
+    -- We update the globals here, in WebAssembly.
+    , Get_global sp  -- hp = [sp - 4]
+    , I32_const 4
+    , I32_sub
+    , I32_load 2 0
+    , Set_global hp
+    , Get_global sp  -- [sp + 8*argCount] = [sp]
+    , Get_local 1
+    , I32_const 8
+    , I32_mul
+    , I32_add
+    , Get_global sp
+    , I32_load 2 0
+    , I32_store 2 0
+    , Get_global sp  -- sp = sp + 8*argCount - 4
+    , Get_local 1
+    , I32_const 8
+    , I32_mul
+    , I32_add
+    , I32_const 4
+    , I32_sub
+    , Set_global sp
+    -- Return (result, #RealWorld).
+    , Get_global sp  -- [sp + 8] = 42
+    , I32_const 8
+    , I32_add
+    , I32_const 42
+    , I32_store 2 0
+    ] ++ concatMap fromIns [Copro 0 2] ++
+    [ End
+    ]
+
+  -- Primitive functions.
+  prims :: [(String, [WasmOp])]
+  prims =
+    [ ("+", intAsm I64_add)
+    , ("-", intAsm I64_sub)
+    , ("*", intAsm I64_mul)
+    , ("div", intAsm I64_div_s)
+    , ("mod", intAsm I64_rem_s)
+    , ("Int-==", cmpAsm I64_eq)
+    , ("<", cmpAsm I64_lt_s)
+    , (">", cmpAsm I64_gt_s)
+    , ("<=", cmpAsm I64_le_s)
+    , (">=", cmpAsm I64_ge_s)
+    , ("&&", boolAsm I32_and)
+    , ("||", boolAsm I32_or)
+    , ("++", catAsm)
+    , ("String-==", strEqAsm)
+    , ("#syscall", syscallAsm)
+    , ("#syscallPure", syscallPureAsm)
+    ]
+
+  fromIns :: Ins -> [WasmOp]
+  fromIns instruction = case instruction of
+    Trap -> [ Unreachable ]
+    Eval -> [ Call $ wasmFunNo "#eval" ]  -- (Tail call.)
+    PushInt n ->
+      [ Get_global sp  -- [sp] = hp
+      , Get_global hp
+      , I32_store 2 0
+      , Get_global sp  -- sp = sp - 4
+      , I32_const 4
+      , I32_sub
+      , Set_global sp
+      , Get_global hp  -- [hp] = TagInt
+      , tag_const TagInt
+      , I32_store 2 0
+      , Get_global hp  -- [hp + 8] = n
+      , I32_const 8
+      , I32_add
+      , I64_const n
+      , I64_store 3 0
+      , Get_global hp  -- hp = hp + 16
+      , I32_const 16
+      , I32_add
+      , Set_global hp
+      ]
+    -- TODO: Prepopulate heap instead of this expensive code.
+    PushString sbs -> let
+      s = SBS.unpack sbs
+      delta = (4 - (SBS.length sbs `mod` 4)) `mod` 4
+      in
+      [ Get_global sp  -- [sp] = hp
+      , Get_global hp
+      , I32_store 2 0
+      , Get_global sp  -- sp = sp - 4
+      , I32_const 4
+      , I32_sub
+      , Set_global sp
+      , Get_global hp  -- [hp] = TagString
+      , tag_const TagString
+      , I32_store 2 0
+      , Get_global hp  -- [hp + 4] = SBS.length sbs
+      , I32_const 4
+      , I32_add
+      , I32_const $ fromIntegral $ SBS.length sbs
+      , I32_store 2 0
+      , Get_global hp  -- hp = hp + 8
+      , I32_const 8
+      , I32_add
+      , Set_global hp
+      ] ++ concat
+      [ [ Get_global hp
+        , I32_const $ fromIntegral c
+        , I32_store8 0 0
+        , Get_global hp
+        , I32_const 1
+        , I32_add
+        , Set_global hp
+        ] | c <- s] ++
+      [ Get_global hp
+      , I32_const $ fromIntegral delta
+      , I32_add
+      , Set_global hp
+      ]
+    Push n ->
+      [ Get_global sp  -- [sp] = [sp + 4(n + 1)]
+      , Get_global sp
+      , I32_const $ 4*(fromIntegral n + 1)
+      , I32_add
+      , I32_load 2 0
+      , I32_store 2 0
+      , Get_global sp  -- sp = sp - 4
+      , I32_const 4
+      , I32_sub
+      , Set_global sp
+      ]
+    MkAp ->
+      [ Get_global hp  -- [hp] = TagAp
+      , tag_const TagAp
+      , I32_store 2 0
+      , Get_global hp  -- [hp + 8] = [sp + 4]
+      , I32_const 8
+      , I32_add
+      , Get_global sp
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , I32_store 2 0
+      , Get_global hp  -- [hp + 12] = [sp + 8]
+      , I32_const 12
+      , I32_add
+      , Get_global sp
+      , I32_const 8
+      , I32_add
+      , I32_load 2 0
+      , I32_store 2 0
+      , Get_global sp  -- [sp + 8] = hp
+      , I32_const 8
+      , I32_add
+      , Get_global hp
+      , I32_store 2 0
+      , Get_global sp  -- sp = sp + 4
+      , I32_const 4
+      , I32_add
+      , Set_global sp
+      , Get_global hp  -- hp = hp + 16
+      , I32_const 16
+      , I32_add
+      , Set_global hp
+      ]
+    PushGlobal fun | (n, g) <- getGlobal fun ->
+      [ Get_global sp  -- [sp] = hp
+      , Get_global hp
+      , I32_store 2 0
+      , Get_global sp  -- sp = sp - 4
+      , I32_const 4
+      , I32_sub
+      , Set_global sp
+      , Get_global hp  -- [hp] = TagGlobal | (n << 8)
+      , I32_const $ fromIntegral $ fromEnum TagGlobal + 256*n
+      , I32_store 2 0
+      , Get_global hp  -- [hp + 4] = g
+      , I32_const 4
+      , I32_add
+      , I32_const $ fromIntegral g
+      , I32_store 2 0
+      , Get_global hp  -- hp = hp + 16
+      , I32_const 16
+      , I32_add
+      , Set_global hp
+      ]
+    Slide 0 -> []
+    Slide n ->
+      [ Get_global sp  -- [sp + 4*(n + 1)] = [sp + 4]
+      , I32_const $ 4*(fromIntegral n + 1)
+      , I32_add
+      , Get_global sp
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , I32_store 2 0
+      , Get_global sp  -- sp = sp + 4*n
+      , I32_const $ 4*fromIntegral n
+      , I32_add
+      , Set_global sp
+      ]
+    Alloc n -> concat (replicate n
+      [ Get_global sp  -- [sp] = hp
+      , Get_global hp
+      , I32_store 2 0
+      , Get_global hp  -- [hp] = TagInd
+      , tag_const TagInd
+      , I32_store 2 0
+      , Get_global hp  -- hp = hp + 8
+      , I32_const 8
+      , I32_add
+      , Set_global hp
+      , Get_global sp  -- sp = sp - 4
+      , I32_const 4
+      , I32_sub
+      , Set_global sp
+      ])
+    UpdateInd n ->
+      [ Get_global sp  -- sp = sp + 4
+      , I32_const 4
+      , I32_add
+      , Set_global sp
+      , Get_global sp  -- [[sp + 4*(n + 1)] + 4] = [sp]
+      , I32_const $ fromIntegral $ 4*(n + 1)
+      , I32_add
+      , I32_load 2 0
+      , I32_const 4
+      , I32_add
+      , Get_global sp
+      , I32_load 2 0
+      , I32_store 2 0
+      ]
+    UpdatePop n ->
+      [ Get_global sp  -- bp = [sp + 4]
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , Set_global bp
+      , Get_global sp  -- sp = sp + 4*(n + 1)
+      , I32_const $ fromIntegral $ 4*(n + 1)
+      , I32_add
+      , Set_global sp
+      , Get_global sp  -- [[sp + 4]] = Ind
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , tag_const TagInd
+      , I32_store 2 0
+      , Get_global sp  -- [[sp + 4] + 4] = bp
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , I32_const 4
+      , I32_add
+      , Get_global bp
+      , I32_store 2 0
+      ]
+    Copro m n ->
+      [ Get_global hp  -- [hp] = TagSum | (n << 8)
+      , I32_const $ fromIntegral $ fromEnum TagSum + 256 * n
+      , I32_store 2 0
+      , Get_global hp  -- [hp + 4] = m
+      , I32_const 4
+      , I32_add
+      , I32_const $ fromIntegral m
+      , I32_store 2 0
+      ] ++ concat [
+        [ Get_global hp  -- [hp + 4 + 4*i] = [sp + 4*i]
+        , I32_const $ fromIntegral $ 4 + 4*i
+        , I32_add
+        , Get_global sp
+        , I32_const $ fromIntegral $ 4*i
+        , I32_add
+        , I32_load 2 0
+        , I32_store 2 0 ] | i <- [1..n]] ++
+      [ Get_global sp  -- sp = sp + 4*n
+      , I32_const $ fromIntegral $ 4*n
+      , I32_add
+      , Set_global sp
+      , Get_global sp  -- [sp] = hp
+      , Get_global hp
+      , I32_store 2 0
+      , Get_global sp  -- sp = sp - 4
+      , I32_const 4
+      , I32_sub
+      , Set_global sp
+      , Get_global hp  -- hp = hp + 8 + ceil(n / 2) * 8
+      , I32_const $ fromIntegral $ 8 + 8 * ((n + 1) `div` 2)
+      , I32_add
+      , Set_global hp
+      ]
+    Casejump alts0 -> let
+      (underscore, unsortedAlts) = partition (isNothing . fst) alts0
+      alts = sortOn fst unsortedAlts
+      catchall = if null underscore then [Trap] else snd $ head underscore
+      tab = zip (fromJust . fst <$> alts) [0..]
+      m = maximum $ fromJust . fst <$> alts
+      nest j (ins:rest) = pure $ Block Nada $ nest (j + 1) rest ++ concatMap fromIns ins ++ [Br j]
+      nest _ [] = pure $ Block Nada
+        [ Get_global bp  -- [bp + 4]
+        , I32_const 4
+        , I32_add
+        , I32_load 2 0
+        , Br_table [fromIntegral $ fromMaybe (length alts) $ lookup i tab | i <- [0..m]] $ m + 1
+        ]
+      in if null alts then concatMap fromIns catchall else
+      -- [sp + 4] should be:
+      -- 0: TagSum
+      -- 4: "Enum"
+      -- 8, 12, ...: fields
+      [ Get_global sp  -- bp = [sp + 4]
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , Set_global bp
+      , Block Nada $ nest 1 (reverse $ snd <$> alts) ++ concatMap fromIns catchall
+      ]
+
+    Split 0 -> [Get_global sp, I32_const 4, I32_add, Set_global sp]
+    Split n ->
+      [ Get_global sp  -- bp = [sp + 4]
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , Set_global bp
+      , Get_global sp  -- sp = sp + 4
+      , I32_const 4
+      , I32_add
+      , Set_global sp
+      ] ++ concat [
+        [ Get_global sp  -- [sp - 4*(n - i)] = [bp + 4 + 4*i]
+        , I32_const $ fromIntegral $ 4*(n - i)
+        , I32_sub
+        , Get_global bp
+        , I32_const $ fromIntegral $ 4 + 4*i
+        , I32_add
+        , I32_load 2 0
+        , I32_store 2 0
+        ] | i <- [1..n]] ++
+      [ Get_global sp  -- sp = sp - 4*n
+      , I32_const $ fromIntegral $ 4*n
+      , I32_sub
+      , Set_global sp
+      ]
+
 leb128 :: Int -> [Int]
 leb128 n | n < 64    = [n]
          | n < 128   = [128 + n, 0]
@@ -1047,298 +1326,6 @@ hp :: Int
 hp = 1
 bp :: Int
 bp = 2
-
-fromIns :: Ins -> [WasmOp]
-fromIns = fromInsWith (error . show)
-
-fromInsWith :: (String -> (Int, Int)) -> Ins -> [WasmOp]
-fromInsWith lookupGlobal instruction = case instruction of
-  Trap -> [ Unreachable ]
-  Eval -> [ callEval ]  -- (Tail call.)
-  PushInt n ->
-    [ Get_global sp  -- [sp] = hp
-    , Get_global hp
-    , I32_store 2 0
-    , Get_global sp  -- sp = sp - 4
-    , I32_const 4
-    , I32_sub
-    , Set_global sp
-    , Get_global hp  -- [hp] = TagInt
-    , tag_const TagInt
-    , I32_store 2 0
-    , Get_global hp  -- [hp + 8] = n
-    , I32_const 8
-    , I32_add
-    , I64_const n
-    , I64_store 3 0
-    , Get_global hp  -- hp = hp + 16
-    , I32_const 16
-    , I32_add
-    , Set_global hp
-    ]
-  -- TODO: Prepopulate heap instead of this expensive code.
-  PushString sbs -> let
-    s = SBS.unpack sbs
-    delta = (4 - (SBS.length sbs `mod` 4)) `mod` 4
-    in
-    [ Get_global sp  -- [sp] = hp
-    , Get_global hp
-    , I32_store 2 0
-    , Get_global sp  -- sp = sp - 4
-    , I32_const 4
-    , I32_sub
-    , Set_global sp
-    , Get_global hp  -- [hp] = TagString
-    , tag_const TagString
-    , I32_store 2 0
-    , Get_global hp  -- [hp + 4] = SBS.length sbs
-    , I32_const 4
-    , I32_add
-    , I32_const $ fromIntegral $ SBS.length sbs
-    , I32_store 2 0
-    , Get_global hp  -- hp = hp + 8
-    , I32_const 8
-    , I32_add
-    , Set_global hp
-    ] ++ concat
-    [ [ Get_global hp
-      , I32_const $ fromIntegral c
-      , I32_store8 0 0
-      , Get_global hp
-      , I32_const 1
-      , I32_add
-      , Set_global hp
-      ] | c <- s] ++
-    [ Get_global hp
-    , I32_const $ fromIntegral delta
-    , I32_add
-    , Set_global hp
-    ]
-  Push n ->
-    [ Get_global sp  -- [sp] = [sp + 4(n + 1)]
-    , Get_global sp
-    , I32_const $ 4*(fromIntegral n + 1)
-    , I32_add
-    , I32_load 2 0
-    , I32_store 2 0
-    , Get_global sp  -- sp = sp - 4
-    , I32_const 4
-    , I32_sub
-    , Set_global sp
-    ]
-  MkAp ->
-    [ Get_global hp  -- [hp] = TagAp
-    , tag_const TagAp
-    , I32_store 2 0
-    , Get_global hp  -- [hp + 8] = [sp + 4]
-    , I32_const 8
-    , I32_add
-    , Get_global sp
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , I32_store 2 0
-    , Get_global hp  -- [hp + 12] = [sp + 8]
-    , I32_const 12
-    , I32_add
-    , Get_global sp
-    , I32_const 8
-    , I32_add
-    , I32_load 2 0
-    , I32_store 2 0
-    , Get_global sp  -- [sp + 8] = hp
-    , I32_const 8
-    , I32_add
-    , Get_global hp
-    , I32_store 2 0
-    , Get_global sp  -- sp = sp + 4
-    , I32_const 4
-    , I32_add
-    , Set_global sp
-    , Get_global hp  -- hp = hp + 16
-    , I32_const 16
-    , I32_add
-    , Set_global hp
-    ]
-  PushGlobal fun | (n, g) <- lookupGlobal fun ->
-    [ Get_global sp  -- [sp] = hp
-    , Get_global hp
-    , I32_store 2 0
-    , Get_global sp  -- sp = sp - 4
-    , I32_const 4
-    , I32_sub
-    , Set_global sp
-    , Get_global hp  -- [hp] = TagGlobal | (n << 8)
-    , I32_const $ fromIntegral $ fromEnum TagGlobal + 256*n
-    , I32_store 2 0
-    , Get_global hp  -- [hp + 4] = g
-    , I32_const 4
-    , I32_add
-    , I32_const $ fromIntegral g
-    , I32_store 2 0
-    , Get_global hp  -- hp = hp + 16
-    , I32_const 16
-    , I32_add
-    , Set_global hp
-    ]
-  Slide 0 -> []
-  Slide n ->
-    [ Get_global sp  -- [sp + 4*(n + 1)] = [sp + 4]
-    , I32_const $ 4*(fromIntegral n + 1)
-    , I32_add
-    , Get_global sp
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , I32_store 2 0
-    , Get_global sp  -- sp = sp + 4*n
-    , I32_const $ 4*fromIntegral n
-    , I32_add
-    , Set_global sp
-    ]
-  Alloc n -> concat (replicate n
-    [ Get_global sp  -- [sp] = hp
-    , Get_global hp
-    , I32_store 2 0
-    , Get_global hp  -- [hp] = TagInd
-    , tag_const TagInd
-    , I32_store 2 0
-    , Get_global hp  -- hp = hp + 8
-    , I32_const 8
-    , I32_add
-    , Set_global hp
-    , Get_global sp  -- sp = sp - 4
-    , I32_const 4
-    , I32_sub
-    , Set_global sp
-    ])
-  UpdateInd n ->
-    [ Get_global sp  -- sp = sp + 4
-    , I32_const 4
-    , I32_add
-    , Set_global sp
-    , Get_global sp  -- [[sp + 4*(n + 1)] + 4] = [sp]
-    , I32_const $ fromIntegral $ 4*(n + 1)
-    , I32_add
-    , I32_load 2 0
-    , I32_const 4
-    , I32_add
-    , Get_global sp
-    , I32_load 2 0
-    , I32_store 2 0
-    ]
-  UpdatePop n ->
-    [ Get_global sp  -- bp = [sp + 4]
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , Set_global bp
-    , Get_global sp  -- sp = sp + 4*(n + 1)
-    , I32_const $ fromIntegral $ 4*(n + 1)
-    , I32_add
-    , Set_global sp
-    , Get_global sp  -- [[sp + 4]] = Ind
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , tag_const TagInd
-    , I32_store 2 0
-    , Get_global sp  -- [[sp + 4] + 4] = bp
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , I32_const 4
-    , I32_add
-    , Get_global bp
-    , I32_store 2 0
-    ]
-  Copro m n ->
-    [ Get_global hp  -- [hp] = TagSum | (n << 8)
-    , I32_const $ fromIntegral $ fromEnum TagSum + 256 * n
-    , I32_store 2 0
-    , Get_global hp  -- [hp + 4] = m
-    , I32_const 4
-    , I32_add
-    , I32_const $ fromIntegral m
-    , I32_store 2 0
-    ] ++ concat [
-      [ Get_global hp  -- [hp + 4 + 4*i] = [sp + 4*i]
-      , I32_const $ fromIntegral $ 4 + 4*i
-      , I32_add
-      , Get_global sp
-      , I32_const $ fromIntegral $ 4*i
-      , I32_add
-      , I32_load 2 0
-      , I32_store 2 0 ] | i <- [1..n]] ++
-    [ Get_global sp  -- sp = sp + 4*n
-    , I32_const $ fromIntegral $ 4*n
-    , I32_add
-    , Set_global sp
-    , Get_global sp  -- [sp] = hp
-    , Get_global hp
-    , I32_store 2 0
-    , Get_global sp  -- sp = sp - 4
-    , I32_const 4
-    , I32_sub
-    , Set_global sp
-    , Get_global hp  -- hp = hp + 8 + ceil(n / 2) * 8
-    , I32_const $ fromIntegral $ 8 + 8 * ((n + 1) `div` 2)
-    , I32_add
-    , Set_global hp
-    ]
-  Casejump alts0 -> let
-    (underscore, unsortedAlts) = partition (isNothing . fst) alts0
-    alts = sortOn fst unsortedAlts
-    catchall = if null underscore then [Trap] else snd $ head underscore
-    tab = zip (fromJust . fst <$> alts) [0..]
-    m = maximum $ fromJust . fst <$> alts
-    nest j (ins:rest) = pure $ Block Nada $ nest (j + 1) rest ++ concatMap (fromInsWith lookupGlobal) ins ++ [Br j]
-    nest _ [] = pure $ Block Nada
-      [ Get_global bp  -- [bp + 4]
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
-      , Br_table [fromIntegral $ fromMaybe (length alts) $ lookup i tab | i <- [0..m]] $ m + 1
-      ]
-    in if null alts then concatMap (fromInsWith lookupGlobal) catchall else
-    -- [sp + 4] should be:
-    -- 0: TagSum
-    -- 4: "Enum"
-    -- 8, 12, ...: fields
-    [ Get_global sp  -- bp = [sp + 4]
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , Set_global bp
-    , Block Nada $ nest 1 (reverse $ snd <$> alts) ++ concatMap (fromInsWith lookupGlobal) catchall
-    ]
-
-  Split 0 -> [Get_global sp, I32_const 4, I32_add, Set_global sp]
-  Split n ->
-    [ Get_global sp  -- bp = [sp + 4]
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , Set_global bp
-    , Get_global sp  -- sp = sp + 4
-    , I32_const 4
-    , I32_add
-    , Set_global sp
-    ] ++ concat [
-      [ Get_global sp  -- [sp - 4*(n - i)] = [bp + 4 + 4*i]
-      , I32_const $ fromIntegral $ 4*(n - i)
-      , I32_sub
-      , Get_global bp
-      , I32_const $ fromIntegral $ 4 + 4*i
-      , I32_add
-      , I32_load 2 0
-      , I32_store 2 0
-      ] | i <- [1..n]] ++
-    [ Get_global sp  -- sp = sp - 4*n
-    , I32_const $ fromIntegral $ 4*n
-    , I32_sub
-    , Set_global sp
-    ]
 
 mk1 :: [String] -> Ast -> State [(String, Int)] [Ins]
 mk1 storage (Ast ast) = case ast of
