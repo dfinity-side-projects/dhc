@@ -279,28 +279,32 @@ catAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
   , I32_add
   , Set_global hp
   , Get_global bp  -- PUSH bp
-  , Loop Nada
-    [ Get_global bp  -- bp = bp - 1
-    , I32_const 1
-    , I32_sub
-    , Set_global bp
+  , Block Nada
+    [ Loop Nada
+      [ Get_global bp  -- if (bp == 0) break;
+      , I32_eqz
+      , Br_if 1
 
-    , Get_global hp  -- [hp + i] = [[sp + 4] + 8 + i] | i <- [0..bp - 1]
-    , Get_global bp
-    , I32_add
-    , Get_global sp
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , I32_const 8
-    , I32_add
-    , Get_global bp
-    , I32_add
-    , I32_load8_u 0 0
-    , I32_store8 0 0
+      , Get_global bp  -- bp = bp - 1
+      , I32_const 1
+      , I32_sub
+      , Set_global bp
 
-    , Get_global bp
-    , Br_if 0
+      , Get_global hp  -- [hp + i] = [[sp + 4] + 8 + i] | i <- [0..bp - 1]
+      , Get_global bp
+      , I32_add
+      , Get_global sp
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , I32_const 8
+      , I32_add
+      , Get_global bp
+      , I32_add
+      , I32_load8_u 0 0
+      , I32_store8 0 0
+      , Br 0
+      ]
     ]
   , Get_global hp  -- hp = hp + old_bp  ; Via POP.
   , I32_add
@@ -314,26 +318,30 @@ catAsm = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
   , I32_load 2 0
   , Set_global bp
   , Get_global bp  -- PUSH bp
-  , Loop Nada
-    [ Get_global bp  -- bp = bp - 1
-    , I32_const 1
-    , I32_sub
-    , Set_global bp
-    , Get_global hp  -- [hp + i] = [[sp + 8] + 8 + i] | i <- [0..bp - 1]
-    , Get_global bp
-    , I32_add
-    , Get_global sp
-    , I32_const 8
-    , I32_add
-    , I32_load 2 0
-    , I32_const 8
-    , I32_add
-    , Get_global bp
-    , I32_add
-    , I32_load8_u 0 0
-    , I32_store8 0 0
-    , Get_global bp
-    , Br_if 0
+  , Block Nada
+    [ Loop Nada
+      [ Get_global bp  -- if (bp == 0) break;
+      , I32_eqz
+      , Br_if 1
+      , Get_global bp  -- bp = bp - 1
+      , I32_const 1
+      , I32_sub
+      , Set_global bp
+      , Get_global hp  -- [hp + i] = [[sp + 8] + 8 + i] | i <- [0..bp - 1]
+      , Get_global bp
+      , I32_add
+      , Get_global sp
+      , I32_const 8
+      , I32_add
+      , I32_load 2 0
+      , I32_const 8
+      , I32_add
+      , Get_global bp
+      , I32_add
+      , I32_load8_u 0 0
+      , I32_store8 0 0
+      , Br 0
+      ]
     ]
   , Get_global hp  -- hp = hp + old_bp  ; Via POP.
   , I32_add
