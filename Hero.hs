@@ -3,7 +3,7 @@
 module Hero (Wasm, HeroVM, parseWasm,
   runWasmVM, mkHeroVM, setArgsVM,
   globalVM,
-  runWasm, getNumVM, putNumVM, WasmOp(I32_const)) where
+  runWasm, getNumVM, putNumVM, WasmOp(I32_const, I64_const)) where
 
 import Data.Bits
 import Data.Char (ord)
@@ -209,6 +209,7 @@ mkHeroVM w = HeroVM
   strToAssocs ([I32_const n], s) = zip [fromIntegral n..] $ ord <$> s
   strToAssocs _ = error "BUG!"
 
+-- | Place arguments on WebAssembly stack.
 setArgsVM :: [WasmOp] -> HeroVM -> HeroVM
 setArgsVM ls vm = vm { stack = reverse ls ++ stack vm }
 
