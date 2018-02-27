@@ -69,7 +69,7 @@ import Data.Char
 import Haste.DOM
 import Haste.Events
 import Haste.Foreign
-import Asm
+import WebDemo
 
 append :: Elem -> String -> IO ()
 append e s = do

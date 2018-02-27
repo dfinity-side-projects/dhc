@@ -7,6 +7,7 @@ import Data.Monoid
 import Test.HUnit
 import Asm
 import DHC
+import WebDemo
 
 data Node = NInt Int64 | NString ShortByteString | NAp Int Int | NGlobal Int String | NInd Int | NCon Int [Int] | RealWorld [String] deriving Show
 
@@ -20,6 +21,7 @@ gmachine prog = if "main_" `M.member` funs then
   drop' n as | n > length as = error "BUG!"
              | otherwise     = drop n as
   ((_, funs, _), m) = either error id $ hsToGMachineWebDemo prog
+  arity "putStr" = 1
   arity s = case M.lookup s funs of
     Just a -> a
     Nothing -> arityFromType $ snd $ preludeMinimal M.! s
@@ -56,10 +58,6 @@ gmachine prog = if "main_" `M.member` funs then
       NString str0 = h M.! s0
       NString str1 = h M.! s1
       t = toShort $ fromShort str0 <> fromShort str1
-    prim "#syscall"
-      | NInt 1 <- h M.! s0, NInt 21 <- h M.! s1, NAp _ a <- h M.! s2
-        = go (Right (Push 0):Right Eval:Left "putStr":Right (Slide 2):rest) (a:srest) h
-      where (s0:s1:_:s2:srest) = s
     prim "putStr" = go rest (k:srest) $ rwAdd (unpack $ fromShort str) $ M.insert k1 (NCon 0 []) $ heapAdd $ NCon 0 [k1, 0] where
       k1 = k + 1
       (s0:srest) = s
@@ -85,7 +83,7 @@ gmachine prog = if "main_" `M.member` funs then
         NInd i -> go (Right Eval:rest) (i:tail s) h
         NAp a _ -> go (Right Eval:rest) (a:s) h
         NGlobal n g -> let
-          p | g == "#syscall" = [ Left "#syscall" ]
+          p | g == "putStr" = [Right $ Push 0, Right Eval, Left "putStr", Right $ Slide 3]
             | otherwise  = case lookup g m of
             Just is -> Right <$> is
             Nothing -> (Right <$> [Push 1, Eval, Push 1, Eval]) ++

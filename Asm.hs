@@ -3,8 +3,10 @@
 {-# LANGUAGE PackageImports #-}
 module Asm (hsToWasm, Ins(..),
   WasmType(Ref),  -- Re-export from WasmOp.
-  hsToGMachineWebDemo, hsToWasmWebDemo) where
+  tag_const, Tag(..), hsToIns,
+  GlobalTable, Boost(..), catBoost) where
 import Control.Arrow
+import Data.Map (Map)
 import qualified Data.Map as M
 #ifdef __HASTE__
 import "mtl" Control.Monad.State
@@ -119,26 +121,26 @@ encWasmOp op = case op of
 -- Hopefully, the third item will soon supersede the other two.
 type GlobalTable = ([String], M.Map String Int, [(String, ([WasmType], [WasmType]))])
 
-hsToWasmWebDemo :: String -> Either String [Int]
-hsToWasmWebDemo prog = snd <$> hsToWasm webDemoSys prog
+type WasmImport = ((String, String), ([WasmType], [WasmType]))
 
-hsToGMachineWebDemo :: String -> Either String (GlobalTable, [(String, [Ins])])
-hsToGMachineWebDemo haskell = astToIns <$> hsToAst webDemoSys haskell
+data Boost = Boost [WasmImport] [(String, (Type, [Either String WasmOp]))]
+
+catBoost :: Boost -> Boost -> Boost
+catBoost (Boost a b) (Boost c d) = Boost (a ++ c) (b ++ d)
 
 -- | Returns
 --   ( arities of synchronous exports
 --   , types of asynchronous exports
 --   , WebAssembly binary
 --   )
-hsToWasm :: Syscalls -> String -> Either String (([(String, Int)], [(String, ([WasmType], [WasmType]))]), [Int])
-hsToWasm sys prog = insToBin . astToIns <$> hsToAst sys prog
+hsToWasm :: Boost -> ExternType -> String -> Either String (([(String, Int)], [(String, ([WasmType], [WasmType]))]), [Int])
+hsToWasm boost ext prog = insToBin boost . astToIns <$> hsToAst (boostTypes boost) ext prog
 
-webDemoSys :: Syscalls
-webDemoSys = (M.fromList
-  [ ("putStr", (21, TC "String" :-> io (TC "()")))
-  , ("putInt", (22, TC "Int" :-> io (TC "()")))
-  ], \_ _ -> Nothing)
-  where io = TApp (TC "IO")
+hsToIns :: Boost -> ExternType -> String -> Either String (GlobalTable, [(String, [Ins])])
+hsToIns boost ext prog = astToIns <$> hsToAst (boostTypes boost) ext prog
+
+boostTypes :: Boost -> Map String (Maybe (Int, Int), Type)
+boostTypes (Boost _ m) = M.fromList $ second (((,) Nothing) . fst) <$> m
 
 astToIns :: AstPlus -> (GlobalTable, [(String, [Ins])])
 astToIns (AstPlus es ws storage ds ts) = ((es, funs, wrapme), second compile <$> ds) where
@@ -156,14 +158,15 @@ astToIns (AstPlus es ws storage ds ts) = ((es, funs, wrapme), second compile <$>
   translateType (TC "Int") = I64
   translateType (TC "Port") = Ref "Port"
   translateType (TC "Databuf") = Ref "Databuf"
+  translateType (TC "Actor") = Ref "Actor"
   translateType t = error $ "no corresponding wasm type: " ++ show t
   funs = M.fromList $ ((\(name, Ast (Lam as _)) -> (name, length as)) <$> ds)
 
 tag_const :: Tag -> WasmOp
 tag_const = I32_const . fromIntegral . fromEnum
 
-insToBin :: (GlobalTable, [(String, [Ins])]) -> (([(String, Int)], [(String, ([WasmType], [WasmType]))]), [Int])
-insToBin ((exs, funs, wrapme), gmachine) = ((((\s -> (s, fst $ getGlobal s)) <$> exs), wrapme), wasm) where
+insToBin :: Boost -> (GlobalTable, [(String, [Ins])]) -> (([(String, Int)], [(String, ([WasmType], [WasmType]))]), [Int])
+insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, fst $ getGlobal s)) <$> exs), wrapme), wasm) where
   wasm = concat
     [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
     , sect 1 $ uncurry encSig . snd <$> BM.assocs typeMap  -- Type section.
@@ -189,25 +192,23 @@ insToBin ((exs, funs, wrapme), gmachine) = ((((\s -> (s, fst $ getGlobal s)) <$>
       ++ [exportFun ('w':'_':s) ('@':s) | (s, _) <- wrapme]
     , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
     ]
-  imps = [("dhc", "system", [I32, I32, I32], [])]
   -- 0 = external_kind Function.
-  importFun (m, f, i, o) = encStr m ++ encStr f ++ [0, typeNo i o]
+  importFun ((m, f), ty) = encStr m ++ encStr f ++ [0, uncurry typeNo ty]
   typeNo ins outs = typeMap BM.!> (ins, outs)
   typeMap = BM.fromList $ zip [0..] $ nub $
-    [ ([I32, I32, I32], [])  -- Syscall type.
-    , ([], [])  -- Most internal functions have type () -> ().
+    (snd <$> imps) ++
+    [ ([], [])  -- Most internal functions have type () -> ().
     , ([], [I32])  -- gethp, getsp.
     , ([I32], [])  -- sethp, setsp.
     ] ++ (snd <$> wrapme)  -- wdecl functions.
-  exportFun name internal = encStr name ++ [0, wasmFunNo internal]
-  -- Only two primitives need local variables.
+  exportFun name internalName = encStr name ++ [0, wasmFunNo internalName]
+  -- TODO: Remove "#syscall".
   localCount "#syscall" = 2
-  localCount "#syscallPure" = 2
   localCount _ = 0
   -- Returns arity and 0-indexed number of given global function.
   getGlobal s = case M.lookup s funs of
     Just arity -> (arity, wasmFunNo s - firstPrim)
-    Nothing -> (arityFromType $ snd $ preludeMinimal M.! s, wasmFunNo s - firstPrim)
+    Nothing -> (arityFromType $ primsType M.! s, wasmFunNo s - firstPrim)
   firstPrim = wasmFunNo $ fst $ head prims
   wasmFuns =
     [ ("#eval", ((typeNo [] [], 0), evalAsm))
@@ -239,9 +240,9 @@ insToBin ((exs, funs, wrapme), gmachine) = ((((\s -> (s, fst $ getGlobal s)) <$>
       ))]
     -- Wrappers for functions in "wdecl" section.
     ++ (wrap <$> wrapme)
-  wasmFunMap = M.fromList $ zip (fst <$> wasmFuns) [0..]
-  -- Function 0: import function which we send our outputs.
-  wasmFunNo s = (wasmFunMap M.! s) + length imps
+  wasmFunMap = M.fromList $ zip (((\(m, f) -> m ++ "." ++ f) . fst <$> imps) ++ (fst <$> wasmFuns)) [0..]
+  -- wasmFunNo = (wasmFunMap M.!)
+  wasmFunNo s = fromMaybe (error s) $ M.lookup s wasmFunMap
   refToI32 (Ref _) = I32
   refToI32 t = t
   wrap (f, (ins, outs)) = (,) ('@':f) $ (,) (typeNo ins outs, 0) $
@@ -785,106 +786,6 @@ insToBin ((exs, funs, wrapme), gmachine) = ((((\s -> (s, fst $ getGlobal s)) <$>
     , Set_global hp
     ] ++ concatMap fromIns [UpdatePop 2, Eval] ++ [End]
 
-  syscallPureAsm :: [WasmOp]
-  syscallPureAsm =
-    -- Example:
-    --
-    --   beaconAt 123
-    --
-    -- becomes:
-    --
-    --   (#syscallPure 1 999) (Var "beaconAt" :@ 123)
-    --
-    -- The number of arguments to "beaconAt" is 1.
-    -- The syscall number is 999.
-    --
-    -- After removing the innermost spine, we have:
-    --
-    --   1, 999, (#syscallPure 1 999), (Var "beaconAt" :@ 123)
-    [ Get_global sp  -- sp = sp + 12
-    , I32_const 12
-    , I32_add
-    , Set_global sp
-    , Get_global sp  -- [[sp - 4] + 8] is now the syscall number.
-    , I32_const 4
-    , I32_sub
-    , I32_load 2 0
-    , I32_const 8
-    , I32_add
-    , I32_load 2 0
-    , Get_global sp  -- local0 = [[sp - 8] + 8], the number of arguments.
-    , I32_const 8
-    , I32_sub
-    , I32_load 2 0
-    , I32_const 8
-    , I32_add
-    , I32_load 2 0
-    , Tee_local 0  -- local1 = local0
-    , Set_local 1
-
-    , Block Nada
-      [ Loop Nada  -- Encode all arguments.
-        [ Get_local 0  -- Break if local0 == 0.
-        , I32_eqz
-        , Br_if 1
-        -- Debone next argument...
-        , Get_global sp
-        , Get_global sp
-        , Get_local 1  -- [sp] = [[sp + 4*local1] + 12]
-        , I32_const 4
-        , I32_mul
-        , I32_add
-        , I32_load 2 0
-        , I32_const 12
-        , I32_add
-        , I32_load 2 0
-        , I32_store 2 0
-        , Get_global sp  -- sp = sp - 4
-        , I32_const 4
-        , I32_sub
-        , Set_global sp
-        -- ... then evaluate. TODO: Reduce to normal form.
-        , Call $ wasmFunNo "#eval"
-        , Get_local 0
-        , I32_const 1
-        , I32_sub
-        , Set_local 0
-        , Br 0
-        ]
-      ]
-    -- Example stack now holds:
-    --   123, 123
-    , Get_global sp  -- #syscall(syscall_number, sp, hp)
-    , Get_global hp
-    , Call 0
-    -- Because the syscall cannot modify sp or hp, our convention is that
-    --   [sp] = result ; [sp - 4] = hp_new
-    -- We update the globals here, in WebAssembly.
-    , Get_global sp  -- hp = [sp - 4]
-    , I32_const 4
-    , I32_sub
-    , I32_load 2 0
-    , Set_global hp
-    , Get_global sp  -- [sp + 8*argCount] = [sp]
-    , Get_local 1
-    , I32_const 8
-    , I32_mul
-    , I32_add
-    , Get_global sp
-    , I32_load 2 0
-    , I32_store 2 0
-    , Get_global sp  -- sp = sp + 8*argCount - 4
-    , Get_local 1
-    , I32_const 8
-    , I32_mul
-    , I32_add
-    , I32_const 4
-    , I32_sub
-    , Set_global sp
-    -- No update (normal evaluation, not lazy). Hopefully this syscall is cheap!
-    , End
-    ]
-
   syscallAsm :: [WasmOp]
   syscallAsm =
     -- Example:
@@ -958,7 +859,7 @@ insToBin ((exs, funs, wrapme), gmachine) = ((((\s -> (s, fst $ getGlobal s)) <$>
     --   "Hello", ("He" ++ "llo"), (... :@ #RealWorld)
     , Get_global sp  -- #syscall(syscall_number, sp, hp)
     , Get_global hp
-    , Call 0
+    , Call $ wasmFunNo "dhc.system"
     -- Our convention:
     --   [sp] = result ; [sp - 4] = hp_new
     -- We update the globals here, in WebAssembly.
@@ -994,8 +895,8 @@ insToBin ((exs, funs, wrapme), gmachine) = ((((\s -> (s, fst $ getGlobal s)) <$>
     ]
 
   -- Primitive functions.
-  prims :: [(String, [WasmOp])]
-  prims =
+  primsMinimal :: [(String, [WasmOp])]
+  primsMinimal =
     [ ("+", intAsm I64_add)
     , ("-", intAsm I64_sub)
     , ("*", intAsm I64_mul)
@@ -1011,8 +912,14 @@ insToBin ((exs, funs, wrapme), gmachine) = ((((\s -> (s, fst $ getGlobal s)) <$>
     , ("++", catAsm)
     , ("String-==", strEqAsm)
     , ("#syscall", syscallAsm)
-    , ("#syscallPure", syscallPureAsm)
     ]
+
+  resolveCall (Left s) = Call $ wasmFunNo s
+  resolveCall (Right op) = op
+
+  prims = primsMinimal ++ (second (fmap resolveCall . snd) <$> morePrims)
+  primsType = M.fromList $ [(s, snd $ preludeMinimal M.! s) | s <- fst <$> primsMinimal]
+    ++ (second fst <$> morePrims)
 
   fromIns :: Ins -> [WasmOp]
   fromIns instruction = case instruction of
@@ -1321,11 +1228,9 @@ lenc :: [Int] -> [Int]
 lenc xs = varlen xs ++ xs
 
 sp :: Int
-sp = 0
 hp :: Int
-hp = 1
 bp :: Int
-bp = 2
+[sp, hp, bp] = [0, 1, 2]
 
 mk1 :: [String] -> Ast -> State [(String, Int)] [Ins]
 mk1 storage (Ast ast) = case ast of

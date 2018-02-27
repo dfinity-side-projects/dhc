@@ -2,7 +2,7 @@
 -- WebAssembly which is dumped to standard output.
 
 import qualified Data.ByteString as B
-import Asm
+import WebDemo
 
 main :: IO ()
 main = do

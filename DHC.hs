@@ -2,7 +2,7 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE PackageImports #-}
-module DHC (parseContract, Syscalls, AstF(..), Ast(..), AstPlus(..), Type(..), inferType, parseDefs, lexOffside,
+module DHC (parseContract, ExternType, AstF(..), Ast(..), AstPlus(..), Type(..), inferType, parseDefs, lexOffside,
   preludeMinimal, arityFromType,  hsToAst, liftLambdas) where
 
 import Control.Arrow
@@ -658,7 +658,6 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
   , ("Int-==", TC "Int" :-> TC "Int" :-> TC "Bool")
   , ("String-==", TC "String" :-> TC "String" :-> TC "Bool")
   , ("#syscall", TC "Int" :-> TC "Int" :-> TApp (TC "IO") a)
-  , ("#syscallPure", TC "Int" :-> TC "Int" :-> a)
   ]) ++
   [ ("False",   (jp 0 0, TC "Bool"))
   , ("True",    (jp 1 0, TC "Bool"))
@@ -691,26 +690,25 @@ hacks =
  , listEqHack
  ]
 
-type Syscalls = (Map String (Int, Type), String -> String -> Maybe Int)
+-- | Knowing the arity of functions from other contracts
+-- can aid correctness checks during compilation.
+type ExternType = String -> String -> Maybe Int
 
 {-
 unAst :: Ast -> AstF Ast
 unAst (Ast a) = a
 -}
 
-expandSyscalls :: Syscalls -> [(String, Int)] -> Ast -> Ast
-expandSyscalls sys arities = ffix $ \rec (Ast ast) -> Ast $ case ast of
-
+expandSyscalls :: ExternType -> [(String, Int)] -> Ast -> Ast
+expandSyscalls ext arities = ffix $ \rec (Ast ast) -> Ast $ case ast of
 {-
   Cas (Ast x) as -> Cas (Ast $ rec x) (second (Ast . rec. unAst) <$> as)
 -}
-
-  Var s | Just (n, t) <- M.lookup s (fst sys) -> Ast (Ast (if isIO t then Var "#syscall" else Var "#syscallPure") :@ Ast (I $ argCount t)) :@ Ast (I $ fromIntegral n)
   -- Example:
   --  target.fun 1 2 "three"
   -- becomes:
   --  #syscall 6 0 "target" "fun" 3 1 2 "three"
-  Qual c f | Just n <- snd sys c f -> foldl1' appIt [Var "#syscall", I (fromIntegral $ n + 3), I 0, S (pack $ c2w <$> c), S (pack $ c2w <$> f), I (fromIntegral n)]
+  Qual c f | Just n <- ext c f -> foldl1' appIt [Var "#syscall", I (fromIntegral $ n + 3), I 0, S (pack $ c2w <$> c), S (pack $ c2w <$> f), I (fromIntegral n)]
   -- Example:
   --  call target.fun "abc123" 1 2 "three"
   --  call fun "abc123" 1 2 "three"
@@ -718,42 +716,36 @@ expandSyscalls sys arities = ffix $ \rec (Ast ast) -> Ast $ case ast of
   --  #syscall 7 8 "target" "fun" 3 "abc123" 1 2 "three"
   --  #syscall 6 9 "fun" 3 "abc123" 1 2 "three"
   CCall "" f | Just n <- lookup f arities -> foldl1' appIt [Var "#syscall", I (fromIntegral $ n + 3), I 9, S (pack $ c2w <$> f), I (fromIntegral n)]
-  CCall c f | Just n <- snd sys c f -> foldl1' appIt [Var "#syscall", I (fromIntegral $ n + 4), I 8, S (pack $ c2w <$> c), S (pack $ c2w <$> f), I (fromIntegral n)]
+  CCall c f | Just n <- ext c f -> foldl1' appIt [Var "#syscall", I (fromIntegral $ n + 4), I 8, S (pack $ c2w <$> c), S (pack $ c2w <$> f), I (fromIntegral n)]
   _ -> rec ast
-  where
-    appIt x y = Ast x :@ Ast y
-    argCount (_ :-> u) = 1 + argCount u
-    argCount _ = 0
-    isIO (_ :-> u) = isIO u
-    isIO (TC "IO" `TApp` _) = True
-    isIO _ = False
+  where appIt x y = Ast x :@ Ast y
 
-getContractExport :: Syscalls -> [String] -> String -> String -> Either String Type
+getContractExport :: ExternType -> [String] -> String -> String -> Either String Type
 getContractExport _ es "" v = if v `elem` es
   then Right $ TV $ '*':v
   else Left $ "no such export " ++ v
-getContractExport (_, f) _ c v = case f c v of
+getContractExport f _ c v = case f c v of
   Nothing -> Left $ "no such export " ++ c ++ "." ++ v
   Just n -> Right $ foldr (:->) (TC "IO" `TApp` GV "r") [GV $ "x" ++ show i | i <- [1..n]]
 
-hsToAst :: Syscalls -> String -> Either String AstPlus
-hsToAst sys prog = do
+hsToAst :: Map String (Maybe (Int, Int), Type) -> ExternType -> String -> Either String AstPlus
+hsToAst boostMap ext prog = do
   a@(AstPlus es _ storage ds _) <- showErr $ parseContract prog
-  (preStorageInferred, storageCons) <- inferType (getContractExport sys es) (genTypes storage) (ds ++ hacks)
+  (preStorageInferred, storageCons) <- inferType (getContractExport ext es) (genTypes storage) (ds ++ hacks)
   let
     inferred = constrainStorage storageCons preStorageInferred
     arities = second (countArgs . fst . fst) <$> inferred
     countArgs (_ :-> b) = 1 + countArgs b
     countArgs _ = 0
     -- | Expands syscalls and case expressions in an AST.
-    transform = expandSyscalls sys arities . expandCase
+    transform = expandSyscalls ext arities . expandCase
     subbedDefs = (second transform <$>) . liftLambdas . (second snd <$>) $ inferred
     types = second fst <$> inferred
   pure a { asts = subbedDefs, funTypes = types }
   where
     showErr = either (Left . show) Right
     genTypes storage = preludeMinimal
-      `M.union` (first (const Nothing) <$> fst sys)
+      `M.union` boostMap
       `M.union` (M.fromList $ storageTypeConstraintHack <$> storage)
     storageTypeConstraintHack s = (s, (Nothing, TC "Map" `TApp` TV ('@':s)))
 
