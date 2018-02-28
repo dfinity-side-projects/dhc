@@ -1,0 +1,111 @@
+<style>
+  .monospace { font-family: monospace; }
+</style>
+<h1>DHC Demo</h1>
+
+<p>The following compiles Haskell to WebAssembly and runs it.</p>
+
+<p>Only a tiny fragment of the language is supported. There is almost no syntax sugar.</p>
+
+<p>System calls:</p>
+
+<p class="monospace">
+putStr :: String -> IO ()
+putInt :: Int -> IO ()
+</p>
+
+<p>There is no garbage collection.</p>
+
+<p><a href="https://github.com/dfinity/dhc">Source</a>.</p>
+
+<script src="build/all.js"></script>
+<script>
+  var dv;
+  function load8(addr) { return dv.getUint8(addr); }
+  function load32(addr) { return dv.getUint32(addr, true); }
+  function store32(addr, x) { dv.setUint32(addr, x, true); }
+  function runWasmInts(a) {
+    WebAssembly.instantiate(new Uint8Array(a), {
+      i: {
+        f: (n, sp, hp) => {
+          console.log(n, sp, hp)
+          let output = ''
+          if (n === 21) {
+            const addr = load32(sp + 4)
+            const tag = load8(addr)
+            if (tag % 6 != 0)
+              return writeOutput("BUG! want string (tag 6), got " + tag)
+            const slen = load32(addr + 4)
+            const s = Array.from({length:slen}).map((e, i) => load8(addr + 8 + i))
+            output += s.map(String.fromCharCode).join('')
+            store32(hp, 4)
+            store32((hp + 4), 0)
+            store32(sp, hp)
+            store32((sp - 4), hp + 8)
+          } else if (n == 22) {
+            const addr = load32(sp + 4)
+            const tag = load8(addr)
+            if (tag % 3 != 0)
+              return writeOutput("BUG! want int (tag 3), got " + tag)
+            const x = load32(addr + 12)
+            const y = load32(addr + 8)
+            const b = 2**32
+            if (x === 0)
+              output += String(y) + (y >= 0 ? "" : " (unsigned = " + String(y + b) + ")")
+            else
+              output += String(x * b + ((y + b) % b))
+            store32(hp, 4)
+            store32((hp + 4), 0)
+            store32(sp, hp)
+            store32((sp - 4), hp + 8)
+          } else {
+            return writeOutput("bad syscall")
+          }
+          writeOutput(output)
+        }
+      }
+    }).then(x => {
+      var expo = x.instance.exports;
+      dv = new DataView(expo.mem.buffer);
+      console.log(dv)
+      document.getElementById('out').innerHTML = ''
+      expo.main()
+    });
+  }
+  function writeOutput(val) {
+    document.getElementById('out').innerHTML += val
+  }
+  function doCompile() {
+    const input = document.getElementById('src').value
+    const output = compile(input)
+    document.getElementById('asm').innerHTML = output
+    runWasmInts(output)
+  }
+</script>
+<p><textarea id="src" rows="25" cols="80">
+-- Gratuitous mutual recursion.
+factorial n = case n == 0 of True  -> 1
+                             False -> n * factorial2 (n - 1)
+factorial2 n = case n == 0 of True  -> 1
+                              False -> n * factorial (n - 1)
+foldr f n xs = case xs of [] -> n
+                          (a:as) -> f a (foldr f n as)
+uncurry f p = case p of (a, b) -> f a b
+sum = foldr (+) 0
+enumFromTo a b = case a > b of True  -> []
+                               False -> a : enumFromTo (a + 1) b
+map f = foldr (\x xs -> f x:xs) []
+tenTimes x = 10 * x
+f $ x = f x
+f rec n = case n == 0 of True -> 0
+                         False -> rec (n - 1) + 2*n - 1
+main = do
+  putStr "recursion with fix: "
+  let {fixedf = f fixedf} in putInt $ fixedf 100
+  putStr "\n5! + (10 + 20 + 30 + 40 + 50) = "
+  putInt $ uncurry (+) (factorial 5, sum $ map tenTimes [1..5])
+</textarea></p>
+<button id="go" onClick="doCompile()">Compile & Run!</button>
+<p><textarea id="asm" readonly rows="5" cols="80">
+</textarea></p>
+<pre id="out"></pre>
