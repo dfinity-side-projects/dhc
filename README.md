@@ -12,17 +12,26 @@ It accepts only a tiny subset of the language.
 https://dhc.dfinity.org
 
 ## Installation / Dependencies
-TBD
+    stack setup
+    ./build.sh
 
 ## Usage / Examples
-TBD
+```javascript
+const dhc = require('./build')
+
+const output = dhc.compileHsToWasm('main = putStr "Hello"')
+// [ 0, 97, 115, 109, ... ]
+
+const err = dhc.compileHsToWasm('syntax error')
+// '(line 1, column 13):\nunexpected end of input\nexpecting " ", "\\r\\n", "--" or end of input\nexpected ='
+```
 
 ## Caveats
 TBD
 
 ## License
 
-**(C) 2017 DFINITY STIFTUNG** (http://dfinity.network)
+**(C) 2018 DFINITY STIFTUNG** (http://dfinity.org)
 
 All code and designs are open sourced under GPL V3.
 
