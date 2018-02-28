@@ -80,7 +80,7 @@ runWasmVM fns Wasm {imports, exports, decls, code} s herovm = let
   run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
     Call i -> if i < fCount then do
         let k = length $ fst $ snd $ imports!!i
-        vm' <- (fns!!i) vm { stack = drop' k stack, insts = i1 } $ take' k stack
+        vm' <- (fns!!i) vm { stack = drop' k stack, insts = i1 } $ reverse $ take' k stack
         run vm'
       else do
         let

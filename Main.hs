@@ -15,7 +15,7 @@ main = do
     Right out -> (print out >>) $ void $ runWasm [syscall] out "main"
 
 syscall :: HeroVM -> [WasmOp] -> IO HeroVM
-syscall vm [I32_const hp, I32_const sp, I32_const n]
+syscall vm [I32_const n, I32_const sp, I32_const hp]
   | n == 21 = do
     when (getTag /= 6) $ error "BUG! want String"
     let slen = getNumVM 4 (addr + 4) vm
