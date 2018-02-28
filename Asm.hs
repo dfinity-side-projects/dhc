@@ -4,6 +4,7 @@
 module Asm (hsToWasm, Ins(..),
   WasmType(Ref),  -- Re-export from WasmOp.
   tag_const, Tag(..), hsToIns,
+  QuasiWasm(..),
   GlobalTable, Boost(..), catBoost) where
 import Control.Arrow
 import Data.Map (Map)
@@ -99,6 +100,7 @@ encWasmOp op = case op of
   I64_const n -> 0x42 : sleb128 n
   I32_const n -> 0x41 : sleb128 n
   Call n -> 0x10 : leb128 n
+  Call_indirect n -> 0x11 : leb128 n ++ [0]
   I64_load m n -> [0x29, m, n]
   I64_store m n -> [0x37, m, n]
   I32_load m n -> [0x28, m, n]
@@ -123,7 +125,13 @@ type GlobalTable = ([String], M.Map String Int, [(String, ([WasmType], [WasmType
 
 type WasmImport = ((String, String), ([WasmType], [WasmType]))
 
-data Boost = Boost [WasmImport] [(String, (Type, [Either String WasmOp]))]
+-- | A few helpers for inline assembly.
+data QuasiWasm = Op WasmOp
+  | CallSym String  -- Find function index when generating wasm.
+  | ReduceArgs Int  -- Copy arguments from heap and reduce them to WHNF.
+  | LazyUpdate Int  -- Lazily update with indirection node, then return.
+
+data Boost = Boost [WasmImport] [(String, (Type, [QuasiWasm]))]
 
 catBoost :: Boost -> Boost -> Boost
 catBoost (Boost a b) (Boost c d) = Boost (a ++ c) (b ++ d)
@@ -914,10 +922,12 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
     , ("#syscall", syscallAsm)
     ]
 
-  resolveCall (Left s) = Call $ wasmFunNo s
-  resolveCall (Right op) = op
+  deQuasi (CallSym s) = [Call $ wasmFunNo s]
+  deQuasi (ReduceArgs n) = concat $ replicate n $ concatMap fromIns [Push (n - 1), Eval]
+  deQuasi (LazyUpdate n) = concatMap fromIns [UpdatePop n, Eval] ++ [End]
+  deQuasi (Op op) = [op]
 
-  prims = primsMinimal ++ (second (fmap resolveCall . snd) <$> morePrims)
+  prims = primsMinimal ++ (second (concatMap deQuasi . snd) <$> morePrims)
   primsType = M.fromList $ [(s, snd $ preludeMinimal M.! s) | s <- fst <$> primsMinimal]
     ++ (second fst <$> morePrims)
 
@@ -1227,9 +1237,7 @@ varlen xs = leb128 $ length xs
 lenc :: [Int] -> [Int]
 lenc xs = varlen xs ++ xs
 
-sp :: Int
-hp :: Int
-bp :: Int
+sp, hp, bp :: Int
 [sp, hp, bp] = [0, 1, 2]
 
 mk1 :: [String] -> Ast -> State [(String, Int)] [Ins]

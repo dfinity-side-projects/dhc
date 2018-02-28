@@ -43,6 +43,10 @@ newtype Ast = Ast (AstF Ast) deriving (Show, Generic)
 -- Annotated AST.
 data AAst a = AAst a (AstF (AAst a)) deriving Functor
 
+-- | Knowing the arity of functions from other contracts
+-- can aid correctness checks during compilation.
+type ExternType = String -> String -> Maybe Int
+
 deAnn :: AAst a -> Ast
 deAnn = ffix $ \h (AAst _ ast) -> Ast $ h ast
 
@@ -689,10 +693,6 @@ hacks =
  , ioMonadHack
  , listEqHack
  ]
-
--- | Knowing the arity of functions from other contracts
--- can aid correctness checks during compilation.
-type ExternType = String -> String -> Maybe Int
 
 {-
 unAst :: Ast -> AstF Ast

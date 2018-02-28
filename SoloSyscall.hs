@@ -11,11 +11,10 @@ import Asm
 import DHC
 import WasmOp
 
-sp :: Int
-hp :: Int
+sp, hp :: Int
 [sp, hp] = [0, 1]
 
-genSyscallFromType :: Int64 -> Type -> (Type, [Either String WasmOp])
+genSyscallFromType :: Int64 -> Type -> (Type, [QuasiWasm])
 genSyscallFromType n t = (t, genSyscall (isIO t) n $ fromIntegral $ arityFromType t)
 
 isIO :: Type -> Bool
@@ -29,25 +28,13 @@ isIO _ = False
 -- For pure syscalls we return the result.
 -- For impure syscalls we return the tuple (result, #RealWorld).
 -- TODO: Get rid of #RealWorld token.
-genSyscall :: Bool -> Int64 -> Int64 -> [Either String WasmOp]
-genSyscall impure svc argCount = concat
-  (replicate (fromIntegral argCount) $ (Right <$>
-    [ Get_global sp  -- [sp] = [sp + 4*argCount]
-    , Get_global sp
-    , I32_const $ 4*(fromIntegral argCount)
-    , I32_add
-    , I32_load 2 0
-    , I32_store 2 0
-    , Get_global sp  -- sp = sp - 4
-    , I32_const 4
-    , I32_sub
-    , Set_global sp
-    ]) ++ [Left "#eval"])
-  ++ (Right <$>
+genSyscall :: Bool -> Int64 -> Int64 -> [QuasiWasm]
+genSyscall impure svc argCount =
+  ReduceArgs (fromIntegral argCount) : (Op <$>
     [ I32_const $ fromIntegral svc
     , Get_global sp
     , Get_global hp
-    ]) ++ [Left "dhc.system"] ++ (Right <$>
+    ]) ++ [CallSym "dhc.system"] ++ (Op <$>
     -- Our convention:
     --   [sp] = result ; [sp - 4] = hp_new
     -- Return (result, #RealWorld).

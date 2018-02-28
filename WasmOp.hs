@@ -21,6 +21,7 @@ data WasmOp = I32_eqz | I32_eq | I32_ne | I32_lt_s | I32_lt_u | I32_gt_s | I32_g
   | Br_table [Int] Int
   | Br Int | Br_if Int
   | Call Int
+  | Call_indirect Int
   | Drop | Select deriving (Show, Eq)
 
 zeroOperandOps :: [(Int, WasmOp)]
