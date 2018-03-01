@@ -3,7 +3,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE PackageImports #-}
 module DHC (parseContract, ExternType, AstF(..), Ast(..), AstPlus(..), Type(..), inferType, parseDefs, lexOffside,
-  preludeMinimal, arityFromType,  hsToAst, liftLambdas) where
+  preludeMinimal, arityFromType, hsToAst, liftLambdas) where
 
 import Control.Arrow
 import Control.Monad
@@ -41,7 +41,7 @@ data AstF a = Qual String String | CCall String String
 newtype Ast = Ast (AstF Ast) deriving (Show, Generic)
 
 -- Annotated AST.
-data AAst a = AAst a (AstF (AAst a)) deriving Functor
+data AAst a = AAst a (AstF (AAst a)) deriving (Show, Functor)
 
 -- | Knowing the arity of functions from other contracts
 -- can aid correctness checks during compilation.
@@ -337,7 +337,7 @@ data AstPlus = AstPlus
   , storages :: [String]
   , asts :: [(String, Ast)]
   , funTypes :: [(String, QualType)]
-  }
+  } deriving Show
 
 contract :: Parser AstPlus
 contract = do
@@ -736,7 +736,6 @@ hsToAst boostMap ext prog = do
     arities = second (countArgs . fst . fst) <$> inferred
     countArgs (_ :-> b) = 1 + countArgs b
     countArgs _ = 0
-    -- | Expands syscalls and case expressions in an AST.
     transform = expandSyscalls ext arities . expandCase
     subbedDefs = (second transform <$>) . liftLambdas . (second snd <$>) $ inferred
     types = second fst <$> inferred
@@ -779,6 +778,8 @@ inferType findExport globs ds = foldM inferMutual ([], []) $ map (map (\k -> (k,
     (soln, ctx) <- runStateT (unify cs) m
     let storageCons = second (typeSolve soln) <$> filter (('@' ==) . head . fst) soln
     -- TODO: Look for conflicting storage constraints.
+    -- TODO: The `generalize` stage removes type annotations. May be
+    -- beneficial to keep them around longer.
     pure ((++ acc) $ zip (fst <$> grp) $ generalize soln ctx <$> bs, accStorage ++ storageCons)
     where
       annOf (AAst a _) = a

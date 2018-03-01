@@ -131,6 +131,7 @@ data QuasiWasmHelper =
     CallSym String  -- Find function index when generating wasm.
   | ReduceArgs Int  -- Copy arguments from heap and reduce them to WHNF.
   | LazyUpdate Int  -- Lazily update with indirection node, then return.
+  | TupleBPRealWorld  -- [sp + 4] = (bp, #RealWorld)
   deriving Show
 
 data Boost = Boost [WasmImport] [(String, (Type, [QuasiWasm]))]
@@ -820,6 +821,36 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
     CallSym s -> [Call $ wasmFunNo s]
     ReduceArgs n -> concat $ replicate n $ concatMap fromIns [Push (n - 1), Eval]
     LazyUpdate n -> concatMap fromIns [UpdatePop n, Eval] ++ [End]
+    TupleBPRealWorld ->  -- [sp + 4] = (bp, #RealWorld)
+      [ Get_global hp  -- [hp] = TagSum | (2 << 8)
+      , I32_const $ fromIntegral $ fromEnum TagSum + 256 * 2
+      , I32_store 2 0
+      , Get_global hp  -- [hp + 4] = 0
+      , I32_const 4
+      , I32_add
+      , I32_const 0
+      , I32_store 2 0
+      , Get_global hp  -- [hp + 8] = bp
+      , I32_const 8
+      , I32_add
+      , Get_global bp
+      , I32_store 2 0
+      , Get_global hp  -- [hp + 12] = 42
+      , I32_const 12
+      , I32_add
+      , I32_const 42
+      , I32_store 2 0
+      , Get_global sp  -- [sp + 4] = hp
+      , I32_const 4
+      , I32_add
+      , Get_global hp
+      , I32_store 2 0
+      , Get_global hp  -- hp = hp + 16
+      , I32_const 16
+      , I32_add
+      , Set_global hp
+      , End
+      ]
 
   deQuasi (Block t body) = [Block t $ concatMap deQuasi body]
   deQuasi (Loop  t body) = [Loop  t $ concatMap deQuasi body]
