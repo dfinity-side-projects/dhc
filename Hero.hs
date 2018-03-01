@@ -40,7 +40,7 @@ getNum w addr mem = sum $ zipWith (*) (fromIntegral <$> bs) ((256^) <$> [(0 :: I
 putNum :: Integral n => Int -> Int32 -> n -> IntMap Int -> IntMap Int
 putNum w addr n mem = foldl' f mem [0..w-1] where
   f m k = IM.insert (fromIntegral addr + k) (getByte k) m
-  getByte k = fromIntegral $ n `div` (256^k) `mod` 256
+  getByte k = fromIntegral n `div` (256^k) `mod` 256
 
 rem32U :: Int32 -> Int32 -> Int32
 rem32U a b = fromIntegral $ mod ((fromIntegral a) :: Word32) $ fromIntegral (fromIntegral b :: Word32)
@@ -137,6 +137,10 @@ runWasmVM fns Wasm {imports, exports, decls, code} s herovm = let
     I64_sub -> binOp64 (-)
     I64_mul -> binOp64 (*)
     I64_shr_u -> binOp64 shiftR64U
+    I64_extend_s_i32 -> let
+      I32_const a = head stack
+      c = I64_const $ fromIntegral a
+      in run vm {stack = c:tail stack, insts = i1}
     I32_wrap_i64 -> let
       I64_const a = head stack
       c = I32_const $ fromIntegral a
