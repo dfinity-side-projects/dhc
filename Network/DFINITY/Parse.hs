@@ -1,7 +1,7 @@
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Network.DFINITY.Parse (parseWasm, WasmOp(..), Wasm(..)) where
+module Network.DFINITY.Parse (parseWasm, Wasm(..)) where
 
 import Control.Monad
 import qualified Data.ByteString.Char8 as B8

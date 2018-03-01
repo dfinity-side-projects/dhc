@@ -3,7 +3,8 @@
 module Hero (Wasm, HeroVM, parseWasm,
   runWasmVM, mkHeroVM, setArgsVM,
   globalVM,
-  runWasm, getNumVM, putNumVM, WasmOp(I32_const, I64_const)) where
+  runWasm, getNumVM, putNumVM,
+  CustomWasmOp(I32_const, I64_const), WasmOp) where
 
 import Data.Bits
 import Data.Char (ord)
@@ -15,6 +16,8 @@ import Data.Maybe
 import Data.Word
 
 import Network.DFINITY.Parse
+
+import WasmOp
 
 data HeroVM = HeroVM
   { globs :: IntMap WasmOp
