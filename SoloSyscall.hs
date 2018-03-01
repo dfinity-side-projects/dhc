@@ -30,15 +30,15 @@ isIO _ = False
 -- TODO: Get rid of #RealWorld token.
 genSyscall :: Bool -> Int64 -> Int64 -> [QuasiWasm]
 genSyscall impure svc argCount =
-  ReduceArgs (fromIntegral argCount) : (Op <$>
-    [ I32_const $ fromIntegral svc
-    , Get_global sp
-    , Get_global hp
-    ]) ++ [CallSym "dhc.system"] ++ (Op <$>
-    -- Our convention:
-    --   [sp] = result ; [sp - 4] = hp_new
-    -- Return (result, #RealWorld).
-    if impure then
+  [ Custom $ ReduceArgs $ fromIntegral argCount
+  , I32_const $ fromIntegral svc
+  , Get_global sp
+  , Get_global hp
+  , Custom $ CallSym "dhc.system"
+  -- Our convention:
+  --   [sp] = result ; [sp - 4] = hp_new
+  -- Return (result, #RealWorld).
+  ] ++ if impure then
       [ Get_global sp  -- hp = [sp - 4]
       , I32_const 4
       , I32_sub
@@ -97,4 +97,3 @@ genSyscall impure svc argCount =
       , Set_global sp
       , End
       ]
-    )

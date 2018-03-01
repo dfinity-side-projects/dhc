@@ -661,7 +661,6 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
   -- We keep their types around for various checks.
   , ("Int-==", TC "Int" :-> TC "Int" :-> TC "Bool")
   , ("String-==", TC "String" :-> TC "String" :-> TC "Bool")
-  , ("#syscall", TC "Int" :-> TC "Int" :-> TApp (TC "IO") a)
   ]) ++
   [ ("False",   (jp 0 0, TC "Bool"))
   , ("True",    (jp 1 0, TC "Bool"))
@@ -707,16 +706,16 @@ expandSyscalls ext arities = ffix $ \rec (Ast ast) -> Ast $ case ast of
   -- Example:
   --  target.fun 1 2 "three"
   -- becomes:
-  --  #syscall 6 0 "target" "fun" 3 1 2 "three"
-  Qual c f | Just n <- ext c f -> foldl1' appIt [Var "#syscall", I (fromIntegral $ n + 3), I 0, S (pack $ c2w <$> c), S (pack $ c2w <$> f), I (fromIntegral n)]
+  --  #nfsyscall 6 0 "target" "fun" 3 1 2 "three"
+  Qual c f | Just n <- ext c f -> foldl1' appIt [Var "#nfsyscall", I (fromIntegral $ n + 3), I 0, S (pack $ c2w <$> c), S (pack $ c2w <$> f), I (fromIntegral n)]
   -- Example:
   --  call target.fun "abc123" 1 2 "three"
   --  call fun "abc123" 1 2 "three"
   -- becomes:
-  --  #syscall 7 8 "target" "fun" 3 "abc123" 1 2 "three"
-  --  #syscall 6 9 "fun" 3 "abc123" 1 2 "three"
-  CCall "" f | Just n <- lookup f arities -> foldl1' appIt [Var "#syscall", I (fromIntegral $ n + 3), I 9, S (pack $ c2w <$> f), I (fromIntegral n)]
-  CCall c f | Just n <- ext c f -> foldl1' appIt [Var "#syscall", I (fromIntegral $ n + 4), I 8, S (pack $ c2w <$> c), S (pack $ c2w <$> f), I (fromIntegral n)]
+  --  #nfsyscall 7 8 "target" "fun" 3 "abc123" 1 2 "three"
+  --  #nfsyscall 6 9 "fun" 3 "abc123" 1 2 "three"
+  CCall "" f | Just n <- lookup f arities -> foldl1' appIt [Var "#nfsyscall", I (fromIntegral $ n + 3), I 9, S (pack $ c2w <$> f), I (fromIntegral n)]
+  CCall c f | Just n <- ext c f -> foldl1' appIt [Var "#nfsyscall", I (fromIntegral $ n + 4), I 8, S (pack $ c2w <$> c), S (pack $ c2w <$> f), I (fromIntegral n)]
   _ -> rec ast
   where appIt x y = Ast x :@ Ast y
 

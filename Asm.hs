@@ -4,7 +4,7 @@
 module Asm (hsToWasm, Ins(..),
   WasmType(Ref),  -- Re-export from WasmOp.
   tag_const, Tag(..), hsToIns,
-  QuasiWasm(..),
+  QuasiWasm, QuasiWasmHelper(..),
   GlobalTable, Boost(..), catBoost) where
 import Control.Arrow
 import Data.Map (Map)
@@ -126,10 +126,12 @@ type GlobalTable = ([String], M.Map String Int, [(String, ([WasmType], [WasmType
 type WasmImport = ((String, String), ([WasmType], [WasmType]))
 
 -- | A few helpers for inline assembly.
-data QuasiWasm = Op WasmOp
-  | CallSym String  -- Find function index when generating wasm.
+type QuasiWasm = CustomWasmOp QuasiWasmHelper
+data QuasiWasmHelper =
+    CallSym String  -- Find function index when generating wasm.
   | ReduceArgs Int  -- Copy arguments from heap and reduce them to WHNF.
   | LazyUpdate Int  -- Lazily update with indirection node, then return.
+  deriving Show
 
 data Boost = Boost [WasmImport] [(String, (Type, [QuasiWasm]))]
 
@@ -170,7 +172,7 @@ astToIns (AstPlus es ws storage ds ts) = ((es, funs, wrapme), second compile <$>
   translateType t = error $ "no corresponding wasm type: " ++ show t
   funs = M.fromList $ ((\(name, Ast (Lam as _)) -> (name, length as)) <$> ds)
 
-tag_const :: Tag -> WasmOp
+tag_const :: Tag -> CustomWasmOp a
 tag_const = I32_const . fromIntegral . fromEnum
 
 insToBin :: Boost -> (GlobalTable, [(String, [Ins])]) -> (([(String, Int)], [(String, ([WasmType], [WasmType]))]), [Int])
@@ -210,8 +212,8 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
     , ([I32], [])  -- sethp, setsp.
     ] ++ (snd <$> wrapme)  -- wdecl functions.
   exportFun name internalName = encStr name ++ [0, wasmFunNo internalName]
-  -- TODO: Remove "#syscall".
-  localCount "#syscall" = 2
+  -- TODO: Remove "#nfsyscall".
+  localCount "#nfsyscall" = 2
   localCount _ = 0
   -- Returns arity and 0-indexed number of given global function.
   getGlobal s = case M.lookup s funs of
@@ -794,114 +796,6 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
     , Set_global hp
     ] ++ concatMap fromIns [UpdatePop 2, Eval] ++ [End]
 
-  syscallAsm :: [WasmOp]
-  syscallAsm =
-    -- Example:
-    --
-    --   putStr ("He" ++ "llo")
-    --
-    -- becomes:
-    --
-    --   (#syscall 1 21) ("He" ++ "llo") #RealWorld
-    --
-    -- After removing the innermost spine, we have:
-    --
-    --   1, 21, (#syscall 1 21), (... :@ ("He" ++ "llo")), (... :@ #RealWorld)
-    --
-    -- That is, the last two arguments are still on a spine, and we retain
-    -- a pointer to `#syscall 1 21`. Normally, this pointer enables sharing
-    -- (laziness) but we ignore it in this case because it's a syscall with
-    -- a potential side effect.
-    [ Get_global sp  -- sp = sp + 12
-    , I32_const 12
-    , I32_add
-    , Set_global sp
-    , Get_global sp  -- [[sp - 4] + 8] is now the syscall number.
-    , I32_const 4
-    , I32_sub
-    , I32_load 2 0
-    , I32_const 8
-    , I32_add
-    , I32_load 2 0
-    , Get_global sp  -- local0 = [[sp - 8] + 8], the number of arguments.
-    , I32_const 8
-    , I32_sub
-    , I32_load 2 0
-    , I32_const 8
-    , I32_add
-    , I32_load 2 0
-    , Tee_local 0  -- local1 = local0
-    , Set_local 1
-
-    , Block Nada
-      [ Loop Nada  -- Encode all arguments.
-        [ Get_local 0  -- Break if local0 == 0.
-        , I32_eqz
-        , Br_if 1
-        -- Debone next argument...
-        , Get_global sp
-        , Get_global sp
-        , Get_local 1  -- [sp] = [[sp + 4*local1] + 12]
-        , I32_const 4
-        , I32_mul
-        , I32_add
-        , I32_load 2 0
-        , I32_const 12
-        , I32_add
-        , I32_load 2 0
-        , I32_store 2 0
-        , Get_global sp  -- sp = sp - 4
-        , I32_const 4
-        , I32_sub
-        , Set_global sp
-        -- ... then evaluate. TODO: Reduce to normal form.
-        , Call $ wasmFunNo "#eval"
-        , Get_local 0
-        , I32_const 1
-        , I32_sub
-        , Set_local 0
-        , Br 0
-        ]
-      ]
-    -- Example stack now holds:
-    --   "Hello", ("He" ++ "llo"), (... :@ #RealWorld)
-    , Get_global sp  -- #syscall(syscall_number, sp, hp)
-    , Get_global hp
-    , Call $ wasmFunNo "dhc.system"
-    -- Our convention:
-    --   [sp] = result ; [sp - 4] = hp_new
-    -- We update the globals here, in WebAssembly.
-    , Get_global sp  -- hp = [sp - 4]
-    , I32_const 4
-    , I32_sub
-    , I32_load 2 0
-    , Set_global hp
-    , Get_global sp  -- [sp + 8*argCount] = [sp]
-    , Get_local 1
-    , I32_const 8
-    , I32_mul
-    , I32_add
-    , Get_global sp
-    , I32_load 2 0
-    , I32_store 2 0
-    , Get_global sp  -- sp = sp + 8*argCount - 4
-    , Get_local 1
-    , I32_const 8
-    , I32_mul
-    , I32_add
-    , I32_const 4
-    , I32_sub
-    , Set_global sp
-    -- Return (result, #RealWorld).
-    , Get_global sp  -- [sp + 8] = 42
-    , I32_const 8
-    , I32_add
-    , I32_const 42
-    , I32_store 2 0
-    ] ++ concatMap fromIns [Copro 0 2] ++
-    [ End
-    ]
-
   -- Primitive functions.
   primsMinimal :: [(String, [WasmOp])]
   primsMinimal =
@@ -919,13 +813,18 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
     , ("||", boolAsm I32_or)
     , ("++", catAsm)
     , ("String-==", strEqAsm)
-    , ("#syscall", syscallAsm)
     ]
 
-  deQuasi (CallSym s) = [Call $ wasmFunNo s]
-  deQuasi (ReduceArgs n) = concat $ replicate n $ concatMap fromIns [Push (n - 1), Eval]
-  deQuasi (LazyUpdate n) = concatMap fromIns [UpdatePop n, Eval] ++ [End]
-  deQuasi (Op op) = [op]
+  deQuasi :: QuasiWasm -> [WasmOp]
+  deQuasi (Custom x) = case x of
+    CallSym s -> [Call $ wasmFunNo s]
+    ReduceArgs n -> concat $ replicate n $ concatMap fromIns [Push (n - 1), Eval]
+    LazyUpdate n -> concatMap fromIns [UpdatePop n, Eval] ++ [End]
+
+  deQuasi (Block t body) = [Block t $ concatMap deQuasi body]
+  deQuasi (Loop  t body) = [Loop  t $ concatMap deQuasi body]
+  deQuasi (If    t body) = [If    t $ concatMap deQuasi body]
+  deQuasi (op) = [error "missing deQuasi case?" <$> op]
 
   prims = primsMinimal ++ (second (concatMap deQuasi . snd) <$> morePrims)
   primsType = M.fromList $ [(s, snd $ preludeMinimal M.! s) | s <- fst <$> primsMinimal]
