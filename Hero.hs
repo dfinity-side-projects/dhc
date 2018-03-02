@@ -2,6 +2,7 @@
 
 module Hero (Wasm, HeroVM, parseWasm,
   runWasmVM, mkHeroVM, setArgsVM,
+  setTable,
   globalVM,
   runWasm, getNumVM, putNumVM,
   CustomWasmOp(I32_const, I64_const), WasmOp) where
@@ -25,7 +26,9 @@ data HeroVM = HeroVM
   , stack :: [WasmOp]
   , insts :: [[WasmOp]]
   , mem   :: IntMap Int
-  } deriving Show
+  , sigs  :: IntMap ([WasmType], [WasmType])
+  , table :: IntMap (HeroVM -> [WasmOp] -> IO HeroVM)
+  }
 
 getNumVM :: Integral n => Int -> Int32 -> HeroVM -> n
 getNumVM w addr vm = getNum w addr $ mem vm
@@ -73,7 +76,7 @@ take' n as | n > length as = error "BAD TAKE"
 
 -- The `End` opcode is reintroduced at the ends of function calls, so that we
 -- know when to pop locals.
-runWasmVM :: Monad m => [HeroVM -> [WasmOp] -> m HeroVM] -> Wasm -> [Char] -> HeroVM -> m ([WasmOp], HeroVM)
+runWasmVM :: [HeroVM -> [WasmOp] -> IO HeroVM] -> Wasm -> [Char] -> HeroVM -> IO ([WasmOp], HeroVM)
 runWasmVM fns Wasm {imports, exports, decls, code} s herovm = let
   fCount = length imports
   run vm@HeroVM {insts, stack} | null insts = pure (stack, vm)
@@ -81,10 +84,15 @@ runWasmVM fns Wasm {imports, exports, decls, code} s herovm = let
     ((Loop _ _:rest):t) -> run vm {insts = rest:t}
     _                   -> run vm {insts = tail insts}
   run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
+    Call_indirect k -> do
+      let
+        -- TODO: Dynamic type-check.
+        inCount = length $ fst $ sigs vm IM.! k
+        (I32_const i:args) = take' (inCount + 1) stack
+      run =<< (table vm IM.! fromIntegral i) vm { stack = drop' (inCount + 1) stack, insts = i1 } (reverse args)
     Call i -> if i < fCount then do
         let k = length $ fst $ snd $ imports!!i
-        vm' <- (fns!!i) vm { stack = drop' k stack, insts = i1 } $ reverse $ take' k stack
-        run vm'
+        run =<< (fns!!i) vm { stack = drop' k stack, insts = i1 } (reverse $ take' k stack)
       else do
         let
           (locals, body) = code!!(i - fCount)
@@ -212,6 +220,8 @@ mkHeroVM :: Wasm -> HeroVM
 mkHeroVM w = HeroVM
   (IM.fromList $ zip [0..] $ head . snd <$> globals w) [] [] [] (IM.fromList $
     concatMap strToAssocs $ dataSection w)
+    (IM.fromList $ zip [0..] $ types w)
+    IM.empty
   where
   strToAssocs ([I32_const n], s) = zip [fromIntegral n..] $ ord <$> s
   strToAssocs _ = error "BUG!"
@@ -220,5 +230,8 @@ mkHeroVM w = HeroVM
 setArgsVM :: [WasmOp] -> HeroVM -> HeroVM
 setArgsVM ls vm = vm { stack = reverse ls ++ stack vm }
 
-runWasm :: Monad m => [HeroVM -> [WasmOp] -> m HeroVM] -> Wasm -> [Char] -> m [WasmOp]
+runWasm :: [HeroVM -> [WasmOp] -> IO HeroVM] -> Wasm -> [Char] -> IO [WasmOp]
 runWasm fns w s = fst <$> runWasmVM fns w s (mkHeroVM w)
+
+setTable :: Int32 -> (HeroVM -> [WasmOp] -> IO HeroVM) -> HeroVM -> HeroVM
+setTable slot fun vm = vm { table = IM.insert (fromIntegral slot) fun $ table vm }

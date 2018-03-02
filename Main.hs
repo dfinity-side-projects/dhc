@@ -39,4 +39,4 @@ syscall vm [I32_const n, I32_const sp, I32_const hp]
   where
     addr = getNumVM 4 (sp + 4) vm :: Int32
     getTag = getNumVM 1 addr vm :: Int
-syscall a b = error $ "BUG! bad syscall " ++ show (a, b)
+syscall _ _ = error "BUG! bad syscall "

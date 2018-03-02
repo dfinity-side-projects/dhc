@@ -264,6 +264,10 @@ wasm = do
           0x10 -> do
             i <- varuint32
             pure $ Call i
+          0x11 -> do
+            i <- varuint32
+            0 <- varuint1
+            pure $ Call_indirect i
           _ -> bad ("bad opcode " ++ show opcode)
       if
         | End <- s -> pure []
