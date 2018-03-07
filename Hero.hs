@@ -76,7 +76,7 @@ take' n as | n > length as = error "BAD TAKE"
 
 -- The `End` opcode is reintroduced at the ends of function calls, so that we
 -- know when to pop locals.
-runWasmVM :: [HeroVM -> [WasmOp] -> IO HeroVM] -> Wasm -> [Char] -> HeroVM -> IO ([WasmOp], HeroVM)
+runWasmVM :: ((String, String) -> HeroVM -> [WasmOp] -> IO HeroVM) -> Wasm -> [Char] -> HeroVM -> IO ([WasmOp], HeroVM)
 runWasmVM fns Wasm {imports, exports, decls, code} s herovm = let
   fCount = length imports
   run vm@HeroVM {insts, stack} | null insts = pure (stack, vm)
@@ -91,8 +91,10 @@ runWasmVM fns Wasm {imports, exports, decls, code} s herovm = let
         (I32_const i:args) = take' (inCount + 1) stack
       run =<< (table vm IM.! fromIntegral i) (step $ drop' (inCount + 1) stack) (reverse args)
     Call i -> if i < fCount then do
-        let k = length $ fst $ snd $ imports!!i
-        run =<< (fns!!i) (step $ drop' k stack) (reverse $ take' k stack)
+        let
+          (importName, (ins, _)) = imports!!i
+          k = length ins
+        run =<< fns importName (step $ drop' k stack) (reverse $ take' k stack)
       else do
         let
           (locals, body) = code!!(i - fCount)
@@ -220,7 +222,7 @@ mkHeroVM w = HeroVM
 setArgsVM :: [WasmOp] -> HeroVM -> HeroVM
 setArgsVM ls vm = vm { stack = reverse ls ++ stack vm }
 
-runWasm :: [HeroVM -> [WasmOp] -> IO HeroVM] -> Wasm -> [Char] -> IO [WasmOp]
+runWasm :: ((String, String) -> HeroVM -> [WasmOp] -> IO HeroVM) -> Wasm -> [Char] -> IO [WasmOp]
 runWasm fns w s = fst <$> runWasmVM fns w s (mkHeroVM w)
 
 setTable :: Int32 -> (HeroVM -> [WasmOp] -> IO HeroVM) -> HeroVM -> HeroVM

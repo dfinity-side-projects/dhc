@@ -12,10 +12,10 @@ main = do
   s <- B.getContents
   case parseWasm s of
     Left err -> putStrLn $ "parse error: " ++ show err
-    Right out -> (print out >>) $ void $ runWasm [syscall] out "main"
+    Right out -> (print out >>) $ void $ runWasm syscall out "#main"
 
-syscall :: HeroVM -> [WasmOp] -> IO HeroVM
-syscall vm [I32_const n, I32_const sp, I32_const hp]
+syscall :: (String, String) -> HeroVM -> [WasmOp] -> IO HeroVM
+syscall ("dhc", "system") vm [I32_const n, I32_const sp, I32_const hp]
   | n == 21 = do
     when (getTag /= 6) $ error "BUG! want String"
     let slen = getNumVM 4 (addr + 4) vm
@@ -39,4 +39,4 @@ syscall vm [I32_const n, I32_const sp, I32_const hp]
   where
     addr = getNumVM 4 (sp + 4) vm :: Int32
     getTag = getNumVM 1 addr vm :: Int
-syscall _ _ = error "BUG! bad syscall "
+syscall _ _ _ = error "BUG! bad syscall "

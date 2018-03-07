@@ -163,7 +163,7 @@ wasm = do
         case k of
           Function -> pure $ Just (fieldStr, t)
           Memory -> pure Nothing
-          _ -> error "TODO"
+          Table -> pure Nothing
       pure w { exports = catMaybes es }
 
     sectFunction w = do
