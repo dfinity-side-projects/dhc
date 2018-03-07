@@ -26,9 +26,9 @@ function store32(addr, x) { dv.setUint32(addr, x, true); }
 function runWasmInts(a){WebAssembly.instantiate(new Uint8Array(a),
 {dhc:{system:(n,sp,hp) => { return Haste.syscall(n,sp,hp); } }}).then(x => {
 expo = x.instance.exports;
-dv = new DataView(expo.mem.buffer);
+dv = new DataView(expo.memory.buffer);
 document.getElementById('out').innerHTML ="";
-expo.main()});
+expo['#main']()});
 }
 </script>
 <script src="dhcdemo.js">

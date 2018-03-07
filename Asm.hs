@@ -128,7 +128,9 @@ type WasmImport = ((String, String), ([WasmType], [WasmType]))
 -- | A few helpers for inline assembly.
 type QuasiWasm = CustomWasmOp QuasiWasmHelper
 data QuasiWasmHelper =
-    CallSym String  -- Find function index when generating wasm.
+    CallSym String  -- Find function index and call it.
+  -- Find type index and call_indirect it.
+  | CallIndirectType [WasmType] [WasmType]
   | ReduceArgs Int  -- Copy arguments from heap and reduce them to WHNF.
   | LazyUpdate Int  -- Lazily update with indirection node, then return.
   | TupleBPRealWorld  -- [sp + 4] = (bp, #RealWorld)
@@ -183,6 +185,7 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
     , sect 1 $ uncurry encSig . snd <$> BM.assocs typeMap  -- Type section.
     , sect 2 $ importFun <$> imps  -- Import section.
     , sect 3 $ pure . fst . fst . snd <$> wasmFuns  -- Function section.
+    , sect 4 [[encType AnyFunc, 0] ++ leb128 256]  -- Table section (0 = no-maximum).
     , sect 5 [[0, nPages]]  -- Memory section (0 = no-maximum).
     , sect 6  -- Global section (1 = mutable).
       [ [encType I32, 1, 0x41] ++ leb128 (65536*nPages - 4) ++ [0xb]  -- SP
@@ -190,17 +193,18 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
       , [encType I32, 1, 0x41, 0, 0xb]  -- BP
       ]
     , sect 7 $  -- Export section.
-      [ encStr "mem" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
-      , exportFun "main" "#main"
-      , exportFun "getsp" "#getsp"
-      , exportFun "setsp" "#setsp"
-      , exportFun "gethp" "#gethp"
-      , exportFun "sethp" "#sethp"
+      [ encStr "memory" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
+      , encStr "table" ++ [1, 0]  -- 1 = external_kind Table, 0 = memory index.
+      , exportFun "#main" "#main"
+      , exportFun "#getsp" "#getsp"
+      , exportFun "#setsp" "#setsp"
+      , exportFun "#gethp" "#gethp"
+      , exportFun "#sethp" "#sethp"
       ]
       -- The "contract" functions are exported with "_" prepended.
       ++ [exportFun ('_':s) s | s <- exs]
-      -- The "wdecl" functions are exported with "w_" prepended.
-      ++ [exportFun ('w':'_':s) ('@':s) | (s, _) <- wrapme]
+      -- The "wdecl" functions are exported verbatim.
+      ++ [exportFun s ('@':s) | (s, _) <- wrapme]
     , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
     ]
   -- 0 = external_kind Function.
@@ -234,8 +238,7 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
     ++ ((\(s, p) -> (s, ((typeNo [] [], localCount s), p))) <$> prims)
     -- Functions from the program.
     ++ ((\(f, g) -> (f, ((typeNo [] [], 0), (++ [End]) $ concatMap fromIns g))) <$> gmachine)
-    -- Outer "main" function. It calls the internal "main" function (which
-    -- is "_main" if exported).
+    -- Outer "#main" function. It calls the internal "main" function.
     ++ [("#main", ((typeNo [] [], 0),
         -- The magic constant 42 represents the RealWorld.
         [ Get_global sp  -- [sp] = 42
@@ -254,11 +257,56 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
   wasmFunMap = M.fromList $ zip (((\(m, f) -> m ++ "." ++ f) . fst <$> imps) ++ (fst <$> wasmFuns)) [0..]
   -- wasmFunNo = (wasmFunMap M.!)
   wasmFunNo s = fromMaybe (error s) $ M.lookup s wasmFunMap
+
   refToI32 (Ref _) = I32
   refToI32 t = t
   wrap (f, (ins, outs)) = (,) ('@':f) $ (,) (typeNo ins outs, 0) $
+    -- Given a function call represented as a tree t on the stack, the
+    -- G-machine ordinarily:
+    --
+    --   1. Removes the spine, so the arguments lie on the stack. The node
+    --   t is preserved, and follows the arguments.
+    --   2. Calls the wasm top-level function. The result is pushed on the
+    --   stack.
+    --   3. The call in step 2 finishes by overwriting t with an indirection
+    --   node (lazy update).
+    --
+    -- Here, we simulate step 1, so we provide a destination for the
+    -- lazy update in step 3. (It's never used; we should optimize away
+    -- unnecessary updates one day.)
+    --
+    -- All functions that receive messages are IO (otherwise why bother
+    -- sending?) and the IO monad requires special treatment.
+    -- Top-level IO functions return functions that expect a #RealWorld
+    -- argument. (In contrast, the return and bind functions expect a
+    -- #RealWorld dummy argument,)
+    --
+    -- Thus the top of the stack must be an Ap node whose right child
+    -- is #RealWorld. (Morally, the left child should be the function call t
+    -- but our spine removal is indifferent.)
+
+    -- Start with a spined #RealWorld.
+    [ Get_global hp  -- [hp] = TagAp
+    , tag_const TagAp
+    , I32_store 2 0
+    , Get_global hp  -- [hp + 12] = 42
+    , I32_const 12
+    , I32_add
+    , I32_const 42
+    , I32_store 2 0
+    , Get_global sp  -- [sp] = hp
+    , Get_global hp
+    , I32_store 2 0
+    , Get_global sp  -- sp = sp - 4
+    , I32_const 4
+    , I32_sub
+    , Set_global sp
+    , Get_global hp  -- hp = hp + 16
+    , I32_const 16
+    , I32_add
+    , Set_global hp
     -- Anticipate UpdatePop.
-    [ Get_global sp  -- [sp] = hp
+    , Get_global sp  -- [sp] = hp
     , Get_global hp
     , I32_store 2 0
     , Get_global sp  -- sp = sp - 4
@@ -359,6 +407,8 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
     , I32_add
     , I64_load 3 0
     ]
+    -- For JS demo. Returns first 32 bits of an Int.
+    {-
   wdeclOut I32 =
     [ Get_global sp  -- sp = sp + 4
     , I32_const 4
@@ -370,6 +420,7 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
     , I32_add
     , I32_load 2 0
     ]
+    -}
   wdeclOut _ = error "TODO"
   sect t xs = t : lenc (varlen xs ++ concat xs)
   encStr s = lenc $ ord <$> s
@@ -378,6 +429,7 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
   encType I32 = 0x7f
   encType I64 = 0x7e
   encType (Ref _) = encType I32
+  encType AnyFunc = 0x70
   encType _ = error "TODO"
   -- | Encodes function signature.
   encSig ins outs = 0x60 : lenc (encType <$> ins) ++ lenc (encType <$> outs)
@@ -453,7 +505,7 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
         , Br 1
         ]  -- If
       ]  -- Loop
-    , Set_global sp
+    , Set_global sp  -- restore bp, sp
     , Set_global bp
     ] ++ nest n ++ [End]
     where
@@ -819,6 +871,7 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
   deQuasi :: QuasiWasm -> [WasmOp]
   deQuasi (Custom x) = case x of
     CallSym s -> [Call $ wasmFunNo s]
+    CallIndirectType ins outs -> [Call_indirect $ typeNo ins outs]
     ReduceArgs n -> concat $ replicate n $ concatMap fromIns [Push (n - 1), Eval]
     LazyUpdate n -> concatMap fromIns [UpdatePop n, Eval] ++ [End]
     TupleBPRealWorld ->  -- [sp + 4] = (bp, #RealWorld)
@@ -974,10 +1027,6 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
       [ Get_global sp  -- [sp] = hp
       , Get_global hp
       , I32_store 2 0
-      , Get_global sp  -- sp = sp - 4
-      , I32_const 4
-      , I32_sub
-      , Set_global sp
       , Get_global hp  -- [hp] = TagGlobal | (n << 8)
       , I32_const $ fromIntegral $ fromEnum TagGlobal + 256*n
       , I32_store 2 0
@@ -990,6 +1039,10 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
       , I32_const 16
       , I32_add
       , Set_global hp
+      , Get_global sp  -- sp = sp - 4
+      , I32_const 4
+      , I32_sub
+      , Set_global sp
       ]
     Slide 0 -> []
     Slide n ->
