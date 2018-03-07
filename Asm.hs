@@ -133,7 +133,7 @@ data QuasiWasmHelper =
   | CallIndirectType [WasmType] [WasmType]
   | ReduceArgs Int  -- Copy arguments from heap and reduce them to WHNF.
   | LazyUpdate Int  -- Lazily update with indirection node, then return.
-  | TupleBPRealWorld  -- [sp + 4] = (bp, #RealWorld)
+  | TupleRealWorld  -- [sp + 4] = (POP, #RealWorld)
   deriving Show
 
 data Boost = Boost [WasmImport] [(String, (Type, [QuasiWasm]))]
@@ -874,8 +874,9 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
     CallIndirectType ins outs -> [Call_indirect $ typeNo ins outs]
     ReduceArgs n -> concat $ replicate n $ concatMap fromIns [Push (n - 1), Eval]
     LazyUpdate n -> concatMap fromIns [UpdatePop n, Eval] ++ [End]
-    TupleBPRealWorld ->  -- [sp + 4] = (bp, #RealWorld)
-      [ Get_global hp  -- [hp] = TagSum | (2 << 8)
+    TupleRealWorld ->  -- [sp + 4] = (POP, #RealWorld)
+      [ Set_global bp  -- bp = POP
+      , Get_global hp  -- [hp] = TagSum | (2 << 8)
       , I32_const $ fromIntegral $ fromEnum TagSum + 256 * 2
       , I32_store 2 0
       , Get_global hp  -- [hp + 4] = 0
