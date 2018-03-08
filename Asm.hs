@@ -38,7 +38,7 @@ data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal String
   | MkAp | Slide Int | Split Int | Eval
   | UpdatePop Int | UpdateInd Int | Alloc Int
   | Casejump [(Maybe Int, [Ins])] | Trap
-  | PushCallIndirect [String]
+  | PushCallIndirect [WasmType]
   deriving Show
 
 nPages :: Int
@@ -129,7 +129,7 @@ type GlobalTable =
   ( [String]
   , M.Map String Int
   , [(String, ([WasmType], [WasmType]))]
-  , [[String]]
+  , [[WasmType]]
   )
 
 type WasmImport = ((String, String), ([WasmType], [WasmType]))
@@ -1353,10 +1353,10 @@ data CompilerState = CompilerState
   -- Each call_indirect indexes into the type section of the binary.
   -- We record the types used by the binary so we can collect and look them
   -- up when generating assembly.
-  , callIndirectTypes :: [[String]]
+  , callIndirectTypes :: [[WasmType]]
   }
 
-compile :: [String] -> Ast -> ([Ins], [[String]])
+compile :: [String] -> Ast -> ([Ins], [[WasmType]])
 compile storage d = (ins, ts)
   where (ins, CompilerState _ ts) = runState (mk1 storage d) $ CompilerState [] []
 

@@ -25,6 +25,8 @@ import Data.Maybe
 import GHC.Generics (Generic)
 import Text.Parsec hiding (State)
 
+import WasmOp (WasmType(..))
+
 #ifdef __HASTE__
 type ShortByteString = ByteString
 #endif
@@ -33,7 +35,7 @@ instance Binary Type
 
 infixl 5 :@
 data AstF a = Qual String String | CCall String String
-  | Pack Int Int | I Int64 | S ShortByteString | Var String | Far [String]
+  | Pack Int Int | I Int64 | S ShortByteString | Var String | Far [WasmType]
   | a :@ a | Cas a [(a, a)]
   | Lam [String] a | Let [(String, a)] a
   | Placeholder String Type deriving (Read, Show, Functor, Generic)
@@ -573,12 +575,17 @@ fstHack = r where Right [r] = parseDefs "fst p = case p of (x, y) -> x"
 sndHack :: (String, Ast)
 sndHack = r where Right [r] = parseDefs "snd p = case p of (x, y) -> y"
 
-basicsFromTuple :: Type -> [String]
+getBasic :: String -> Maybe WasmType
+getBasic "I32" = Just I32
+getBasic "Int" = Just I64
+getBasic _ = Nothing
+
+basicsFromTuple :: Type -> [WasmType]
 basicsFromTuple (TC "()") = []
-basicsFromTuple (TC s) = [s]
+basicsFromTuple (TC s) = [fromJust $ getBasic s]
 basicsFromTuple (TApp (TC "()") t) = f t where
-  f (TC s `TApp` rest) = s:f rest
-  f (TC s) = [s]
+  f (TC s `TApp` rest) = fromJust (getBasic s):f rest
+  f (TC s) = [fromJust $ getBasic s]
   f _ = error "expected tuple"
 basicsFromTuple _ = error "expected tuple"
 
@@ -634,8 +641,12 @@ propagate cs t = mapM_ propagateTyCon cs where
     TApp (TC "()") rest -> allBasic rest
     _ -> lift $ Left $ "no Message instance: " ++ show t
   propagateTyCon c = error $ "TODO: " ++ c
-  allBasic (TC _) = pure ()
-  allBasic (TC _ `TApp` rest) = allBasic rest
+  allBasic (TC s) = case getBasic s of
+    Nothing -> lift $ Left $ "no Message instance: " ++ s
+    Just _ -> pure ()
+  allBasic (TC s `TApp` rest) = case getBasic s of
+    Nothing -> lift $ Left $ "no Message instance: " ++ s
+    Just _ -> allBasic rest
   allBasic bad = lift $ Left $ "no Message instance: " ++ show bad
 
 -- TODO: Apply substitutions for friendlier messages.
