@@ -99,7 +99,7 @@ runWasmVM fns Wasm {imports, exports, decls, code} s herovm = let
         let
           (locals, body) = code!!(i - fCount)
           k = length $ fst $ decls !! (i - fCount)
-        run vm { stack = drop' k stack, locs = IM.fromList (zip [0..] $ take' k stack ++ locals):locs, insts = body:(End: head i1):tail i1 }
+        run vm { stack = drop' k stack, locs = IM.fromList (zip [0..] $ reverse (take' k stack) ++ locals):locs, insts = body:(End: head i1):tail i1 }
     End -> run vm { locs = tail locs, insts = i1 }
     Set_local i -> run vm {locs = IM.insert i (head stack) (head locs):tail locs, stack = tail stack, insts = i1}
     Get_local i -> if i >= IM.size (head locs) then error $ "BUG! bad local: " ++ show(i, locs) else run $ step $ head locs IM.! i:stack
