@@ -236,6 +236,7 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes), gmachine) = DfnWa
     , ([I32], [])  -- sethp, setsp.
     ]
     ++ (snd <$> wrapme)  -- wdecl functions.
+    ++ (flip (,) [] <$> ciTypes)  -- call_indirect types.
   exportFun name internalName = encStr name ++ [0, wasmFunNo internalName]
   -- TODO: Remove "#nfsyscall".
   localCount "#nfsyscall" = 2
@@ -281,7 +282,37 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes), gmachine) = DfnWa
     ++ (wrap <$> wrapme)
 
   ciFuns = wrapCallIndirect <$> ciTypes
-  wrapCallIndirect [] = ("[]", ((typeNo [] [], 0),
+  -- When sending a message with only one item, we have a bare argument
+  -- instead of an argument tuple
+  wrapCallIndirect [t] = (show [t], ((typeNo [] [], 0),
+    -- Evaluate single argument.
+    concatMap fromIns [ Push 1, Eval ] ++
+    (case t of
+      I64 ->
+        [ Get_global sp  -- PUSH [[sp + 4] + 8].64
+        , I32_const 4
+        , I32_add
+        , I32_load 2 0
+        , I32_const 8
+        , I32_add
+        , I64_load 3 0
+        ]
+      _ ->
+        [ Get_global sp  -- PUSH [[sp + 4] + 4]
+        , I32_const 4
+        , I32_add
+        , I32_load 2 0
+        , I32_const 4
+        , I32_add
+        , I32_load 2 0
+        ]
+    ) ++
+    [ Get_global sp  -- sp = sp + 4
+    , I32_const 4
+    , I32_add
+    , Set_global sp
+    ] ++
+    -- Get slot.
     concatMap fromIns [ Push 0, Eval ] ++
     [ Get_global sp  -- PUSH [[sp + 4] + 4]
     , I32_const 4
@@ -290,7 +321,72 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes), gmachine) = DfnWa
     , I32_const 4
     , I32_add
     , I32_load 2 0
-    , Call_indirect $ typeNo [] []
+    , Call_indirect $ typeNo [t] []
+    , Get_global sp  -- sp = sp + 16
+    , I32_const 16
+    , I32_add
+    , Set_global sp
+    ] ++ deQuasi (Custom NilRealWorld)))
+  wrapCallIndirect ty = (show ty, ((typeNo [] [], 0),
+    -- Evaluate argument tuple.
+    concatMap fromIns [ Push 1, Eval ] ++
+    concat [
+      [ Get_global sp  -- sp = sp - 4
+      , I32_const 4
+      , I32_sub
+      , Set_global sp
+      , Get_global sp  -- [sp + 4] = [[sp + 8] + k]
+      , I32_const 4
+      , I32_add
+      , Get_global sp
+      , I32_const 8
+      , I32_add
+      , I32_load 2 0
+      , I32_const k
+      , I32_add
+      , I32_load 2 0
+      , I32_store 2 0
+      , Call $ wasmFunNo "#eval"  -- Evaluate.
+      ] ++ (case t of
+        I64 ->
+          [ Get_global sp  -- PUSH [[sp + 4] + 8].64
+          , I32_const 4
+          , I32_add
+          , I32_load 2 0
+          , I32_const 8
+          , I32_add
+          , I64_load 3 0
+          ]
+        _ ->
+          [ Get_global sp  -- PUSH [[sp + 4] + 4]
+          , I32_const 4
+          , I32_add
+          , I32_load 2 0
+          , I32_const 4
+          , I32_add
+          , I32_load 2 0
+          ]
+      ) ++
+      [ Get_global sp  -- sp = sp + 4
+      , I32_const 4
+      , I32_add
+      , Set_global sp
+      ] | (t, k) <- zip ty [8, 12..]] ++
+    [ Get_global sp  -- sp = sp + 4
+    , I32_const 4
+    , I32_add
+    , Set_global sp
+    ] ++
+    -- Get slot.
+    concatMap fromIns [ Push 0, Eval ] ++
+    [ Get_global sp  -- PUSH [[sp + 4] + 4]
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , Call_indirect $ typeNo ty []
     , Get_global sp  -- sp = sp + 16
     , I32_const 16
     , I32_add
@@ -326,7 +422,8 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes), gmachine) = DfnWa
     --
     -- Thus the top of the stack must be an Ap node whose right child
     -- is #RealWorld. (Morally, the left child should be the function call t
-    -- but our spine removal is indifferent.)
+    -- but our spine removal is indifferent. Our stack dumping routine can
+    -- get confused though.)
 
     -- Start with a spined #RealWorld.
     [ Get_global hp  -- [hp] = TagAp
@@ -1146,17 +1243,18 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes), gmachine) = DfnWa
       , Call $ wasmFunNo "#push"
       ]
     MkAp -> [ Call $ wasmFunNo "#mkap" ]
-    PushCallIndirect [] ->
+    PushCallIndirect ty ->
       [ Get_global sp  -- [sp] = hp
       , Get_global hp
       , I32_store 2 0
+      -- 3 arguments: slot, argument tuple, #RealWorld.
       , Get_global hp  -- [hp] = TagGlobal | (3 << 8)
       , I32_const $ fromIntegral $ fromEnum TagGlobal + 256*3
       , I32_store 2 0
-      , Get_global hp  -- [hp + 4] = wrapCallIndirect []
+      , Get_global hp  -- [hp + 4] = wrapCallIndirect (show ty)
       , I32_const 4
       , I32_add
-      , I32_const $ fromIntegral $ wasmFunNo "[]" - firstPrim
+      , I32_const $ fromIntegral $ wasmFunNo (show ty) - firstPrim
       , I32_store 2 0
       , Get_global hp  -- hp = hp + 16
       , I32_const 16

@@ -576,13 +576,14 @@ sndHack :: (String, Ast)
 sndHack = r where Right [r] = parseDefs "snd p = case p of (x, y) -> y"
 
 getBasic :: String -> Maybe WasmType
+getBasic "Databuf" = Just I32
 getBasic "I32" = Just I32
 getBasic "Int" = Just I64
 getBasic _ = Nothing
 
 basicsFromTuple :: Type -> [WasmType]
 basicsFromTuple (TC "()") = []
-basicsFromTuple (TC s) = [fromJust $ getBasic s]
+basicsFromTuple (TC s) = [fromMaybe (error $ "bad basic: " ++ s) $ getBasic s]
 basicsFromTuple (TApp (TC "()") t) = f t where
   f (TC s `TApp` rest) = fromJust (getBasic s):f rest
   f (TC s) = [fromJust $ getBasic s]
