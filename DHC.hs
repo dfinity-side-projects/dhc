@@ -33,7 +33,7 @@ instance Binary Type
 
 infixl 5 :@
 data AstF a = Qual String String | CCall String String
-  | Pack Int Int | I Int64 | S ShortByteString | Var String
+  | Pack Int Int | I Int64 | S ShortByteString | Var String | Far [String]
   | a :@ a | Cas a [(a, a)]
   | Lam [String] a | Let [(String, a)] a
   | Placeholder String Type deriving (Read, Show, Functor, Generic)
@@ -416,7 +416,7 @@ gather findExport prelude env (Ast ast) = case ast of
   S s -> pure $ AAst (TC "String") $ S s
   Pack m n -> do  -- Only tuples are pre`Pack`ed.
     xs <- replicateM n newTV
-    let r = foldl' (TApp) (TC "()") xs
+    let r = foldr1 TApp $ TC "()":xs
     pure $ AAst (foldr (:->) r xs) $ Pack m n
   Var "_" -> do
     x <- newTV
@@ -508,6 +508,7 @@ instantiate (ty, qs) = do
 generalize :: [(String, Type)] -> Map String [String] -> AAst Type -> (QualType, Ast)
 generalize soln ctx a0@(AAst t0 _) = ((t, qs), dictSolve dsoln soln ast) where
   (t, qs) = runState (generalize' ctx $ typeSolve soln t0) []
+  -- TODO: Need to sort qs?
   dsoln = zip qs $ ("#d" ++) . show <$> [(0::Int)..]
   ast = case deAnn a0 of
     Ast (Lam ss body) -> Ast $ Lam (dvars ++ ss) body
@@ -543,8 +544,8 @@ methods = M.fromList
   [ ("==", (a :-> a :-> TC "Bool", [("Eq", "a")]))
   , (">>=", (TApp m a :-> (a :-> TApp m b)  :-> TApp m b, [("Monad", "m")]))
   , ("pure", (a :-> TApp m a, [("Monad", "m")]))
-  , ("save", (a :-> TC "String", [("Save", "a")]))
-  , ("load", (TC "String" :-> a, [("Save", "a")]))
+  -- TODO: Can we move this Primea-specific function elsewhere?
+  , ("far", (TC "I32" :-> a :-> TApp (TC "IO") (TC "()"), [("Message", "a")]))
   ] where
     a = GV "a"
     b = GV "b"
@@ -572,6 +573,15 @@ fstHack = r where Right [r] = parseDefs "fst p = case p of (x, y) -> x"
 sndHack :: (String, Ast)
 sndHack = r where Right [r] = parseDefs "snd p = case p of (x, y) -> y"
 
+basicsFromTuple :: Type -> [String]
+basicsFromTuple (TC "()") = []
+basicsFromTuple (TC s) = [s]
+basicsFromTuple (TApp (TC "()") t) = f t where
+  f (TC s `TApp` rest) = s:f rest
+  f (TC s) = [s]
+  f _ = error "expected tuple"
+basicsFromTuple _ = error "expected tuple"
+
 dictSolve :: [((String, String), String)] -> [(String, Type)] -> Ast -> Ast
 dictSolve dsoln soln (Ast ast) = case ast of
   u :@ v  -> Ast $ rec u :@ rec v
@@ -582,8 +592,9 @@ dictSolve dsoln soln (Ast ast) = case ast of
   Placeholder "pure" t -> Ast $ Ast (Var "fst") :@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
 
   Placeholder "==" t -> rec $ Ast $ Placeholder "Eq" $ typeSolve soln t
-  Placeholder "save" t -> Ast $ Ast (Var "fst") :@ rec (Ast $ Placeholder "Save" $ typeSolve soln t)
-  Placeholder "load" t -> Ast $ Ast (Var "snd") :@ rec (Ast $ Placeholder "Save" $ typeSolve soln t)
+
+  Placeholder "far" t -> Ast $ Far $ basicsFromTuple $ typeSolve soln t
+
   Placeholder d t -> case typeSolve soln t of
     TV v -> Ast $ Var $ fromJust $ lookup (d, v) dsoln
     u -> Ast $ findInstance d u
@@ -595,10 +606,6 @@ dictSolve dsoln soln (Ast ast) = case ast of
       TC "Int"           -> Var "Int-=="
       TApp (TC "List") a -> Ast (Var "list_eq_instance") :@ rec (Ast $ Placeholder "Eq" a)
       e -> error $ "BUG! no Eq for " ++ show e
-    findInstance "Save" t = case t of
-      TC "String" -> Ast (Ast (Pack 0 2) :@ Ast (Var "String-save")) :@ Ast (Var "String-load")
-      TC "Int" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Int-save")) :@ Ast (Var "Int-load")
-      e -> error $ "BUG! no Save for " ++ show e
     findInstance "Monad" t = case t of
       TC "Maybe" -> Ast (Ast (Pack 0 2) :@ Ast (Var "maybe_pure")) :@ Ast (Var "maybe_monad")
       TC "IO" -> Ast (Ast (Pack 0 2) :@ Ast (Var "io_pure")) :@ Ast (Var "io_monad")
@@ -622,7 +629,14 @@ propagate cs t = mapM_ propagateTyCon cs where
     TC "Maybe" -> pure ()
     TC "IO" -> pure ()
     _ -> lift $ Left $ "no Monad instance: " ++ show t
+  propagateTyCon "Message" = case t of
+    TC _ -> pure ()
+    TApp (TC "()") rest -> allBasic rest
+    _ -> lift $ Left $ "no Message instance: " ++ show t
   propagateTyCon c = error $ "TODO: " ++ c
+  allBasic (TC _) = pure ()
+  allBasic (TC _ `TApp` rest) = allBasic rest
+  allBasic bad = lift $ Left $ "no Message instance: " ++ show bad
 
 -- TODO: Apply substitutions for friendlier messages.
 unify :: [(Type, Type)] -> StateT (Map String [String]) (Either String) [(String, Type)]
@@ -844,6 +858,7 @@ freeV scs = map f scs where
   g _    (Qual x y) = AAst [] $ Qual x y
   g _    (CCall x y) = AAst [] $ CCall x y
   g _    (Placeholder x y) = AAst [] $ Placeholder x y
+  g _    (Far t) = AAst [] $ Far t
 
 caseVars :: AstF Ast -> [String]
 caseVars (Var v) = [v]

@@ -18,7 +18,7 @@ webDemoBoost = Boost [(("dhc", "system"), ([I32, I32, I32], []))] $
   where io = TApp (TC "IO")
 
 hsToWasmWebDemo :: String -> Either String [Int]
-hsToWasmWebDemo prog = snd <$> hsToWasm webDemoBoost webDemoSys prog
+hsToWasmWebDemo prog = wasmBinary <$> hsToWasm webDemoBoost webDemoSys prog
 
 hsToGMachineWebDemo :: String -> Either String (GlobalTable, [(String, [Ins])])
 hsToGMachineWebDemo haskell = hsToIns webDemoBoost webDemoSys haskell

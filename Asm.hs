@@ -2,10 +2,12 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE PackageImports #-}
 module Asm (hsToWasm, Ins(..),
+  DfnWasm(..),
   WasmType(Ref),  -- Re-export from WasmOp.
   tag_const, Tag(..), hsToIns,
   QuasiWasm, QuasiWasmHelper(..),
   GlobalTable, Boost(..), catBoost) where
+
 import Control.Arrow
 import Data.Map (Map)
 import qualified Data.Map as M
@@ -36,6 +38,7 @@ data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal String
   | MkAp | Slide Int | Split Int | Eval
   | UpdatePop Int | UpdateInd Int | Alloc Int
   | Casejump [(Maybe Int, [Ins])] | Trap
+  | PushCallIndirect [String]
   deriving Show
 
 nPages :: Int
@@ -117,11 +120,17 @@ encWasmOp op = case op of
   _ -> maybe (error $ "unsupported: " ++ show op) pure $ lookup op rZeroOps
 
 -- | Tuple of:
---   1. List of exported functions.
---   2. Arity of each user-defined function, whether exported or not.
---   3. List of wdecl functions.
--- Hopefully, the third item will soon supersede the other two.
-type GlobalTable = ([String], M.Map String Int, [(String, ([WasmType], [WasmType]))])
+--  1. List of exported functions. Hopefully will be removed soon.
+--  2. Arity of each user-defined function, whether exported or not.
+--     Eval uses this to remove the spine correctly.
+--  3. List of wdecl functions.
+--  4. Types needed by call_indirect ops.
+type GlobalTable =
+  ( [String]
+  , M.Map String Int
+  , [(String, ([WasmType], [WasmType]))]
+  , [[String]]
+  )
 
 type WasmImport = ((String, String), ([WasmType], [WasmType]))
 
@@ -134,6 +143,7 @@ data QuasiWasmHelper =
   | ReduceArgs Int  -- Copy arguments from heap and reduce them to WHNF.
   | LazyUpdate Int  -- Lazily update with indirection node, then return.
   | TupleRealWorld  -- [sp + 4] = (POP, #RealWorld)
+  | NilRealWorld  -- [sp + 4] = (() #RealWorld)
   deriving Show
 
 data Boost = Boost [WasmImport] [(String, (Type, [QuasiWasm]))]
@@ -141,12 +151,13 @@ data Boost = Boost [WasmImport] [(String, (Type, [QuasiWasm]))]
 catBoost :: Boost -> Boost -> Boost
 catBoost (Boost a b) (Boost c d) = Boost (a ++ c) (b ++ d)
 
--- | Returns
---   ( arities of synchronous exports
---   , types of asynchronous exports
---   , WebAssembly binary
---   )
-hsToWasm :: Boost -> ExternType -> String -> Either String (([(String, Int)], [(String, ([WasmType], [WasmType]))]), [Int])
+data DfnWasm = DfnWasm
+  { legacyArities :: [(String, Int)]  -- Arities of legacy exports.
+  , exportTypes :: [(String, ([WasmType], [WasmType]))]
+  , wasmBinary :: [Int]
+  }
+
+hsToWasm :: Boost -> ExternType -> String -> Either String DfnWasm
 hsToWasm boost ext prog = insToBin boost . astToIns <$> hsToAst (boostTypes boost) ext prog
 
 hsToIns :: Boost -> ExternType -> String -> Either String (GlobalTable, [(String, [Ins])])
@@ -156,8 +167,10 @@ boostTypes :: Boost -> Map String (Maybe (Int, Int), Type)
 boostTypes (Boost _ m) = M.fromList $ second (((,) Nothing) . fst) <$> m
 
 astToIns :: AstPlus -> (GlobalTable, [(String, [Ins])])
-astToIns (AstPlus es ws storage ds ts) = ((es, funs, wrapme), second compile <$> ds) where
-  compile d = evalState (mk1 storage d) []
+astToIns (AstPlus es ws storage ds ts) = ((es, funs, wrapme, ciTypes), ins) where
+  insAndTypes = second (compile storage) <$> ds
+  ciTypes = foldl' union [] $ snd . snd <$> insAndTypes
+  ins = second fst <$> insAndTypes
   wrapme = wasmize <$> ws
   wasmize w = (w, wasmType [] $ fst $ fromJust $ lookup w ts)
   wasmType acc t = case t of
@@ -178,8 +191,12 @@ astToIns (AstPlus es ws storage ds ts) = ((es, funs, wrapme), second compile <$>
 tag_const :: Tag -> CustomWasmOp a
 tag_const = I32_const . fromIntegral . fromEnum
 
-insToBin :: Boost -> (GlobalTable, [(String, [Ins])]) -> (([(String, Int)], [(String, ([WasmType], [WasmType]))]), [Int])
-insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, fst $ getGlobal s)) <$> exs), wrapme), wasm) where
+insToBin :: Boost -> (GlobalTable, [(String, [Ins])]) -> DfnWasm
+insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes), gmachine) = DfnWasm
+  { legacyArities = ((\s -> (s, fst $ getGlobal s)) <$> exs)
+  , exportTypes = wrapme
+  , wasmBinary = wasm
+  } where
   wasm = concat
     [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
     , sect 1 $ uncurry encSig . snd <$> BM.assocs typeMap  -- Type section.
@@ -205,6 +222,8 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
       ++ [exportFun ('_':s) s | s <- exs]
       -- The "wdecl" functions are exported verbatim.
       ++ [exportFun s ('@':s) | (s, _) <- wrapme]
+      -- The call_indirect functions for each type.
+      ++ [exportFun s s | (s, _) <- ciFuns]
     , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
     ]
   -- 0 = external_kind Function.
@@ -215,7 +234,8 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
     [ ([], [])  -- Most internal functions have type () -> ().
     , ([], [I32])  -- gethp, getsp.
     , ([I32], [])  -- sethp, setsp.
-    ] ++ (snd <$> wrapme)  -- wdecl functions.
+    ]
+    ++ (snd <$> wrapme)  -- wdecl functions.
   exportFun name internalName = encStr name ++ [0, wasmFunNo internalName]
   -- TODO: Remove "#nfsyscall".
   localCount "#nfsyscall" = 2
@@ -227,6 +247,9 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
   firstPrim = wasmFunNo $ fst $ head prims
   wasmFuns =
     [ ("#eval", ((typeNo [] [], 0), evalAsm))
+    , ("#mkap", ((typeNo [] [], 0), mkApAsm))
+    , ("#updatepop", ((typeNo [I32] [], 0), updatePopAsm))
+    , ("#push", ((typeNo [I32] [], 0), pushAsm))
     , ("#getsp", ((typeNo [] [I32], 0), [Get_global sp, End]))
     , ("#setsp", ((typeNo [I32] [], 0), [Get_local 0, Set_global sp, End]))
     , ("#gethp", ((typeNo [] [I32], 0), [Get_global hp, End]))
@@ -238,6 +261,8 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
     ++ ((\(s, p) -> (s, ((typeNo [] [], localCount s), p))) <$> prims)
     -- Functions from the program.
     ++ ((\(f, g) -> (f, ((typeNo [] [], 0), (++ [End]) $ concatMap fromIns g))) <$> gmachine)
+    -- Wrappers for call_indirect calls.
+    ++ ciFuns
     -- Outer "#main" function. It calls the internal "main" function.
     ++ [("#main", ((typeNo [] [], 0),
         -- The magic constant 42 represents the RealWorld.
@@ -254,6 +279,24 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
       ))]
     -- Wrappers for functions in "wdecl" section.
     ++ (wrap <$> wrapme)
+
+  ciFuns = wrapCallIndirect <$> ciTypes
+  wrapCallIndirect [] = ("[]", ((typeNo [] [], 0),
+    concatMap fromIns [ Push 0, Eval ] ++
+    [ Get_global sp  -- PUSH [[sp + 4] + 4]
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , Call_indirect $ typeNo [] []
+    , Get_global sp  -- sp = sp + 16
+    , I32_const 16
+    , I32_add
+    , Set_global sp
+    ] ++ deQuasi (Custom NilRealWorld)))
+
   wasmFunMap = M.fromList $ zip (((\(m, f) -> m ++ "." ++ f) . fst <$> imps) ++ (fst <$> wasmFuns)) [0..]
   -- wasmFunNo = (wasmFunMap M.!)
   wasmFunNo s = fromMaybe (error s) $ M.lookup s wasmFunMap
@@ -509,7 +552,7 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
     , Set_global bp
     ] ++ nest n ++ [End]
     where
-      n = length prims + length gmachine
+      n = length prims + length gmachine + length ciFuns
       nest 0 =
         [ Get_global bp  -- case [bp + 4]
         , I32_const 4
@@ -518,6 +561,86 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
         , Br_table [0..n-1] n
         ]
       nest k = [Block Nada $ nest $ k - 1, Call $ firstPrim + k - 1, Br $ n - k]
+
+  mkApAsm :: [WasmOp]
+  mkApAsm =
+    [ Get_global hp  -- [hp] = TagAp
+    , tag_const TagAp
+    , I32_store 2 0
+    , Get_global hp  -- [hp + 8] = [sp + 4]
+    , I32_const 8
+    , I32_add
+    , Get_global sp
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_store 2 0
+    , Get_global hp  -- [hp + 12] = [sp + 8]
+    , I32_const 12
+    , I32_add
+    , Get_global sp
+    , I32_const 8
+    , I32_add
+    , I32_load 2 0
+    , I32_store 2 0
+    , Get_global sp  -- [sp + 8] = hp
+    , I32_const 8
+    , I32_add
+    , Get_global hp
+    , I32_store 2 0
+    , Get_global sp  -- sp = sp + 4
+    , I32_const 4
+    , I32_add
+    , Set_global sp
+    , Get_global hp  -- hp = hp + 16
+    , I32_const 16
+    , I32_add
+    , Set_global hp
+    , End
+    ]
+
+  updatePopAsm :: [WasmOp]
+  updatePopAsm =
+    [ Get_global sp  -- bp = [sp + 4]
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , Set_global bp
+    , Get_global sp  -- sp = sp + local_0
+    , Get_local 0  -- Should be 4*(n + 1).
+    , I32_add
+    , Set_global sp
+    , Get_global sp  -- [[sp + 4]] = Ind
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , tag_const TagInd
+    , I32_store 2 0
+    , Get_global sp  -- [[sp + 4] + 4] = bp
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 4
+    , I32_add
+    , Get_global bp
+    , I32_store 2 0
+    , End
+    ]
+
+  pushAsm :: [WasmOp]
+  pushAsm =
+    [ Get_global sp  -- [sp] = [sp + local_0]
+    , Get_global sp
+    , Get_local 0  -- Should be 4*(n + 1).
+    , I32_add
+    , I32_load 2 0
+    , I32_store 2 0
+    , Get_global sp  -- sp = sp - 4
+    , I32_const 4
+    , I32_sub
+    , Set_global sp
+    , End
+    ]
 
   intAsm :: WasmOp -> [WasmOp]
   intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
@@ -906,6 +1029,46 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
       , End
       ]
 
+    NilRealWorld ->  -- [sp + 4] = ((), #RealWorld)
+      [ Get_global hp  -- bp = hp
+      , Set_global bp
+      , Get_global hp  -- [hp.64] = TagSum
+      , I64_const $ fromIntegral $ fromEnum TagSum
+      , I64_store 3 0
+      , Get_global hp  -- hp = hp + 8
+      , I32_const 8
+      , I32_add
+      , Set_global hp
+      , Get_global hp  -- [hp] = TagSum | (2 << 8)
+      , I32_const $ fromIntegral $ fromEnum TagSum + 256 * 2
+      , I32_store 2 0
+      , Get_global hp  -- [hp + 4] = 0
+      , I32_const 4
+      , I32_add
+      , I32_const 0
+      , I32_store 2 0
+      , Get_global hp  -- [hp + 8] = bp
+      , I32_const 8
+      , I32_add
+      , Get_global bp
+      , I32_store 2 0
+      , Get_global hp  -- [hp + 12] = 42
+      , I32_const 12
+      , I32_add
+      , I32_const 42
+      , I32_store 2 0
+      , Get_global sp  -- [sp + 4] = hp
+      , I32_const 4
+      , I32_add
+      , Get_global hp
+      , I32_store 2 0
+      , Get_global hp  -- hp = hp + 16
+      , I32_const 16
+      , I32_add
+      , Set_global hp
+      , End
+      ]
+
   deQuasi (Block t body) = [Block t $ concatMap deQuasi body]
   deQuasi (Loop  t body) = [Loop  t $ concatMap deQuasi body]
   deQuasi (If    t body) = [If    t $ concatMap deQuasi body]
@@ -979,50 +1142,30 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
       , Set_global hp
       ]
     Push n ->
-      [ Get_global sp  -- [sp] = [sp + 4(n + 1)]
-      , Get_global sp
-      , I32_const $ 4*(fromIntegral n + 1)
-      , I32_add
-      , I32_load 2 0
-      , I32_store 2 0
-      , Get_global sp  -- sp = sp - 4
-      , I32_const 4
-      , I32_sub
-      , Set_global sp
+      [ I32_const $ fromIntegral $ 4*(n + 1)
+      , Call $ wasmFunNo "#push"
       ]
-    MkAp ->
-      [ Get_global hp  -- [hp] = TagAp
-      , tag_const TagAp
-      , I32_store 2 0
-      , Get_global hp  -- [hp + 8] = [sp + 4]
-      , I32_const 8
-      , I32_add
-      , Get_global sp
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
-      , I32_store 2 0
-      , Get_global hp  -- [hp + 12] = [sp + 8]
-      , I32_const 12
-      , I32_add
-      , Get_global sp
-      , I32_const 8
-      , I32_add
-      , I32_load 2 0
-      , I32_store 2 0
-      , Get_global sp  -- [sp + 8] = hp
-      , I32_const 8
-      , I32_add
+    MkAp -> [ Call $ wasmFunNo "#mkap" ]
+    PushCallIndirect [] ->
+      [ Get_global sp  -- [sp] = hp
       , Get_global hp
       , I32_store 2 0
-      , Get_global sp  -- sp = sp + 4
+      , Get_global hp  -- [hp] = TagGlobal | (3 << 8)
+      , I32_const $ fromIntegral $ fromEnum TagGlobal + 256*3
+      , I32_store 2 0
+      , Get_global hp  -- [hp + 4] = wrapCallIndirect []
       , I32_const 4
       , I32_add
-      , Set_global sp
+      , I32_const $ fromIntegral $ wasmFunNo "[]" - firstPrim
+      , I32_store 2 0
       , Get_global hp  -- hp = hp + 16
       , I32_const 16
       , I32_add
       , Set_global hp
+      , Get_global sp  -- sp = sp - 4
+      , I32_const 4
+      , I32_sub
+      , Set_global sp
       ]
     PushGlobal fun | (n, g) <- getGlobal fun ->
       [ Get_global sp  -- [sp] = hp
@@ -1092,29 +1235,8 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme), gmachine) = ((((\s -> (s, 
       , I32_store 2 0
       ]
     UpdatePop n ->
-      [ Get_global sp  -- bp = [sp + 4]
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
-      , Set_global bp
-      , Get_global sp  -- sp = sp + 4*(n + 1)
-      , I32_const $ fromIntegral $ 4*(n + 1)
-      , I32_add
-      , Set_global sp
-      , Get_global sp  -- [[sp + 4]] = Ind
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
-      , tag_const TagInd
-      , I32_store 2 0
-      , Get_global sp  -- [[sp + 4] + 4] = bp
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
-      , I32_const 4
-      , I32_add
-      , Get_global bp
-      , I32_store 2 0
+      [ I32_const $ fromIntegral $ 4*(n + 1)
+      , Call $ wasmFunNo "#updatepop"
       ]
     Copro m n ->
       [ Get_global hp  -- [hp] = TagSum | (n << 8)
@@ -1224,11 +1346,25 @@ lenc xs = varlen xs ++ xs
 sp, hp, bp :: Int
 [sp, hp, bp] = [0, 1, 2]
 
-mk1 :: [String] -> Ast -> State [(String, Int)] [Ins]
+data CompilerState = CompilerState
+  -- Bindings are local. They start empty and finish empty.
+  -- During compilation, they hold the stack position of the bound variables.
+  { bindings :: [(String, Int)]
+  -- Each call_indirect indexes into the type section of the binary.
+  -- We record the types used by the binary so we can collect and look them
+  -- up when generating assembly.
+  , callIndirectTypes :: [[String]]
+  }
+
+compile :: [String] -> Ast -> ([Ins], [[String]])
+compile storage d = (ins, ts)
+  where (ins, CompilerState _ ts) = runState (mk1 storage d) $ CompilerState [] []
+
+mk1 :: [String] -> Ast -> State CompilerState [Ins]
 mk1 storage (Ast ast) = case ast of
   -- | Thanks to lambda lifting, `Lam` can only occur at the top level.
   Lam as b -> do
-    put $ zip as [0..]
+    putBindings $ zip as [0..]
     (++ [UpdatePop $ length as, Eval]) <$> rec b
   I n -> pure [PushInt n]
   S s -> pure [PushString s]
@@ -1240,9 +1376,13 @@ mk1 storage (Ast ast) = case ast of
     pure $ case last mt of
       Copro _ _ -> mu ++ mt
       _ -> concat [mu, mt, [MkAp]]
+  Far ty -> do
+    CompilerState b its <- get
+    put $ CompilerState b (its `union` [ty])
+    pure [PushCallIndirect ty]
   Var "undefined" -> pure [Trap]
   Var v -> do
-    m <- get
+    m <- getBindings
     pure $ case lookup v m of
       Just k -> [Push k]
       Nothing -> if v `elem` storage then [PushString $ SBS.pack $ fromIntegral . ord <$> v] else [PushGlobal v]
@@ -1250,32 +1390,37 @@ mk1 storage (Ast ast) = case ast of
   Cas expr alts -> do
     me <- rec expr
     xs <- forM alts $ \(p, body) -> do
-      orig <- get  -- Save state.
+      orig <- getBindings
       (f, b) <- case fromApList p of
         (Ast (Pack n _):vs) -> do
           bump $ length vs
-          modify' (zip (map (\(Ast (Var v)) -> v) vs) [0..] ++)
+          modifyBindings (zip (map (\(Ast (Var v)) -> v) vs) [0..] ++)
           bod <- rec body
           pure (Just $ fromIntegral n, Split (length vs) : bod ++ [Slide (length vs)])
         [Ast (Var s)] -> do
           bump 1
-          modify' $ \bs -> (s, 0):bs
+          modifyBindings ((s, 0):)
           (,) Nothing . (++ [Slide 1]) <$> rec body
         _ -> undefined
-      put orig  -- Restore state.
+      putBindings orig
       pure (f, b)
     pure $ me ++ [Eval, Casejump xs]
   Let ds body -> let n = length ds in do
-    orig <- get  -- Save state.
+    orig <- getBindings
     bump n
-    modify' (zip (fst <$> ds) [n-1,n-2..0] ++)
+    modifyBindings (zip (fst <$> ds) [n-1,n-2..0] ++)
     dsAsm <- mapM rec $ snd <$> ds
     b <- rec body
-    put orig  -- Restore state.
+    putBindings orig
     pure $ Alloc n : concat (zipWith (++) dsAsm (pure . UpdateInd <$> [n-1,n-2..0])) ++ b ++ [Slide n]
   _ -> error $ "TODO: compile: " ++ show ast
   where
-    bump n = modify' $ map $ second (+n)
+    bump n = modifyBindings $ fmap $ second (+n)
+    modifyBindings f = putBindings =<< f <$> getBindings
+    getBindings = bindings <$> get
+    putBindings b = do
+      CompilerState _ its <- get
+      put $ CompilerState b its
     rec = mk1 storage
 
 fromApList :: Ast -> [Ast]
