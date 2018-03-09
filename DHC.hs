@@ -546,7 +546,7 @@ methods = M.fromList
   [ ("==", (a :-> a :-> TC "Bool", [("Eq", "a")]))
   , (">>=", (TApp m a :-> (a :-> TApp m b)  :-> TApp m b, [("Monad", "m")]))
   , ("pure", (a :-> TApp m a, [("Monad", "m")]))
-  -- TODO: Can we move this Primea-specific function elsewhere?
+  -- Generates call_indirect ops.
   , ("far", (TC "I32" :-> a :-> TApp (TC "IO") (TC "()"), [("Message", "a")]))
   ] where
     a = GV "a"
