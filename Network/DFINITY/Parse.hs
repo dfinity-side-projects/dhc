@@ -16,20 +16,22 @@ type FuncType = ([WasmType], [WasmType])
 type Body = ([WasmOp], [WasmOp])
 type Import = ((String, String), FuncType)
 
-data Wasm = Wasm {
-  types :: [FuncType],
-  imports :: [Import],
-  decls :: [FuncType],
-  tableSize :: Int,
-  memory :: [(Int, Maybe Int)],
-  globals :: [((WasmType, Bool), [WasmOp])],
-  exports :: [(String, Int)],
-  start :: Maybe Int,
-  code :: [Body],
-  dataSection :: [([WasmOp], String)] } deriving Show
+data Wasm = Wasm
+  { types :: [FuncType]
+  , imports :: [Import]
+  , decls :: [FuncType]
+  , tableSize :: Int
+  , memory :: [(Int, Maybe Int)]
+  , globals :: [((WasmType, Bool), [WasmOp])]
+  , exports :: [(String, Int)]
+  , start :: Maybe Int
+  , code :: [Body]
+  , dataSection :: [([WasmOp], String)]
+  , dfnExports :: [(String, ([WasmType], [WasmType]))]
+  } deriving Show
 
 emptyWasm :: Wasm
-emptyWasm = Wasm [] [] [] 0 [] [] [] Nothing [] []
+emptyWasm = Wasm [] [] [] 0 [] [] [] Nothing [] [] []
 
 data ByteParser a = ByteParser (ByteString -> Either String (a, ByteString))
 
@@ -49,6 +51,9 @@ repNext :: Int -> ByteParser ByteString
 repNext n = ByteParser f where
   f s | B8.length s < n = Left "missing bytes or size too large"
       | otherwise = Right $ B8.splitAt n s
+
+remainder :: ByteParser ByteString
+remainder = ByteParser $ \s -> Right (s, "")
 
 isEof :: ByteParser Bool
 isEof = ByteParser f where f s = Right (B8.null s, s)
@@ -103,7 +108,7 @@ wasm = do
       t <- varuint7
       case lookup t [(0x7f, I32), (0x7e, I64), (0x7d, F32), (0x7c, F64), (0x70, AnyFunc), (0x60, Func), (0x40, Nada)] of
         Just ty -> pure ty
-        Nothing -> error "bad type"
+        Nothing -> error $ "bad type: " ++ show t
 
     valueType = do
       t <- allType
@@ -159,9 +164,11 @@ wasm = do
         fieldStr <- lstr
         k <- externalKind
         t <- varuint32
-        when (t > functionCount w) $ bad "function index out of range"
         case k of
-          Function -> pure $ Just (fieldStr, t)
+          Function -> do
+            when (t > functionCount w) $ bad "function index out of range"
+            pure $ Just (fieldStr, t)
+          Global -> pure Nothing
           Memory -> pure Nothing
           Table -> pure Nothing
       pure w { exports = catMaybes es }
@@ -230,6 +237,12 @@ wasm = do
         (,) offset <$> lstr
       pure w { dataSection = ds }
 
+    sectCustom w = do
+      name <- lstr
+      when (name /= "dfn") $ bad $ "unknown custom section: " ++ name
+      s <- remainder
+      pure w { dfnExports = read $ B8.unpack s }
+
     codeBlock :: ByteParser [WasmOp]
     codeBlock = do
       opcode <- varuint7
@@ -290,6 +303,7 @@ wasm = do
           9 -> error "TODO: element section"
           10 -> sectCode
           11 -> sectData
+          0 -> sectCustom
           _ -> pure
       case byteParse (f w) s of
         Left err -> bad err
