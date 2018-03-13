@@ -126,12 +126,15 @@ encWasmOp op = case op of
 --  3. List of wdecl functions.
 --  4. Types needed by call_indirect ops.
 --  5. (Initial HP value, Addresses of string constants).
+--  6. Persistent global count.
+-- TODO: NAME THESE FIELDS ALREADY!
 type GlobalTable =
   ( [String]
   , M.Map String Int
   , [(String, ([WasmType], [WasmType]))]
   , [[WasmType]]
   , (Int, Map ShortByteString Int)
+  , Int
   )
 
 type WasmImport = ((String, String), ([WasmType], [WasmType]))
@@ -186,8 +189,8 @@ mkStrConsts ss = f (0, []) ss where
   f (k, ds) (s:rest) = f (k + 8 + align4 (SBS.length s), ((s, k):ds)) rest
 
 astToIns :: AstPlus -> (GlobalTable, [(String, [Ins])])
-astToIns (AstPlus es ws storage ds ts) = ((es, funs, wasmDecl <$> ws, ciTypes, strConsts), ins) where
-  compilerOut = second (compile storage) <$> ds
+astToIns (AstPlus es ws storage ps ds ts) = ((es, funs, wasmDecl <$> ws, ciTypes, strConsts, length ps), ins) where
+  compilerOut = second (compile storage ps) <$> ds
   ciTypes = foldl' union [] $ callIndirectTypes . snd . snd <$> compilerOut
   ins = second fst <$> compilerOut
   strConsts = mkStrConsts $ union (SBS.pack . fmap (fromIntegral . ord) <$> storage) $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
@@ -211,7 +214,7 @@ tag_const :: Tag -> CustomWasmOp a
 tag_const = I32_const . fromIntegral . fromEnum
 
 insToBin :: Boost -> (GlobalTable, [(String, [Ins])]) -> DfnWasm
-insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes, (hp0, strConsts)), gmachine) = DfnWasm
+insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), persistCount), gmachine) = DfnWasm
   { legacyArities = ((\s -> (s, fst $ getGlobal s)) <$> exs)
   , wasmBinary = wasm
   } where
@@ -222,11 +225,13 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes, (hp0, strConsts)),
     , sect 3 $ pure . fst . fst . snd <$> wasmFuns  -- Function section.
     , sect 4 [[encType AnyFunc, 0] ++ leb128 256]  -- Table section (0 = no-maximum).
     , sect 5 [[0, nPages]]  -- Memory section (0 = no-maximum).
-    , sect 6  -- Global section (1 = mutable).
+    , sect 6 $  -- Global section (1 = mutable).
       [ [encType I32, 1, 0x41] ++ leb128 (65536*nPages - 4) ++ [0xb]  -- SP
       , [encType I32, 1, 0x41] ++ leb128 hp0 ++ [0xb]  -- HP
       , [encType I32, 1, 0x41, 0, 0xb]  -- BP
       ]
+      -- Persistent globals.
+      ++ replicate persistCount [encType I32, 1, 0x41, 0, 0xb]
     , sect 7 $  -- Export section.
       [ encStr "memory" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
       , encStr "table" ++ [1, 0]  -- 1 = external_kind Table, 0 = memory index.
@@ -268,7 +273,7 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes, (hp0, strConsts)),
   -- Returns arity and 0-indexed number of given global function.
   getGlobal s = case M.lookup s funs of
     Just arity -> (arity, wasmFunNo s - firstPrim)
-    Nothing -> (arityFromType $ primsType M.! s, wasmFunNo s - firstPrim)
+    Nothing -> (arityFromType $ fromMaybe (error $ "BUG! bad global: " ++ s) $ M.lookup s primsType, wasmFunNo s - firstPrim)
   firstPrim = wasmFunNo $ fst $ head prims
   internalFuns =
     [ ("#eval", (([], []), evalAsm))
@@ -285,6 +290,8 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes, (hp0, strConsts)),
     , ("#sethp", (([I32], []), [Get_local 0, Set_global hp, End]))
     , ("#pairwith42", (([I32], []), pairWith42Asm))
     , ("#nil42", (([], []), nil42Asm))
+    , ("#setpersist", (([I32, I32], []), setPersistAsm persistCount))
+    , ("#getpersist", (([I32], [I32]), getPersistAsm persistCount))
     -- Outer "#main" function. It calls the internal "main" function.
     , ("#main", (([], []),
       -- The magic constant 42 represents the RealWorld.
@@ -692,8 +699,45 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes, (hp0, strConsts)),
         , I32_load 2 0
         , Br_table [0..n-1] n
         ]
-      nest k = [Block Nada $ nest $ k - 1, Call $ firstPrim + k - 1, Br $ n - k]
+      nest k = [Block Nada $ nest $ k - 1, Call $ firstPrim + k - 1, Return]
 
+  getPersistAsm :: Int -> [WasmOp]
+  getPersistAsm 0 = [ I32_const 0, End ]
+  getPersistAsm count =
+    nest count ++ [End]
+    where
+      nest 1 =
+        [ Block Nada
+          [ Get_local 0   -- branch on local0 (persistent global index)
+          , Br_table [0..count - 1] (count - 1)
+          ]
+        , Get_global 3
+        , Return
+        ]
+      nest j =
+        [ Block Nada $ nest (j - 1)
+        , Get_global $ 2 + j
+        , Return
+        ]
+  setPersistAsm :: Int -> [WasmOp]
+  setPersistAsm 0 = [End]
+  setPersistAsm count =
+    [ Get_local 1   -- PUSH local1 (I32 to store)
+    ] ++ nest count ++ [End]
+    where
+      nest 1 =
+        [ Block Nada
+          [ Get_local 0   -- branch on local0 (persistent global index)
+          , Br_table [0..count - 1] (count - 1)
+          ]
+        , Set_global 3
+        , Return
+        ]
+      nest j =
+        [ Block Nada $ nest (j - 1)
+        , Set_global $ 2 + j
+        , Return
+        ]
   intAsm :: WasmOp -> [WasmOp]
   intAsm op = concatMap fromIns [Push 1, Eval, Push 1, Eval] ++
     [ Get_global sp  -- PUSH [[sp + 4] + 8]
@@ -1258,11 +1302,11 @@ lenc xs = varlen xs ++ xs
 sp, hp, bp :: Int
 [sp, hp, bp] = [0, 1, 2]
 
-compile :: [String] -> Ast -> ([Ins], CompilerState)
-compile storage d = runState (mk1 storage d) $ CompilerState [] [] []
+compile :: [String] -> [String] -> Ast -> ([Ins], CompilerState)
+compile storage ps d = runState (mk1 storage ps d) $ CompilerState [] [] []
 
-mk1 :: [String] -> Ast -> State CompilerState [Ins]
-mk1 storage (Ast ast) = case ast of
+mk1 :: [String] -> [String] -> Ast -> State CompilerState [Ins]
+mk1 storage pglobals (Ast ast) = case ast of
   -- | Thanks to lambda lifting, `Lam` can only occur at the top level.
   Lam as b -> do
     putBindings $ zip as [0..]
@@ -1289,7 +1333,11 @@ mk1 storage (Ast ast) = case ast of
     m <- getBindings
     pure $ case lookup v m of
       Just k -> [Push k]
-      Nothing -> if v `elem` storage then [PushString $ SBS.pack $ fromIntegral . ord <$> v] else [PushGlobal v]
+      -- Storage maps become PushString instructions.
+      _ | v `elem` storage -> [PushString $ SBS.pack $ fromIntegral . ord <$> v]
+      -- Persistent globals become PushInt32 instructions.
+      _ | Just i <- elemIndex v pglobals -> [PushInt $ fromIntegral i]
+      _ -> [PushGlobal v]
   Pack n m -> pure [Copro n m]
   Cas expr alts -> do
     me <- rec expr
@@ -1325,7 +1373,7 @@ mk1 storage (Ast ast) = case ast of
     putBindings b = do
       st <- get
       put st { bindings = b }
-    rec = mk1 storage
+    rec = mk1 storage pglobals
 
 fromApList :: Ast -> [Ast]
 fromApList (Ast (a :@ b)) = fromApList a ++ [b]

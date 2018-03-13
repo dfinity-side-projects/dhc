@@ -337,6 +337,7 @@ data AstPlus = AstPlus
   { exports :: [String]
   , wdecls :: [String]
   , storages :: [String]
+  , persist :: [String]
   , asts :: [(String, Ast)]
   , funTypes :: [(String, QualType)]
   } deriving Show
@@ -349,11 +350,13 @@ contract = do
     (between (want "(") (want ")") $ varStr `sepBy` want ",")
   ms <- option [] $ try $ want "storage" >>
     (between (want "(") (want ")") $ varStr `sepBy` want ",")
+  ps <- option [] $ try $ want "persist" >>
+    (between (want "(") (want ")") $ varStr `sepBy` want ",")
   putState (AwaitBrace, [])
   ds <- supercombinators
   when (isNothing $ mapM (`lookup` ds) es) $ fail "bad exports"
   when (isNothing $ mapM (`lookup` ds) ws) $ fail "bad wdecls"
-  pure $ AstPlus es ws ms ds []
+  pure $ AstPlus es ws ms ps ds []
 
 lexOffside :: String -> Either ParseError [String]
 lexOffside = fmap (fmap snd) <$> runParser tokUntilEOF (AwaitBrace, []) "" where
@@ -755,8 +758,8 @@ getContractExport f _ c v = case f c v of
 
 hsToAst :: Map String (Maybe (Int, Int), Type) -> ExternType -> String -> Either String AstPlus
 hsToAst boostMap ext prog = do
-  a@(AstPlus es _ storage ds _) <- showErr $ parseContract prog
-  (preStorageInferred, storageCons) <- inferType (getContractExport ext es) (genTypes storage) (ds ++ hacks)
+  a@(AstPlus es _ storage _ ds _) <- showErr $ parseContract prog
+  (preStorageInferred, storageCons) <- inferType (getContractExport ext es) (genTypes storage $ persist a) (ds ++ hacks)
   let
     inferred = constrainStorage storageCons preStorageInferred
     arities = second (countArgs . fst . fst) <$> inferred
@@ -768,10 +771,12 @@ hsToAst boostMap ext prog = do
   pure a { asts = subbedDefs, funTypes = types }
   where
     showErr = either (Left . show) Right
-    genTypes storage = preludeMinimal
+    genTypes storage ps = preludeMinimal
       `M.union` boostMap
       `M.union` (M.fromList $ storageTypeConstraintHack <$> storage)
+      `M.union` (M.fromList $ persistTypeConstraint <$> ps)
     storageTypeConstraintHack s = (s, (Nothing, TC "Map" `TApp` TV ('@':s)))
+    persistTypeConstraint s = (s, (Nothing, TC "Persist" `TApp` TC "Databuf"))
 
 constrainStorage :: [(String, Type)] -> [(String, (QualType, Ast))] -> [(String, (QualType, Ast))]
 constrainStorage cons ds = second (first (first rewriteType)) <$> ds where
