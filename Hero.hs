@@ -1,10 +1,10 @@
 {-# LANGUAGE NamedFieldPuns #-}
 
 module Hero (Wasm, HeroVM, parseWasm,
-  runWasmVM, mkHeroVM, setArgsVM,
+  runWasm, mkHeroVM, setArgsVM,
   setTable,
   globalVM,
-  runWasm, getNumVM, putNumVM,
+  getNumVM, putNumVM,
   CustomWasmOp(I32_const, I64_const), WasmOp) where
 
 import Data.Bits
@@ -28,13 +28,14 @@ data HeroVM = HeroVM
   , mem   :: IntMap Int
   , sigs  :: IntMap ([WasmType], [WasmType])
   , table :: IntMap (HeroVM -> [WasmOp] -> IO HeroVM)
+  , wasm  :: Wasm
   }
 
 getNumVM :: Integral n => Int -> Int32 -> HeroVM -> n
 getNumVM w addr vm = getNum w addr $ mem vm
 
-globalVM :: Int -> HeroVM -> WasmOp
-globalVM i vm = globs vm IM.! i
+globalVM ::  HeroVM -> IntMap WasmOp
+globalVM vm = globs vm
 
 putNumVM :: Integral n => Int -> Int32 -> n -> HeroVM -> HeroVM
 putNumVM w addr n vm@(HeroVM {mem}) = vm { mem = putNum w addr n mem }
@@ -76,8 +77,9 @@ take' n as | n > length as = error "BAD TAKE"
 
 -- The `End` opcode is reintroduced at the ends of function calls, so that we
 -- know when to pop locals.
-runWasmVM :: ((String, String) -> HeroVM -> [WasmOp] -> IO HeroVM) -> Wasm -> [Char] -> HeroVM -> IO ([WasmOp], HeroVM)
-runWasmVM fns Wasm {imports, exports, decls, code} s herovm = let
+runWasm :: ((String, String) -> HeroVM -> [WasmOp] -> IO HeroVM) -> [Char] -> HeroVM -> IO ([WasmOp], HeroVM)
+runWasm fns s herovm = let
+  Wasm {imports, exports, decls, code} = wasm herovm
   fCount = length imports
   run vm@HeroVM {insts, stack} | null insts = pure (stack, vm)
   run vm@HeroVM {insts} | null $ head insts = case tail insts of
@@ -99,7 +101,8 @@ runWasmVM fns Wasm {imports, exports, decls, code} s herovm = let
         let
           (locals, body) = code!!(i - fCount)
           k = length $ fst $ decls !! (i - fCount)
-        run vm { stack = drop' k stack, locs = IM.fromList (zip [0..] $ reverse (take' k stack) ++ locals):locs, insts = body:(End: head i1):tail i1 }
+        run vm { stack = drop' k stack, locs = IM.fromList (zip [0..] $ reverse (take' k stack) ++ locals):locs, insts = body:(End:head i1):tail i1 }
+    Return -> run vm { insts = dropWhile ((End /=) . head) insts }
     End -> run vm { locs = tail locs, insts = i1 }
     Set_local i -> run vm {locs = IM.insert i (head stack) (head locs):tail locs, stack = tail stack, insts = i1}
     Get_local i -> if i >= IM.size (head locs) then error $ "BUG! bad local: " ++ show(i, locs) else run $ step $ head locs IM.! i:stack
@@ -214,6 +217,7 @@ mkHeroVM w = HeroVM
     concatMap strToAssocs $ dataSection w)
     (IM.fromList $ zip [0..] $ types w)
     IM.empty
+    w
   where
   strToAssocs ([I32_const n], s) = zip [fromIntegral n..] $ ord <$> s
   strToAssocs _ = error "BUG!"
@@ -221,9 +225,6 @@ mkHeroVM w = HeroVM
 -- | Place arguments on WebAssembly stack.
 setArgsVM :: [WasmOp] -> HeroVM -> HeroVM
 setArgsVM ls vm = vm { stack = reverse ls ++ stack vm }
-
-runWasm :: ((String, String) -> HeroVM -> [WasmOp] -> IO HeroVM) -> Wasm -> [Char] -> IO [WasmOp]
-runWasm fns w s = fst <$> runWasmVM fns w s (mkHeroVM w)
 
 setTable :: Int32 -> (HeroVM -> [WasmOp] -> IO HeroVM) -> HeroVM -> HeroVM
 setTable slot fun vm = vm { table = IM.insert (fromIntegral slot) fun $ table vm }
