@@ -34,6 +34,7 @@ type ShortByteString = SBS.ByteString
 
 -- | G-Machine instructions.
 data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal String
+  | PushRef Int32
   | PushString ShortByteString
   | MkAp | Slide Int | Split Int | Eval
   | UpdatePop Int | UpdateInd Int | Alloc Int
@@ -55,7 +56,7 @@ nPages = 8
 --    8 64-bit value
 --
 -- Ports:
---    0 TagPort
+--    0 TagRef
 --    4 32-bit value
 --
 -- Coproduct (sum) types:
@@ -91,7 +92,7 @@ nPages = 8
 -- Globals are resolved in a giant `br_table`. This is ugly, but avoids
 -- run-time type-checking.
 
-data Tag = TagAp | TagInd | TagGlobal | TagInt | TagPort | TagSum | TagString deriving Enum
+data Tag = TagAp | TagInd | TagGlobal | TagInt | TagRef | TagSum | TagString deriving Enum
 
 encWasmOp :: WasmOp -> [Int]
 encWasmOp op = case op of
@@ -279,6 +280,7 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), 
     [ ("#eval", (([], []), evalAsm))
     , ("#mkap", (([], []), mkApAsm))
     , ("#pushint", (([I64], []), pushIntAsm))
+    , ("#pushref", (([I32], []), pushRefAsm))
     , ("#push", (([I32], []), pushAsm))
     , ("#pushglobal", (([I32, I32], []), pushGlobalAsm))
     , ("#updatepop", (([I32], []), updatePopAsm))
@@ -508,46 +510,12 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), 
     ++ concatMap wdeclOut (refToI32 <$> outs)
     ++ [End]
   wdeclIn I64 i =
-    [ Get_global sp  -- [sp] = hp
-    , Get_global hp
-    , I32_store 2 0
-    , Get_global sp  -- sp = sp - 4
-    , I32_const 4
-    , I32_sub
-    , Set_global sp
-    , Get_global hp  -- [hp] = TagInt
-    , tag_const TagInt
-    , I32_store 2 0
-    , Get_global hp  -- [hp + 8] = local i
-    , I32_const 8
-    , I32_add
-    , Get_local i
-    , I64_store 3 0
-    , Get_global hp  -- hp = hp + 16
-    , I32_const 16
-    , I32_add
-    , Set_global hp
+    [ Get_local i
+    , Call $ wasmFunNo "#pushint"
     ]
   wdeclIn I32 i =
-    [ Get_global sp  -- [sp] = hp
-    , Get_global hp
-    , I32_store 2 0
-    , Get_global sp  -- sp = sp - 4
-    , I32_const 4
-    , I32_sub
-    , Set_global sp
-    , Get_global hp  -- [hp] = TagPort
-    , tag_const TagPort
-    , I32_store 2 0
-    , Get_global hp  -- [hp + 4] = local i
-    , I32_const 4
-    , I32_add
-    , Get_local i
-    , I32_store 2 0
-    , Get_global hp  -- hp = hp + 8
-    , I32_const 8
-    , I32_add
-    , Set_global hp
+    [ Get_local i
+    , Call $ wasmFunNo "#pushref"  -- Evaluate.
     ]
   {- For JS demos.
   wdeclIn I32 i =
@@ -1066,8 +1034,11 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), 
     , ("||", boolAsm I32_or)
     , ("++", catAsm)
     , ("String-==", strEqAsm)
+    , ("Databuf-set", concatMap deQuasi databufSetAsm)
+    , ("Databuf-get", concatMap deQuasi databufGetAsm)
+    , ("Port-set", concatMap deQuasi databufSetAsm)
+    , ("Port-get", concatMap deQuasi databufGetAsm)
     ]
-
   pairWith42Asm :: [WasmOp]
   pairWith42Asm =  -- [sp + 4] = (local0, #RealWorld)
     [ Get_global hp  -- [hp] = TagSum | (2 << 8)
@@ -1134,6 +1105,7 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), 
     Trap -> [ Unreachable ]
     Eval -> [ Call $ wasmFunNo "#eval" ]  -- (Tail call.)
     PushInt n -> [ I64_const n, Call $ wasmFunNo "#pushint" ]
+    PushRef n -> [ I32_const n, Call $ wasmFunNo "#pushref" ]
     Push n -> [ I32_const $ fromIntegral $ 4*(n + 1), Call $ wasmFunNo "#push" ]
     MkAp -> [ Call $ wasmFunNo "#mkap" ]
     PushGlobal fun | (n, g) <- getGlobal fun ->
@@ -1335,8 +1307,8 @@ mk1 storage pglobals (Ast ast) = case ast of
       Just k -> [Push k]
       -- Storage maps become PushString instructions.
       _ | v `elem` storage -> [PushString $ SBS.pack $ fromIntegral . ord <$> v]
-      -- Persistent globals become PushInt32 instructions.
-      _ | Just i <- elemIndex v pglobals -> [PushInt $ fromIntegral i]
+      -- Persistent globals become PushRef instructions.
+      _ | Just i <- elemIndex v pglobals -> [PushRef $ fromIntegral i]
       _ -> [PushGlobal v]
   Pack n m -> pure [Copro n m]
   Cas expr alts -> do
@@ -1434,6 +1406,29 @@ pushIntAsm =
   , I64_store 3 0
   , Get_global hp  -- hp = hp + 16
   , I32_const 16
+  , I32_add
+  , Set_global hp
+  , End
+  ]
+pushRefAsm :: [WasmOp]
+pushRefAsm =
+  [ Get_global sp  -- [sp] = hp
+  , Get_global hp
+  , I32_store 2 0
+  , Get_global sp  -- sp = sp - 4
+  , I32_const 4
+  , I32_sub
+  , Set_global sp
+  , Get_global hp  -- [hp] = TagRef
+  , tag_const TagRef
+  , I32_store 2 0
+  , Get_global hp  -- [hp + 4] = local_0
+  , I32_const 4
+  , I32_add
+  , Get_local 0
+  , I32_store 2 0
+  , Get_global hp  -- hp = hp + 8
+  , I32_const 8
   , I32_add
   , Set_global hp
   , End
@@ -1546,5 +1541,60 @@ updateIndAsm =
   , Get_global sp
   , I32_load 2 0
   , I32_store 2 0
+  , End
+  ]
+databufSetAsm :: [QuasiWasm]
+databufSetAsm =
+  [ Custom $ ReduceArgs 2
+  , Get_global sp  -- PUSH [[sp + 4] + 4]
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , Get_global sp  -- PUSH [[sp + 8] + 4]
+  , I32_const 8
+  , I32_add
+  , I32_load 2 0
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , Custom $ CallSym "#setpersist"
+  , Get_global sp  -- sp = sp + 20
+  , I32_const 20
+  , I32_add
+  , Set_global sp
+  , Custom $ CallSym "#nil42"
+  , End
+  ]
+databufGetAsm :: [QuasiWasm]
+databufGetAsm =
+  [ Custom $ ReduceArgs 1
+  , Get_global hp  -- [hp] = TagRef
+  , tag_const TagRef
+  , I32_store 2 0
+  , Get_global hp  -- [hp + 4] = ...
+  , I32_const 4
+  , I32_add
+  , Get_global sp  -- #getpersist [[sp + 4] + 4]
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , Custom $ CallSym "#getpersist"
+  , I32_store 2 0  -- ...result of #getpersist.
+  , Get_global hp  -- PUSH hp
+  , Get_global hp  -- hp = hp + 8
+  , I32_const 8
+  , I32_add
+  , Set_global hp
+  , Get_global sp  -- sp = sp + 12
+  , I32_const 12
+  , I32_add
+  , Set_global sp
+  , Custom $ CallSym "#pairwith42"
   , End
   ]

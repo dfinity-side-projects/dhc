@@ -551,6 +551,8 @@ methods = M.fromList
   , ("pure", (a :-> TApp m a, [("Monad", "m")]))
   -- Generates call_indirect ops.
   , ("far", (TC "I32" :-> a :-> TApp (TC "IO") (TC "()"), [("Message", "a")]))
+  , ("set", (TApp (TC "Persist") a :-> a :-> TApp (TC "IO") (TC "()"), [("Store", "a")]))
+  , ("get", (TApp (TC "Persist") a :-> TApp (TC "IO") a, [("Store", "a")]))
   ] where
     a = GV "a"
     b = GV "b"
@@ -606,6 +608,9 @@ dictSolve dsoln soln (Ast ast) = case ast of
 
   Placeholder "far" t -> Ast $ Far $ basicsFromTuple $ typeSolve soln t
 
+  Placeholder "set" t -> Ast $ Ast (Var "fst") :@ rec (Ast $ Placeholder "Store" $ typeSolve soln t)
+  Placeholder "get" t -> Ast $ Ast (Var "snd") :@ rec (Ast $ Placeholder "Store" $ typeSolve soln t)
+
   Placeholder d t -> case typeSolve soln t of
     TV v -> Ast $ Var $ fromJust $ lookup (d, v) dsoln
     u -> Ast $ findInstance d u
@@ -621,6 +626,10 @@ dictSolve dsoln soln (Ast ast) = case ast of
       TC "Maybe" -> Ast (Ast (Pack 0 2) :@ Ast (Var "maybe_pure")) :@ Ast (Var "maybe_monad")
       TC "IO" -> Ast (Ast (Pack 0 2) :@ Ast (Var "io_pure")) :@ Ast (Var "io_monad")
       e -> error $ "BUG! no Monad for " ++ show e
+    findInstance "Store" t = case t of
+      TC "Databuf" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Databuf-set")) :@ Ast (Var "Databuf-get")
+      TC "Port" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Port-set")) :@ Ast (Var "Port-get")
+      e -> error $ "BUG! no Store for " ++ show e
     findInstance d _ = error $ "BUG! bad class: " ++ show d
 
 typeSolve :: [(String, Type)] -> Type -> Type
@@ -641,9 +650,13 @@ propagate cs t = mapM_ propagateTyCon cs where
     TC "IO" -> pure ()
     _ -> lift $ Left $ "no Monad instance: " ++ show t
   propagateTyCon "Message" = case t of
-    TC _ -> pure ()
+    TC _ -> pure ()  -- TODO: Only allow refs and ints.
     TApp (TC "()") rest -> allBasic rest
     _ -> lift $ Left $ "no Message instance: " ++ show t
+  propagateTyCon "Store" = case t of
+    TC "Databuf" -> pure ()
+    TC "Port" -> pure ()
+    _ -> lift $ Left $ "no Store instance: " ++ show t
   propagateTyCon c = error $ "TODO: " ++ c
   allBasic (TC s) = case getBasic s of
     Nothing -> lift $ Left $ "no Message instance: " ++ s
@@ -690,6 +703,10 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
   -- We keep their types around for various checks.
   , ("Int-==", TC "Int" :-> TC "Int" :-> TC "Bool")
   , ("String-==", TC "String" :-> TC "String" :-> TC "Bool")
+  , ("Databuf-set", TApp (TC "Persist") (TC "Databuf") :-> TC "Databuf" :-> io (TC "()"))
+  , ("Databuf-get", TApp (TC "Persist") (TC "Databuf") :-> io (TC "Databuf"))
+  , ("Port-set", TApp (TC "Persist") (TC "Databuf") :-> TC "Databuf" :-> io (TC "()"))
+  , ("Port-get", TApp (TC "Persist") (TC "Databuf") :-> io (TC "Databuf"))
   ]) ++
   [ ("False",   (jp 0 0, TC "Bool"))
   , ("True",    (jp 1 0, TC "Bool"))
@@ -704,6 +721,7 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
     jp m n = Just (m, n)
     a = GV "a"
     b = GV "b"
+    io = TApp (TC "IO")
 
 arityFromType :: Type -> Int
 arityFromType = f 0 where
@@ -776,7 +794,7 @@ hsToAst boostMap ext prog = do
       `M.union` (M.fromList $ storageTypeConstraintHack <$> storage)
       `M.union` (M.fromList $ persistTypeConstraint <$> ps)
     storageTypeConstraintHack s = (s, (Nothing, TC "Map" `TApp` TV ('@':s)))
-    persistTypeConstraint s = (s, (Nothing, TC "Persist" `TApp` TC "Databuf"))
+    persistTypeConstraint s = (s, (Nothing, TC "Persist" `TApp` TV ('@':s)))
 
 constrainStorage :: [(String, Type)] -> [(String, (QualType, Ast))] -> [(String, (QualType, Ast))]
 constrainStorage cons ds = second (first (first rewriteType)) <$> ds where
