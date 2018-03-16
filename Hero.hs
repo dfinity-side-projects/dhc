@@ -210,15 +210,15 @@ runWasm fns s herovm = let
   Just fI = lookup s exports
   in run herovm { insts = [[Call fI]] }
 
--- | Builds a HeroVM with global variables specified in Wasm binary.
-mkHeroVM :: Wasm -> HeroVM
-mkHeroVM w = HeroVM
-  (IM.fromList $ zip [0..] $ head . snd <$> globals w) [] [] [] (IM.fromList $
+-- | Builds a HeroVM for given Wasm binary and persistent globals.
+mkHeroVM :: Wasm -> [(Int, WasmOp)] -> HeroVM
+mkHeroVM w gs = HeroVM initGlobals [] [] [] (IM.fromList $
     concatMap strToAssocs $ dataSection w)
     (IM.fromList $ zip [0..] $ types w)
     IM.empty
     w
   where
+  initGlobals = IM.fromList $ (zip [0..] $ head . snd <$> globals w) ++ gs
   strToAssocs ([I32_const n], s) = zip [fromIntegral n..] $ ord <$> s
   strToAssocs _ = error "BUG!"
 
