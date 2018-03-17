@@ -551,8 +551,8 @@ methods = M.fromList
   , ("pure", (a :-> TApp m a, [("Monad", "m")]))
   -- Generates call_indirect ops.
   , ("far", (TC "I32" :-> a :-> TApp (TC "IO") (TC "()"), [("Message", "a")]))
-  , ("set", (TApp (TC "Persist") a :-> a :-> TApp (TC "IO") (TC "()"), [("Store", "a")]))
-  , ("get", (TApp (TC "Persist") a :-> TApp (TC "IO") a, [("Store", "a")]))
+  , ("toAny", (a :-> TC "I32", [("Store", "a")]))
+  , ("fromAny", (TC "I32" :-> a, [("Store", "a")]))
   ] where
     a = GV "a"
     b = GV "b"
@@ -579,6 +579,12 @@ fstHack = r where Right [r] = parseDefs "fst p = case p of (x, y) -> x"
 
 sndHack :: (String, Ast)
 sndHack = r where Right [r] = parseDefs "snd p = case p of (x, y) -> y"
+
+setHack :: (String, Ast)
+setHack = r where Right [r] = parseDefs "set a p = set_any a (toAny p)"
+
+getHack :: (String, Ast)
+getHack = r where Right [r] = parseDefs "get a = do { r <- get_any a; pure (fromAny r) }"
 
 getBasic :: String -> Maybe WasmType
 getBasic "Databuf" = Just I32
@@ -608,8 +614,8 @@ dictSolve dsoln soln (Ast ast) = case ast of
 
   Placeholder "far" t -> Ast $ Far $ basicsFromTuple $ typeSolve soln t
 
-  Placeholder "set" t -> Ast $ Ast (Var "fst") :@ rec (Ast $ Placeholder "Store" $ typeSolve soln t)
-  Placeholder "get" t -> Ast $ Ast (Var "snd") :@ rec (Ast $ Placeholder "Store" $ typeSolve soln t)
+  Placeholder "toAny" t -> Ast $ Ast (Var "fst") :@ rec (Ast $ Placeholder "Store" $ typeSolve soln t)
+  Placeholder "fromAny" t -> Ast $ Ast (Var "snd") :@ rec (Ast $ Placeholder "Store" $ typeSolve soln t)
 
   Placeholder d t -> case typeSolve soln t of
     TV v -> Ast $ Var $ fromJust $ lookup (d, v) dsoln
@@ -627,8 +633,9 @@ dictSolve dsoln soln (Ast ast) = case ast of
       TC "IO" -> Ast (Ast (Pack 0 2) :@ Ast (Var "io_pure")) :@ Ast (Var "io_monad")
       e -> error $ "BUG! no Monad for " ++ show e
     findInstance "Store" t = case t of
-      TC "Databuf" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Databuf-set")) :@ Ast (Var "Databuf-get")
-      TC "Port" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Port-set")) :@ Ast (Var "Port-get")
+      TC "Databuf" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Databuf-toAny")) :@ Ast (Var "Databuf-fromAny")
+      TC "Port" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Port-toAny")) :@ Ast (Var "Port-fromAny")
+      TC "Int" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Int-toAny")) :@ Ast (Var "Int-fromAny")
       e -> error $ "BUG! no Store for " ++ show e
     findInstance d _ = error $ "BUG! bad class: " ++ show d
 
@@ -656,6 +663,7 @@ propagate cs t = mapM_ propagateTyCon cs where
   propagateTyCon "Store" = case t of
     TC "Databuf" -> pure ()
     TC "Port" -> pure ()
+    TC "Int" -> pure ()
     _ -> lift $ Left $ "no Store instance: " ++ show t
   propagateTyCon c = error $ "TODO: " ++ c
   allBasic (TC s) = case getBasic s of
@@ -699,14 +707,22 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
   , ("||", TC "Bool" :-> TC "Bool" :-> TC "Bool")
   , ("++", TC "String" :-> TC "String" :-> TC "String")
   , ("undefined", a)
+
+  -- TODO: These should not be exposed. Also, this is missing the type
+  -- constraint `Store a` because constraints are unsupported here.
+  , ("set_any", TApp (TC "Persist") a :-> TC "I32" :-> TApp (TC "IO") (TC "()"))
+  , ("get_any", TApp (TC "Persist") a :-> TApp (TC "IO") (TC "I32"))
+
   -- | Programmers cannot call the following directly.
   -- We keep their types around for various checks.
   , ("Int-==", TC "Int" :-> TC "Int" :-> TC "Bool")
   , ("String-==", TC "String" :-> TC "String" :-> TC "Bool")
-  , ("Databuf-set", TApp (TC "Persist") (TC "Databuf") :-> TC "Databuf" :-> io (TC "()"))
-  , ("Databuf-get", TApp (TC "Persist") (TC "Databuf") :-> io (TC "Databuf"))
-  , ("Port-set", TApp (TC "Persist") (TC "Databuf") :-> TC "Databuf" :-> io (TC "()"))
-  , ("Port-get", TApp (TC "Persist") (TC "Databuf") :-> io (TC "Databuf"))
+  , ("Databuf-toAny", TC "Databuf" :-> TC "I32")
+  , ("Port-toAny", TC "Port" :-> TC "I32")
+  , ("Int-toAny", TC "Int" :-> TC "I32")
+  , ("Databuf-fromAny", TApp (TC "Persist") (TC "Databuf") :-> io (TC "Databuf"))
+  , ("Port-fromAny", TApp (TC "Persist") (TC "Port") :-> io (TC "Port"))
+  , ("Int-fromAny", TApp (TC "Persist") (TC "Int") :-> io (TC "Int"))
   ]) ++
   [ ("False",   (jp 0 0, TC "Bool"))
   , ("True",    (jp 1 0, TC "Bool"))
@@ -733,6 +749,8 @@ hacks :: [(String, Ast)]
 hacks =
  [ fstHack
  , sndHack
+ , setHack
+ , getHack
  , maybePureHack
  , maybeMonadHack
  , ioPureHack

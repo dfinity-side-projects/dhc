@@ -1034,10 +1034,14 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), 
     , ("||", boolAsm I32_or)
     , ("++", catAsm)
     , ("String-==", strEqAsm)
-    , ("Databuf-set", concatMap deQuasi databufSetAsm)
-    , ("Databuf-get", concatMap deQuasi databufGetAsm)
-    , ("Port-set", concatMap deQuasi databufSetAsm)
-    , ("Port-get", concatMap deQuasi databufGetAsm)
+    , ("Databuf-toAny", concatMap deQuasi idLazyAsm)
+    , ("Databuf-fromAny", concatMap deQuasi idLazyAsm)
+    , ("Port-toAny", concatMap deQuasi idLazyAsm)
+    , ("Port-fromAny", concatMap deQuasi idLazyAsm)
+    , ("Int-toAny", concatMap deQuasi intToAnyAsm)
+    , ("Int-fromAny", concatMap deQuasi intFromAnyAsm)
+    , ("set_any", concatMap deQuasi setAnyAsm)
+    , ("get_any", concatMap deQuasi getAnyAsm)
     ]
   pairWith42Asm :: [WasmOp]
   pairWith42Asm =  -- [sp + 4] = (local0, #RealWorld)
@@ -1543,8 +1547,8 @@ updateIndAsm =
   , I32_store 2 0
   , End
   ]
-databufSetAsm :: [QuasiWasm]
-databufSetAsm =
+setAnyAsm :: [QuasiWasm]
+setAnyAsm =
   [ Custom $ ReduceArgs 2
   , Get_global sp  -- PUSH [[sp + 4] + 4]
   , I32_const 4
@@ -1568,8 +1572,8 @@ databufSetAsm =
   , Custom $ CallSym "#nil42"
   , End
   ]
-databufGetAsm :: [QuasiWasm]
-databufGetAsm =
+getAnyAsm :: [QuasiWasm]
+getAnyAsm =
   [ Custom $ ReduceArgs 1
   , Get_global hp  -- [hp] = TagRef
   , tag_const TagRef
@@ -1596,5 +1600,63 @@ databufGetAsm =
   , I32_add
   , Set_global sp
   , Custom $ CallSym "#pairwith42"
+  , End
+  ]
+idLazyAsm :: [QuasiWasm]
+idLazyAsm =
+  [ Custom $ ReduceArgs 1
+  , I32_const 8
+  , Custom $ CallSym "#updatepop"
+  , Custom $ CallSym "#eval"
+  , End
+  ]
+intToAnyAsm :: [QuasiWasm]
+intToAnyAsm =
+  [ Custom $ ReduceArgs 1
+  , Get_global sp  -- PushRef $ memory.externalize ([sp + 4] + 8) 8
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , I32_const 8
+  , I32_add
+  , I32_const 8
+  , Custom $ CallSym "memory.externalize"
+  , Custom $ CallSym "#pushref"
+  , I32_const 8  -- UpdatePop 1, Eval, End
+  , Custom $ CallSym "#updatepop"
+  , Custom $ CallSym "#eval"
+  , End
+  ]
+intFromAnyAsm :: [QuasiWasm]
+intFromAnyAsm =
+  [ Custom $ ReduceArgs 1
+  , Get_global hp  -- [hp] = TagInt
+  , tag_const TagInt
+  , I32_store 2 0
+  , Get_global hp  -- memory.internalize (hp + 8) 8 [[sp + 4] + 4] 0
+  , I32_const 8
+  , I32_add
+  , I32_const 8
+  , Get_global sp
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , I32_const 0
+  , Custom $ CallSym "memory.internalize"
+  , Get_global sp  -- [sp + 4] = hp
+  , I32_const 4
+  , I32_add
+  , Get_global hp
+  , I32_store 2 0
+  , Get_global hp  -- hp = hp + 16
+  , I32_const 16
+  , I32_add
+  , Set_global hp
+  , I32_const 8  -- UpdatePop 1, Eval, End
+  , Custom $ CallSym "#updatepop"
+  , Custom $ CallSym "#eval"
   , End
   ]
