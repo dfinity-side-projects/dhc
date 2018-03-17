@@ -5,6 +5,7 @@ module Hero (Wasm, HeroVM, parseWasm,
   setTable,
   globalVM,
   getNumVM, putNumVM,
+  stateVM, putStateVM,
   CustomWasmOp(I32_const, I64_const), WasmOp) where
 
 import Data.Bits
@@ -20,24 +21,31 @@ import Network.DFINITY.Parse
 
 import WasmOp
 
-data HeroVM = HeroVM
+data HeroVM a = HeroVM
   { globs :: IntMap WasmOp
   , locs  :: [IntMap WasmOp]
   , stack :: [WasmOp]
   , insts :: [[WasmOp]]
   , mem   :: IntMap Int
   , sigs  :: IntMap ([WasmType], [WasmType])
-  , table :: IntMap (HeroVM -> [WasmOp] -> IO HeroVM)
+  , table :: IntMap (HeroVM a -> [WasmOp] -> IO (HeroVM a))
   , wasm  :: Wasm
+  , state :: a
   }
 
-getNumVM :: Integral n => Int -> Int32 -> HeroVM -> n
+stateVM :: HeroVM a -> a
+stateVM vm = state vm
+
+putStateVM :: a -> HeroVM a -> HeroVM a
+putStateVM a vm = vm {state = a}
+
+getNumVM :: Integral n => Int -> Int32 -> HeroVM a -> n
 getNumVM w addr vm = getNum w addr $ mem vm
 
-globalVM ::  HeroVM -> IntMap WasmOp
+globalVM ::  HeroVM a -> IntMap WasmOp
 globalVM vm = globs vm
 
-putNumVM :: Integral n => Int -> Int32 -> n -> HeroVM -> HeroVM
+putNumVM :: Integral n => Int -> Int32 -> n -> HeroVM a -> HeroVM a
 putNumVM w addr n vm@(HeroVM {mem}) = vm { mem = putNum w addr n mem }
 
 getNum :: Integral n => Int -> Int32 -> IntMap Int -> n
@@ -77,7 +85,8 @@ take' n as | n > length as = error "BAD TAKE"
 
 -- The `End` opcode is reintroduced at the ends of function calls, so that we
 -- know when to pop locals.
-runWasm :: ((String, String) -> HeroVM -> [WasmOp] -> IO HeroVM) -> [Char] -> HeroVM -> IO ([WasmOp], HeroVM)
+runWasm :: ((String, String) -> HeroVM a -> [WasmOp] -> IO (HeroVM a))
+  -> [Char] -> HeroVM a -> IO ([WasmOp], HeroVM a)
 runWasm fns s herovm = let
   Wasm {imports, exports, decls, code} = wasm herovm
   fCount = length imports
@@ -211,20 +220,21 @@ runWasm fns s herovm = let
   in run herovm { insts = [[Call fI]] }
 
 -- | Builds a HeroVM for given Wasm binary and persistent globals.
-mkHeroVM :: Wasm -> [(Int, WasmOp)] -> HeroVM
-mkHeroVM w gs = HeroVM initGlobals [] [] [] (IM.fromList $
+mkHeroVM :: a -> Wasm -> [(Int, WasmOp)] -> HeroVM a
+mkHeroVM st w gs = HeroVM initGlobals [] [] [] (IM.fromList $
     concatMap strToAssocs $ dataSection w)
     (IM.fromList $ zip [0..] $ types w)
     IM.empty
     w
+    st
   where
   initGlobals = IM.fromList $ (zip [0..] $ head . snd <$> globals w) ++ gs
   strToAssocs ([I32_const n], s) = zip [fromIntegral n..] $ ord <$> s
   strToAssocs _ = error "BUG!"
 
 -- | Place arguments on WebAssembly stack.
-setArgsVM :: [WasmOp] -> HeroVM -> HeroVM
+setArgsVM :: [WasmOp] -> HeroVM a -> HeroVM a
 setArgsVM ls vm = vm { stack = reverse ls ++ stack vm }
 
-setTable :: Int32 -> (HeroVM -> [WasmOp] -> IO HeroVM) -> HeroVM -> HeroVM
+setTable :: Int32 -> (HeroVM a -> [WasmOp] -> IO (HeroVM a)) -> HeroVM a -> HeroVM a
 setTable slot fun vm = vm { table = IM.insert (fromIntegral slot) fun $ table vm }

@@ -12,9 +12,9 @@ main = do
   s <- B.getContents
   case parseWasm s of
     Left err -> putStrLn $ "parse error: " ++ show err
-    Right out -> void $ runWasm syscall "#main" $ mkHeroVM out []
+    Right out -> void $ runWasm syscall "#main" $ mkHeroVM () out []
 
-syscall :: (String, String) -> HeroVM -> [WasmOp] -> IO HeroVM
+syscall :: (String, String) -> HeroVM () -> [WasmOp] -> IO (HeroVM ())
 syscall ("dhc", "system") vm [I32_const n, I32_const sp, I32_const hp]
   | n == 21 = do
     when (getTag /= 6) $ error "BUG! want String"
