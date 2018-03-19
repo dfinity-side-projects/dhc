@@ -20,7 +20,7 @@ gmachine prog = if "main_" `M.member` funs then
   where
   drop' n as | n > length as = error "BUG!"
              | otherwise     = drop n as
-  ((_, funs, _, _, _), m) = either error id $ hsToGMachineWebDemo prog
+  ((_, funs, _, _, _, _), m) = either error id $ hsToGMachineWebDemo prog
   arity "putStr" = 1
   arity s = case M.lookup s funs of
     Just a -> a

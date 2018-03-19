@@ -561,6 +561,18 @@ methods = M.fromList
 listEqHack :: (String, Ast)
 listEqHack = r where Right [r] = parseDefs "list_eq_instance d a b = case a of { [] -> case b of {[] -> True; w -> False}; (x:xs) -> case b of { [] -> False; (y:ys)-> (d x y) && list_eq_instance d xs ys } }"
 
+listToAnyHack :: (String, Ast)
+Right [listToAnyHack] = parseDefs $ unlines
+  [ "list_to_any_instance d a = case a of"
+  , "  [] -> mkElemBuf [toAny 0]"
+  , "  (x:xs) -> mkElemBuf [toAny 1, fst d x, list_to_any_instance d xs]"
+  ]
+
+listFromAnyHack :: (String, Ast)
+Right [listFromAnyHack] = parseDefs $ unlines
+  [ "list_from_any_instance d a = undefined"
+  ]
+
 maybePureHack :: (String, Ast)
 maybePureHack = r where Right [r] = parseDefs "maybe_pure x = Just x"
 
@@ -636,6 +648,10 @@ dictSolve dsoln soln (Ast ast) = case ast of
       TC "Databuf" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Databuf-toAny")) :@ Ast (Var "Databuf-fromAny")
       TC "Port" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Port-toAny")) :@ Ast (Var "Port-fromAny")
       TC "Int" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Int-toAny")) :@ Ast (Var "Int-fromAny")
+      TApp (TC "List") a -> let
+        ltai = Ast $ Ast (Var "list_to_any_instance") :@ rec (Ast $ Placeholder "Store" a)
+        lfai = Ast $ Ast (Var "list_from_any_instance") :@ rec (Ast $ Placeholder "Store" a)
+        in Ast (Ast (Pack 0 2) :@ ltai) :@ lfai
       e -> error $ "BUG! no Store for " ++ show e
     findInstance d _ = error $ "BUG! bad class: " ++ show d
 
@@ -661,6 +677,7 @@ propagate cs t = mapM_ propagateTyCon cs where
     TApp (TC "()") rest -> allBasic rest
     _ -> lift $ Left $ "no Message instance: " ++ show t
   propagateTyCon "Store" = case t of
+    TApp (TC "List") a -> propagate ["Store"] a
     TC "Databuf" -> pure ()
     TC "Port" -> pure ()
     TC "Int" -> pure ()
@@ -712,6 +729,7 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
   -- constraint `Store a` because constraints are unsupported here.
   , ("set_any", TApp (TC "Persist") a :-> TC "I32" :-> TApp (TC "IO") (TC "()"))
   , ("get_any", TApp (TC "Persist") a :-> TApp (TC "IO") (TC "I32"))
+  , ("mkElemBuf", TApp (TC "List") (TC "I32") :-> TC "I32")
 
   -- | Programmers cannot call the following directly.
   -- We keep their types around for various checks.
@@ -756,6 +774,8 @@ hacks =
  , ioPureHack
  , ioMonadHack
  , listEqHack
+ , listToAnyHack
+ , listFromAnyHack
  ]
 
 {-

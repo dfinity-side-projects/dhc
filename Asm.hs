@@ -294,6 +294,7 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), 
     , ("#nil42", (([], []), nil42Asm))
     , ("#setpersist", (([I32, I32], []), setPersistAsm persistCount))
     , ("#getpersist", (([I32], [I32]), getPersistAsm persistCount))
+    , ("#mkelembufhack", (([I32], [I32]), concatMap deQuasi mkElemBufHack))
     -- Outer "#main" function. It calls the internal "main" function.
     , ("#main", (([], []),
       -- The magic constant 42 represents the RealWorld.
@@ -1622,7 +1623,8 @@ intToAnyAsm =
   , I32_const 8
   , Custom $ CallSym "memory.externalize"
   , Custom $ CallSym "#pushref"
-  , I32_const 8  -- UpdatePop 1, Eval, End
+  -- UpdatePop 2, not 1, because PushRef creates an extra stack item.
+  , I32_const 12  -- UpdatePop 2, Eval, End
   , Custom $ CallSym "#updatepop"
   , Custom $ CallSym "#eval"
   , End
@@ -1658,5 +1660,88 @@ intFromAnyAsm =
   , I32_const 8  -- UpdatePop 1, Eval, End
   , Custom $ CallSym "#updatepop"
   , Custom $ CallSym "#eval"
+  , End
+  ]
+-- Assume [sp + 4(n + 1)] is the list of refs.
+--
+--   1. Push n, Eval.
+--   2. If result is a non-empty list then:
+--      a. Prepare for next iteration: [sp + 4(n + 2)] = [[sp + 4] + 12]
+--      b. Replace [sp + 4] with its first field [[sp + 4] + 8].
+--      c. Eval and debone head ref: Eval, [sp + 4] = [[sp + 4] + 4]
+--      d. n = n + 1.
+--      e. Go to step 1.
+--   3. Otherwise we're done. Return length of list n.
+--
+-- Afterwards, the address (sp + 4) is the start of a list of n refs.
+-- (In reverse order since the stack pointer counts down.)
+mkElemBufHack :: [QuasiWasm]
+mkElemBufHack =
+  [ Loop Nada
+    [ Get_local 0  -- Push n
+    , I32_const 1
+    , I32_add
+    , I32_const 4
+    , I32_mul
+    , Custom $ CallSym "#push"
+    , Custom $ CallSym "#eval"
+    , Get_global sp  -- if [[sp + 4] + 4] ...
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , If Nada
+      [ Get_global sp  -- [sp + 4(n + 2)] = [[sp + 4] + 12]
+      , Get_local 0
+      , I32_const 2
+      , I32_add
+      , I32_const 4
+      , I32_mul
+      , I32_add
+      , Get_global sp
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , I32_const 12
+      , I32_add
+      , I32_load 2 0
+      , I32_store 2 0
+      , Get_global sp  -- [sp + 4] = [[sp + 4] + 8]
+      , I32_const 4
+      , I32_add
+      , Get_global sp
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , I32_const 8
+      , I32_add
+      , I32_load 2 0
+      , I32_store 2 0
+      , Custom $ CallSym "#eval"
+      , Get_global sp  -- [sp + 4] = [[sp + 4] + 4]
+      , I32_const 4
+      , I32_add
+      , Get_global sp
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , I32_store 2 0
+      , Get_local 0  -- Increment n
+      , I32_const 1
+      , I32_add
+      , Set_local 0
+      , Br 1
+      ]
+    ]
+  , Get_global sp  -- sp = sp + 4 (move past [])
+  , I32_const 4
+  , I32_add
+  , Set_global sp
+  , Get_local 0
   , End
   ]
