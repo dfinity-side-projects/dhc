@@ -99,6 +99,7 @@ gmachine prog = if "main_" `M.member` funs then
           Just b -> b
           _ -> fromJust $ lookup Nothing alts
         in go ((Right <$> body) ++ rest) s h
+      _ -> error "unsupported"
   go [] [r] h
     | "main_" `M.member` funs = case h M.! r of
       NInt n -> show n

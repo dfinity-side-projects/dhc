@@ -149,10 +149,19 @@ data QuasiWasmHelper =
   | ReduceArgs Int  -- Copy arguments from heap and reduce them to WHNF.
   deriving Show
 
-data Boost = Boost [WasmImport] [(String, (Type, [QuasiWasm]))]
+-- | A Boost is a custom collection of extra declarations and functions that
+-- are added to a binary.
+data Boost = Boost
+  -- Wasm import declarations.
+  { boostImports :: [WasmImport]
+  -- Primitive Haskell functions.
+  , boostHs :: [(String, (Type, [QuasiWasm]))]
+  -- Internal wasm functions, indexed by strings for CallSym.
+  , boostWasm :: [(String, (([WasmType], [WasmType]), [QuasiWasm]))]
+  }
 
 catBoost :: Boost -> Boost -> Boost
-catBoost (Boost a b) (Boost c d) = Boost (a ++ c) (b ++ d)
+catBoost (Boost a b c) (Boost x y z) = Boost (a ++ x) (b ++ y) (c ++ z)
 
 data DfnWasm = DfnWasm
   { legacyArities :: [(String, Int)]  -- Arities of legacy exports.
@@ -166,7 +175,7 @@ hsToIns :: Boost -> ExternType -> String -> Either String (GlobalTable, [(String
 hsToIns boost ext prog = astToIns <$> hsToAst (boostTypes boost) ext prog
 
 boostTypes :: Boost -> Map String (Maybe (Int, Int), Type)
-boostTypes (Boost _ m) = M.fromList $ second (((,) Nothing) . fst) <$> m
+boostTypes b = M.fromList $ second (((,) Nothing) . fst) <$> boostHs b
 
 data CompilerState = CompilerState
   -- Bindings are local. They start empty and finish empty.
@@ -215,7 +224,7 @@ tag_const :: Tag -> CustomWasmOp a
 tag_const = I32_const . fromIntegral . fromEnum
 
 insToBin :: Boost -> (GlobalTable, [(String, [Ins])]) -> DfnWasm
-insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), persistCount), gmachine) = DfnWasm
+insToBin (Boost imps morePrims moreFuns) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), persistCount), gmachine) = DfnWasm
   { legacyArities = ((\s -> (s, fst $ getGlobal s)) <$> exs)
   , wasmBinary = wasm
   } where
@@ -294,7 +303,6 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), 
     , ("#nil42", (([], []), nil42Asm))
     , ("#setpersist", (([I32, I32], []), setPersistAsm persistCount))
     , ("#getpersist", (([I32], [I32]), getPersistAsm persistCount))
-    , ("#mkelembufhack", (([I32], [I32]), concatMap deQuasi mkElemBufHack))
     -- Outer "#main" function. It calls the internal "main" function.
     , ("#main", (([], []),
       -- The magic constant 42 represents the RealWorld.
@@ -308,7 +316,7 @@ insToBin (Boost imps morePrims) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), 
       ]
       ++ concatMap fromIns [PushGlobal "main", MkAp, Eval]
       ++ [End]))
-    ]
+    ] ++ (second (second $ concatMap deQuasi) <$> moreFuns)
   wasmFuns =
     (second (first (\(ins, outs) -> (typeNo ins outs, 0))) <$> internalFuns)
     -- Primitive functions.
@@ -1660,88 +1668,5 @@ intFromAnyAsm =
   , I32_const 8  -- UpdatePop 1, Eval, End
   , Custom $ CallSym "#updatepop"
   , Custom $ CallSym "#eval"
-  , End
-  ]
--- Assume [sp + 4(n + 1)] is the list of refs.
---
---   1. Push n, Eval.
---   2. If result is a non-empty list then:
---      a. Prepare for next iteration: [sp + 4(n + 2)] = [[sp + 4] + 12]
---      b. Replace [sp + 4] with its first field [[sp + 4] + 8].
---      c. Eval and debone head ref: Eval, [sp + 4] = [[sp + 4] + 4]
---      d. n = n + 1.
---      e. Go to step 1.
---   3. Otherwise we're done. Return length of list n.
---
--- Afterwards, the address (sp + 4) is the start of a list of n refs.
--- (In reverse order since the stack pointer counts down.)
-mkElemBufHack :: [QuasiWasm]
-mkElemBufHack =
-  [ Loop Nada
-    [ Get_local 0  -- Push n
-    , I32_const 1
-    , I32_add
-    , I32_const 4
-    , I32_mul
-    , Custom $ CallSym "#push"
-    , Custom $ CallSym "#eval"
-    , Get_global sp  -- if [[sp + 4] + 4] ...
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , If Nada
-      [ Get_global sp  -- [sp + 4(n + 2)] = [[sp + 4] + 12]
-      , Get_local 0
-      , I32_const 2
-      , I32_add
-      , I32_const 4
-      , I32_mul
-      , I32_add
-      , Get_global sp
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
-      , I32_const 12
-      , I32_add
-      , I32_load 2 0
-      , I32_store 2 0
-      , Get_global sp  -- [sp + 4] = [[sp + 4] + 8]
-      , I32_const 4
-      , I32_add
-      , Get_global sp
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
-      , I32_const 8
-      , I32_add
-      , I32_load 2 0
-      , I32_store 2 0
-      , Custom $ CallSym "#eval"
-      , Get_global sp  -- [sp + 4] = [[sp + 4] + 4]
-      , I32_const 4
-      , I32_add
-      , Get_global sp
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
-      , I32_store 2 0
-      , Get_local 0  -- Increment n
-      , I32_const 1
-      , I32_add
-      , Set_local 0
-      , Br 1
-      ]
-    ]
-  , Get_global sp  -- sp = sp + 4 (move past [])
-  , I32_const 4
-  , I32_add
-  , Set_global sp
-  , Get_local 0
   , End
   ]
