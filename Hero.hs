@@ -183,7 +183,7 @@ runWasm fns s herovm = let
       let I32_const addr = head stack
           c = I64_const $ getNum 8 addr mem
       run $ step (c:tail stack)
-    If _ bl -> let I32_const n = head stack in if n == 1
+    If _ bl -> let I32_const n = head stack in if n /= 0
       then run vm {stack = tail stack, insts = bl:i1}
       else run vm {stack = tail stack, insts = i1}
     Block _ bl -> run vm {insts = bl:i1}
