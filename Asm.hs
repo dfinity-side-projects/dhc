@@ -12,10 +12,10 @@ module Asm (hsToWasm, Ins(..),
 import Control.Arrow
 #ifdef __HASTE__
 import "mtl" Control.Monad.State
-import qualified Data.ByteString as SBS
 #else
 import Control.Monad.State
-import Data.ByteString.Short (ShortByteString)
+import qualified Data.ByteString.Char8 as B
+import Data.ByteString.Short (ShortByteString, unpack)
 import qualified Data.ByteString.Short as SBS
 #endif
 import qualified Data.Bimap as BM
@@ -29,8 +29,18 @@ import Data.Maybe
 import DHC
 import WasmOp
 
+sbs :: String -> ShortByteString
 #ifdef __HASTE__
-type ShortByteString = SBS.ByteString
+sbs = id
+sbslen :: String -> Int
+sbslen = length
+unpack :: String -> [Int]
+unpack = fmap ord
+type ShortByteString = String
+#else
+sbs = SBS.toShort . B.pack
+sbslen :: ShortByteString -> Int
+sbslen = SBS.length
 #endif
 
 -- | G-Machine instructions.
@@ -198,14 +208,14 @@ align4 n = (n + 3) `div` 4 * 4
 mkStrConsts :: [ShortByteString] -> (Int, Map ShortByteString Int)
 mkStrConsts ss = f (0, []) ss where
   f (p, ds) [] = (p, M.fromList ds)
-  f (k, ds) (s:rest) = f (k + 16 + align4 (SBS.length s), ((s, k):ds)) rest
+  f (k, ds) (s:rest) = f (k + 16 + align4 (sbslen s), ((s, k):ds)) rest
 
 astToIns :: AstPlus -> (GlobalTable, [(String, [Ins])])
 astToIns (AstPlus es ws storage ps ds ts) = ((es, funs, wasmDecl <$> ws, ciTypes, strConsts, length ps), ins) where
   compilerOut = second (compile storage ps) <$> ds
   ciTypes = foldl' union [] $ callIndirectTypes . snd . snd <$> compilerOut
   ins = second fst <$> compilerOut
-  strConsts = mkStrConsts $ union (SBS.pack . fmap (fromIntegral . ord) <$> storage) $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
+  strConsts = mkStrConsts $ union (sbs <$> storage) $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
   wasmDecl w = (w, wasmType [] $ fst $ fromJust $ lookup w ts)
   wasmType acc t = case t of
     a :-> b -> wasmType (translateType a : acc) b
@@ -268,12 +278,12 @@ insToBin (Boost imps morePrims moreFuns) ((exs, funs, wrapme, ciTypes, (hp0, str
     ]
   encStrConsts (s, offset) = concat
     [ [0, 0x41] ++ leb128 offset ++ [0xb]
-    , leb128 $ 16 + SBS.length s
+    , leb128 $ 16 + sbslen s
     , [fromEnum TagString, 0, 0, 0]
     , enc32 $ offset + 16
     , enc32 0
-    , enc32 $ SBS.length s
-    , fromIntegral <$> SBS.unpack s
+    , enc32 $ sbslen s
+    , fromIntegral <$> unpack s
     ]
   -- 0 = external_kind Function.
   importFun ((m, f), ty) = encStr m ++ encStr f ++ [0, uncurry typeNo ty]
@@ -1030,6 +1040,7 @@ insToBin (Boost imps morePrims moreFuns) ((exs, funs, wrapme, ciTypes, (hp0, str
     , ("||", boolAsm I32_or)
     , ("++", catAsm)
     , ("String-==", strEqAsm)
+#ifndef __HASTE__
     , ("Databuf-toAny", concatMap deQuasi idLazyAsm)
     , ("Databuf-fromAny", concatMap deQuasi idLazyAsm)
     , ("Port-toAny", concatMap deQuasi idLazyAsm)
@@ -1038,6 +1049,7 @@ insToBin (Boost imps morePrims moreFuns) ((exs, funs, wrapme, ciTypes, (hp0, str
     , ("Int-fromAny", concatMap deQuasi intFromAnyAsm)
     , ("set_any", concatMap deQuasi setAnyAsm)
     , ("get_any", concatMap deQuasi getAnyAsm)
+#endif
     ]
   pairWith42Asm :: [WasmOp]
   pairWith42Asm =  -- [sp + 4] = (local0, #RealWorld)
@@ -1113,9 +1125,9 @@ insToBin (Boost imps morePrims moreFuns) ((exs, funs, wrapme, ciTypes, (hp0, str
       , I32_const $ fromIntegral g
       , Call $ wasmFunNo "#pushglobal"
       ]
-    PushString sbs ->
+    PushString s ->
       [ Get_global sp  -- [sp] = address of string const
-      , I32_const $ fromIntegral $ strConsts M.! sbs
+      , I32_const $ fromIntegral $ strConsts M.! s
       , I32_store 2 0
       , Get_global sp  -- sp = sp - 4
       , I32_const 4
@@ -1306,7 +1318,7 @@ mk1 storage pglobals (Ast ast) = case ast of
     pure $ case lookup v m of
       Just k -> [Push k]
       -- Storage maps become PushString instructions.
-      _ | v `elem` storage -> [PushString $ SBS.pack $ fromIntegral . ord <$> v]
+      _ | v `elem` storage -> [PushString $ sbs v]
       -- Persistent globals become PushRef instructions.
       _ | Just i <- elemIndex v pglobals -> [PushRef $ fromIntegral i]
       _ -> [PushGlobal v]

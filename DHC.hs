@@ -10,12 +10,11 @@ import Control.Monad
 import Data.Binary (Binary)
 #ifdef __HASTE__
 import "mtl" Control.Monad.State
-import Data.ByteString (ByteString, pack)
 #else
 import Control.Monad.State
-import Data.ByteString.Short (ShortByteString, pack)
+import qualified Data.ByteString.Char8 as B
+import Data.ByteString.Short (ShortByteString, toShort)
 #endif
-import Data.ByteString.Internal (c2w)
 import Data.Char
 import Data.Int
 import Data.List
@@ -27,8 +26,12 @@ import Text.Parsec hiding (State)
 
 import WasmOp (WasmType(..))
 
+sbs :: String -> ShortByteString
 #ifdef __HASTE__
-type ShortByteString = ByteString
+sbs = id
+type ShortByteString = String
+#else
+sbs = toShort . B.pack
 #endif
 
 instance Binary Type
@@ -204,7 +207,7 @@ supercombinators = catMaybes <$> between (want "{") (want "}") (sc `sepBy` want 
   str = try $ do
     (t, s) <- tok
     when (t /= LexString) $ fail ""
-    pure $ Ast $ S $ pack $ c2w <$> s
+    pure $ Ast $ S $ sbs s
   varSym = do
     (t, s) <- tok
     when (t /= LexSymbol || s `elem` ["..", "::", "=", "|", "<-", "->", "=>"]) $ fail ""
@@ -774,15 +777,17 @@ hacks :: [(String, Ast)]
 hacks =
  [ fstHack
  , sndHack
- , setHack
- , getHack
  , maybePureHack
  , maybeMonadHack
  , ioPureHack
  , ioMonadHack
  , listEqHack
+#ifndef __HASTE__
  , listToAnyHack
  , listFromAnyHack
+ , setHack
+ , getHack
+#endif
  ]
 
 {-
@@ -799,15 +804,15 @@ expandSyscalls ext arities = ffix $ \rec (Ast ast) -> Ast $ case ast of
   --  target.fun 1 2 "three"
   -- becomes:
   --  #nfsyscall 6 0 "target" "fun" 3 1 2 "three"
-  Qual c f | Just n <- ext c f -> foldl1' appIt [Var "#nfsyscall", I (fromIntegral $ n + 3), I 0, S (pack $ c2w <$> c), S (pack $ c2w <$> f), I (fromIntegral n)]
+  Qual c f | Just n <- ext c f -> foldl1' appIt [Var "#nfsyscall", I (fromIntegral $ n + 3), I 0, S $ sbs c, S $ sbs f, I (fromIntegral n)]
   -- Example:
   --  call target.fun "abc123" 1 2 "three"
   --  call fun "abc123" 1 2 "three"
   -- becomes:
   --  #nfsyscall 7 8 "target" "fun" 3 "abc123" 1 2 "three"
   --  #nfsyscall 6 9 "fun" 3 "abc123" 1 2 "three"
-  CCall "" f | Just n <- lookup f arities -> foldl1' appIt [Var "#nfsyscall", I (fromIntegral $ n + 3), I 9, S (pack $ c2w <$> f), I (fromIntegral n)]
-  CCall c f | Just n <- ext c f -> foldl1' appIt [Var "#nfsyscall", I (fromIntegral $ n + 4), I 8, S (pack $ c2w <$> c), S (pack $ c2w <$> f), I (fromIntegral n)]
+  CCall "" f | Just n <- lookup f arities -> foldl1' appIt [Var "#nfsyscall", I (fromIntegral $ n + 3), I 9, S $ sbs f, I (fromIntegral n)]
+  CCall c f | Just n <- ext c f -> foldl1' appIt [Var "#nfsyscall", I (fromIntegral $ n + 4), I 8, S $ sbs c, S $ sbs f, I (fromIntegral n)]
   _ -> rec ast
   where appIt x y = Ast x :@ Ast y
 
