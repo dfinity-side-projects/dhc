@@ -1,13 +1,10 @@
 {-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE PackageImports #-}
 module DHC (parseContract, ExternType, AstF(..), Ast(..), AstPlus(..), Type(..), inferType, parseDefs, lexOffside,
-  preludeMinimal, arityFromType, hsToAst, liftLambdas) where
+  arityFromType, hsToAst, liftLambdas) where
 
 import Control.Arrow
 import Control.Monad
-import Data.Binary (Binary)
 #ifdef __HASTE__
 import "mtl" Control.Monad.State
 #else
@@ -16,14 +13,14 @@ import qualified Data.ByteString.Char8 as B
 import Data.ByteString.Short (ShortByteString, toShort)
 #endif
 import Data.Char
-import Data.Int
 import Data.List
 import qualified Data.Map.Strict as M
 import Data.Map.Strict (Map)
 import Data.Maybe
-import GHC.Generics (Generic)
 import Text.Parsec hiding (State)
 
+import Ast
+import Boost
 import WasmOp (WasmType(..))
 
 sbs :: String -> ShortByteString
@@ -34,33 +31,9 @@ type ShortByteString = String
 sbs = toShort . B.pack
 #endif
 
-instance Binary Type
-
-infixl 5 :@
-data AstF a = Qual String String | CCall String String
-  | Pack Int Int | I Int64 | S ShortByteString | Var String | Far [WasmType]
-  | a :@ a | Cas a [(a, a)]
-  | Lam [String] a | Let [(String, a)] a
-  | Placeholder String Type deriving (Read, Show, Functor, Generic)
-
-newtype Ast = Ast (AstF Ast) deriving (Show, Generic)
-
--- Annotated AST.
-data AAst a = AAst a (AstF (AAst a)) deriving (Show, Functor)
-
 -- | Knowing the arity of functions from other contracts
 -- can aid correctness checks during compilation.
 type ExternType = String -> String -> Maybe Int
-
-deAnn :: AAst a -> Ast
-deAnn = ffix $ \h (AAst _ ast) -> Ast $ h ast
-
-ffix :: Functor f => ((f a -> f b) -> a -> b) -> a -> b
-ffix f = f $ fmap $ ffix f
-
-infixr 5 :->
-data Type = TC String | TApp Type Type | Type :-> Type
-  | TV String | GV String deriving (Read, Show, Eq, Generic)
 
 data LayoutState = IndentAgain Int | LineStart | LineMiddle | AwaitBrace | Boilerplate deriving (Eq, Show)
 type Parser = Parsec String (LayoutState, [Int])
@@ -419,7 +392,7 @@ gather
   -> [(String, QualType)]
   -> Ast
   -> Constraints (AAst Type)
-gather findExport prelude env (Ast ast) = case ast of
+gather findExport globs env (Ast ast) = case ast of
   I i -> pure $ AAst (TC "Int") $ I i
   S s -> pure $ AAst (TC "String") $ S s
   Pack m n -> do  -- Only tuples are pre`Pack`ed.
@@ -437,7 +410,7 @@ gather findExport prelude env (Ast ast) = case ast of
       Just qt -> do
         (t1, [(_, x)]) <- instantiate qt
         pure $ AAst t1 $ Placeholder v $ TV x
-      Nothing -> case M.lookup v prelude of
+      Nothing -> case M.lookup v globs of
         Just (ma, gt) -> flip AAst (maybe (Var v) (uncurry Pack) ma) . fst <$> instantiate (gt, [])
         Nothing       -> bad $ "undefined: " ++ v
   t :@ u -> do
@@ -483,7 +456,7 @@ gather findExport prelude env (Ast ast) = case ast of
     Right t -> flip AAst (Qual c f) . fst <$> instantiate (t, [])
   _ -> fail $ "BUG! unhandled: " ++ show ast
   where
-    rec = gather findExport prelude
+    rec = gather findExport globs
     bad = Constraints . const . Left
     afst (AAst t _) = t
 
@@ -560,47 +533,6 @@ methods = M.fromList
     a = GV "a"
     b = GV "b"
     m = GV "m"
-
-listEqHack :: (String, Ast)
-listEqHack = r where Right [r] = parseDefs "list_eq_instance d a b = case a of { [] -> case b of {[] -> True; w -> False}; (x:xs) -> case b of { [] -> False; (y:ys)-> (d x y) && list_eq_instance d xs ys } }"
-
-listToAnyHack :: (String, Ast)
-Right [listToAnyHack] = parseDefs $ unlines
-  [ "list_to_any_instance d a = case a of"
-  , "  [] -> toElemBuf []"
-  , "  (x:xs) -> toElemBuf [fst d x, list_to_any_instance d xs]"
-  ]
-
-listFromAnyHack :: (String, Ast)
-Right [listFromAnyHack] = parseDefs $ unlines
-  [ "list_from_any_instance d a = case fromElemBuf a of"
-  , "  [] -> []"
-  , "  [x, next] -> snd d x:list_from_any_instance d next"
-  ]
-
-maybePureHack :: (String, Ast)
-maybePureHack = r where Right [r] = parseDefs "maybe_pure x = Just x"
-
-maybeMonadHack :: (String, Ast)
-maybeMonadHack = r where Right [r] = parseDefs "maybe_monad x f = case x of { Nothing -> Nothing; Just a -> f a }"
-
-ioPureHack :: (String, Ast)
-ioPureHack = r where Right [r] = parseDefs "io_pure x rw = (x, rw)"
-
-ioMonadHack :: (String, Ast)
-ioMonadHack = r where Right [r] = parseDefs "io_monad f g rw = let {p = f rw} in case p of (a, rw1) -> g a rw1"
-
-fstHack :: (String, Ast)
-fstHack = r where Right [r] = parseDefs "fst p = case p of (x, y) -> x"
-
-sndHack :: (String, Ast)
-sndHack = r where Right [r] = parseDefs "snd p = case p of (x, y) -> y"
-
-setHack :: (String, Ast)
-setHack = r where Right [r] = parseDefs "set a p = set_any a (toAny p)"
-
-getHack :: (String, Ast)
-getHack = r where Right [r] = parseDefs "get a = do { r <- get_any a; pure (fromAny r) }"
 
 getBasic :: String -> Maybe WasmType
 getBasic "Databuf" = Just I32
@@ -718,40 +650,9 @@ unify ((TApp s1 s2, TApp t1 t2):cs) = unify ((s1, t1):(s2, t2):cs)
 unify (( s1 :-> s2, t1 :-> t2):cs)  = unify ((s1, t1):(s2, t2):cs)
 unify ((s, t):_) = lift $ Left $ "mismatch: " ++ show s ++ " /= " ++ show t
 
-preludeMinimal :: Map String (Maybe (Int, Int), Type)
-preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
-  [ ("+", TC "Int" :-> TC "Int" :-> TC "Int")
-  , ("-", TC "Int" :-> TC "Int" :-> TC "Int")
-  , ("*", TC "Int" :-> TC "Int" :-> TC "Int")
-  , ("div", TC "Int" :-> TC "Int" :-> TC "Int")
-  , ("mod", TC "Int" :-> TC "Int" :-> TC "Int")
-  , ("<", TC "Int" :-> TC "Int" :-> TC "Bool")
-  , (">", TC "Int" :-> TC "Int" :-> TC "Bool")
-  , ("<=", TC "Int" :-> TC "Int" :-> TC "Bool")
-  , (">=", TC "Int" :-> TC "Int" :-> TC "Bool")
-  , ("&&", TC "Bool" :-> TC "Bool" :-> TC "Bool")
-  , ("||", TC "Bool" :-> TC "Bool" :-> TC "Bool")
-  , ("++", TC "String" :-> TC "String" :-> TC "String")
-  , ("undefined", a)
-
-  -- TODO: These should not be exposed. Also, this is missing the type
-  -- constraint `Store a` because constraints are unsupported here.
-  , ("set_any", TApp (TC "Persist") a :-> TC "I32" :-> TApp (TC "IO") (TC "()"))
-  , ("get_any", TApp (TC "Persist") a :-> TApp (TC "IO") (TC "I32"))
-  , ("toElemBuf", TApp (TC "List") (TC "I32") :-> TC "I32")
-  , ("fromElemBuf", TC "I32" :-> TApp (TC "List") (TC "I32"))
-
-  -- | Programmers cannot call the following directly.
-  -- We keep their types around for various checks.
-  , ("Int-==", TC "Int" :-> TC "Int" :-> TC "Bool")
-  , ("String-==", TC "String" :-> TC "String" :-> TC "Bool")
-  , ("Databuf-toAny", TC "Databuf" :-> TC "I32")
-  , ("Port-toAny", TC "Port" :-> TC "I32")
-  , ("Int-toAny", TC "Int" :-> TC "I32")
-  , ("Databuf-fromAny", TApp (TC "Persist") (TC "Databuf") :-> io (TC "Databuf"))
-  , ("Port-fromAny", TApp (TC "Persist") (TC "Port") :-> io (TC "Port"))
-  , ("Int-fromAny", TApp (TC "Persist") (TC "Int") :-> io (TC "Int"))
-  ]) ++
+-- TODO: This has devolved into a table of data constructors. Refactor.
+preludeMinimal :: Globals
+preludeMinimal = M.fromList
   [ ("False",   (jp 0 0, TC "Bool"))
   , ("True",    (jp 1 0, TC "Bool"))
   , ("Nothing", (jp 0 0, TApp (TC "Maybe") a))
@@ -760,40 +661,15 @@ preludeMinimal = M.fromList $ (second ((,) Nothing) <$>
   , ("Right",   (jp 1 1, b :-> TApp (TApp (TC "Either") a) b))
   , ("[]",      (jp 0 0, TApp (TC "List") a))
   , (":",       (jp 1 2, a :-> TApp (TC "List") a :-> TApp (TC "List") a))
-  ]
-  where
+  ] where
     jp m n = Just (m, n)
     a = GV "a"
     b = GV "b"
-    io = TApp (TC "IO")
 
 arityFromType :: Type -> Int
 arityFromType = f 0 where
   f acc (_ :-> r) = f (acc + 1) r
   f acc _ = acc
-
--- TODO: These dictionaries should not be built-in!
-hacks :: [(String, Ast)]
-hacks =
- [ fstHack
- , sndHack
- , maybePureHack
- , maybeMonadHack
- , ioPureHack
- , ioMonadHack
- , listEqHack
-#ifndef __HASTE__
- , listToAnyHack
- , listFromAnyHack
- , setHack
- , getHack
-#endif
- ]
-
-{-
-unAst :: Ast -> AstF Ast
-unAst (Ast a) = a
--}
 
 expandSyscalls :: ExternType -> [(String, Int)] -> Ast -> Ast
 expandSyscalls ext arities = ffix $ \rec (Ast ast) -> Ast $ case ast of
@@ -824,10 +700,13 @@ getContractExport f _ c v = case f c v of
   Nothing -> Left $ "no such export " ++ c ++ "." ++ v
   Just n -> Right $ foldr (:->) (TC "IO" `TApp` GV "r") [GV $ "x" ++ show i | i <- [1..n]]
 
-hsToAst :: Map String (Maybe (Int, Int), Type) -> ExternType -> String -> Either String AstPlus
-hsToAst boostMap ext prog = do
+boostTypes :: Boost -> Map String (Maybe (Int, Int), Type)
+boostTypes b = M.fromList $ second (((,) Nothing) . fst) <$> boostHs b
+
+hsToAst :: Boost -> ExternType -> String -> Either String AstPlus
+hsToAst boost ext prog = do
   a@(AstPlus es _ storage _ ds _) <- showErr $ parseContract prog
-  (preStorageInferred, storageCons) <- inferType (getContractExport ext es) (genTypes storage $ persist a) (ds ++ hacks)
+  (preStorageInferred, storageCons) <- inferType (getContractExport ext es) (genTypes storage $ persist a) (ds ++ preludeDefs)
   let
     inferred = constrainStorage storageCons preStorageInferred
     arities = second (countArgs . fst . fst) <$> inferred
@@ -838,6 +717,8 @@ hsToAst boostMap ext prog = do
     types = second fst <$> inferred
   pure a { asts = subbedDefs, funTypes = types }
   where
+    Right preludeDefs = parseDefs $ boostPrelude boost
+    boostMap = boostTypes boost
     showErr = either (Left . show) Right
     genTypes storage ps = preludeMinimal
       `M.union` boostMap

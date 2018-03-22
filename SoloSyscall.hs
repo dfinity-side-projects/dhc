@@ -7,7 +7,7 @@
 module SoloSyscall (genSyscall, genSyscallFromType) where
 
 import Data.Int
-import Asm
+import Boost
 import DHC
 import WasmOp
 

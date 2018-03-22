@@ -6,7 +6,9 @@ import Data.Maybe
 import Data.Monoid
 import Test.HUnit
 import Asm
+import Boost
 import DHC
+import Std
 import WebDemo
 
 data Node = NInt Int64 | NString ShortByteString | NAp Int Int | NGlobal Int String | NInd Int | NCon Int [Int] | RealWorld [String] deriving Show
@@ -21,10 +23,10 @@ gmachine prog = if "main_" `M.member` funs then
   drop' n as | n > length as = error "BUG!"
              | otherwise     = drop n as
   ((_, funs, _, _, _, _), m) = either error id $ hsToGMachineWebDemo prog
-  arity "putStr" = 1
+  boost = webDemoBoost <> stdBoost
   arity s = case M.lookup s funs of
     Just a -> a
-    Nothing -> arityFromType $ snd $ preludeMinimal M.! s
+    Nothing -> arityFromType $ fst $ fromJust $ lookup s $ boostHs boost
   go (fOrIns:rest) s h = either prim exec fOrIns where
     k = M.size h
     heapAdd x = M.insert k x h
