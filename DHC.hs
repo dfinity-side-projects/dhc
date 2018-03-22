@@ -513,7 +513,7 @@ instantiate (ty, qs) = do
 generalize :: [(String, Type)] -> Map String [String] -> AAst Type -> (QualType, Ast)
 generalize soln ctx a0@(AAst t0 _) = ((t, qs), dictSolve dsoln soln ast) where
   (t, qs) = runState (generalize' ctx $ typeSolve soln t0) []
-  -- TODO: Need to sort qs?
+  -- TODO: Here, and elsewhere: need to sort qs?
   dsoln = zip qs $ ("#d" ++) . show <$> [(0::Int)..]
   ast = case deAnn a0 of
     Ast (Lam ss body) -> Ast $ Lam (dvars ++ ss) body
@@ -601,6 +601,8 @@ getHack = r where Right [r] = parseDefs "get a = do { r <- get_any a; pure (from
 
 getBasic :: String -> Maybe WasmType
 getBasic "Databuf" = Just I32
+getBasic "Actor" = Just I32
+getBasic "Port" = Just I32
 getBasic "I32" = Just I32
 getBasic "Int" = Just I64
 getBasic _ = Nothing
@@ -674,7 +676,10 @@ propagate cs t = mapM_ propagateTyCon cs where
     TC "IO" -> pure ()
     _ -> lift $ Left $ "no Monad instance: " ++ show t
   propagateTyCon "Message" = case t of
-    TC _ -> pure ()  -- TODO: Only allow refs and ints.
+    TC "()" -> pure ()
+    TC s -> case getBasic s of
+      Nothing -> lift $ Left $ "no Message instance: " ++ s
+      Just _ -> pure ()
     TApp (TC "()") rest -> allBasic rest
     _ -> lift $ Left $ "no Message instance: " ++ show t
   propagateTyCon "Store" = case t of
