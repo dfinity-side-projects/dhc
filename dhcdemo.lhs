@@ -82,8 +82,10 @@ syscall e n sp hp
     addr <- load32 $ sp + 4
     tag <- load8 addr
     when (tag /= 6) $ error $ "BUG! want string (tag 6), got " ++ show tag
-    slen <- load32 $ addr + 4
-    s <- mapM load8 [addr + 8 + i | i <- [0..slen - 1]]
+    ptr <- load32 $ addr + 4
+    off <- load32 $ addr + 8
+    slen <- load32 $ addr + 12
+    s <- mapM load8 [ptr + off + i | i <- [0..slen - 1]]
     append e $ chr <$> s
     store32 hp 4
     store32 (hp + 4) 0

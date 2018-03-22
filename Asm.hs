@@ -5,6 +5,7 @@ module Asm (hsToWasm, Ins(..),
   DfnWasm(..),
   WasmType(Ref),  -- Re-export from WasmOp.
   tag_const, Tag(..), hsToIns,
+  enc32,
   QuasiWasm, QuasiWasmHelper(..),
   GlobalTable, Boost(..), catBoost) where
 
@@ -80,8 +81,9 @@ nPages = 8
 --
 -- String:
 --    0 TagString
---    4 length
---    8 bytes
+--    4 address
+--    8 offset
+--    12 length
 --
 -- For example, `Just 42` is represented by:
 --
@@ -196,7 +198,7 @@ align4 n = (n + 3) `div` 4 * 4
 mkStrConsts :: [ShortByteString] -> (Int, Map ShortByteString Int)
 mkStrConsts ss = f (0, []) ss where
   f (p, ds) [] = (p, M.fromList ds)
-  f (k, ds) (s:rest) = f (k + 8 + align4 (SBS.length s), ((s, k):ds)) rest
+  f (k, ds) (s:rest) = f (k + 16 + align4 (SBS.length s), ((s, k):ds)) rest
 
 astToIns :: AstPlus -> (GlobalTable, [(String, [Ins])])
 astToIns (AstPlus es ws storage ps ds ts) = ((es, funs, wasmDecl <$> ws, ciTypes, strConsts, length ps), ins) where
@@ -222,6 +224,9 @@ astToIns (AstPlus es ws storage ps ds ts) = ((es, funs, wasmDecl <$> ws, ciTypes
 
 tag_const :: Tag -> CustomWasmOp a
 tag_const = I32_const . fromIntegral . fromEnum
+
+enc32 :: Int -> [Int]
+enc32 n = (`mod` 256) . (div n) . (256^) <$> [(0 :: Int)..3]
 
 insToBin :: Boost -> (GlobalTable, [(String, [Ins])]) -> DfnWasm
 insToBin (Boost imps morePrims moreFuns) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), persistCount), gmachine) = DfnWasm
@@ -262,10 +267,12 @@ insToBin (Boost imps morePrims moreFuns) ((exs, funs, wrapme, ciTypes, (hp0, str
     , 0 : lenc (encStr "dfn" ++ (ord <$> show wrapme))  -- Custom section.
     ]
   encStrConsts (s, offset) = concat
-    [ [0, 0x41, offset, 0xb]
-    , leb128 $ 8 + SBS.length s
+    [ [0, 0x41] ++ leb128 offset ++ [0xb]
+    , leb128 $ 16 + SBS.length s
     , [fromEnum TagString, 0, 0, 0]
-    , take 4 $ leb128 (SBS.length s) ++ repeat 0
+    , enc32 $ offset + 16
+    , enc32 0
+    , enc32 $ SBS.length s
     , fromIntegral <$> SBS.unpack s
     ]
   -- 0 = external_kind Function.
@@ -301,6 +308,8 @@ insToBin (Boost imps morePrims moreFuns) ((exs, funs, wrapme, ciTypes, (hp0, str
     , ("#sethp", (([I32], []), [Get_local 0, Set_global hp, End]))
     , ("#pairwith42", (([I32], []), pairWith42Asm))
     , ("#nil42", (([], []), nil42Asm))
+    , ("#notmemcmp", (([I32, I32, I32], [I32]), concatMap deQuasi notmemcmpAsm))
+    , ("#memcpyhp", (([I32, I32], []), concatMap deQuasi memcpyhpAsm))
     , ("#setpersist", (([I32, I32], []), setPersistAsm persistCount))
     , ("#getpersist", (([I32], [I32]), getPersistAsm persistCount))
     -- Outer "#main" function. It calls the internal "main" function.
@@ -825,106 +834,87 @@ insToBin (Boost imps morePrims moreFuns) ((exs, funs, wrapme, ciTypes, (hp0, str
     , Get_global hp  -- [hp] = TagString
     , tag_const TagString
     , I32_store 2 0
-
-    , Get_global hp -- [hp + 4] = [[sp + 4] + 4] + [[sp + 8] + 4]
+    , Get_global hp -- [hp + 4] = hp + 16
     , I32_const 4
+    , I32_add
+    , Get_global hp
+    , I32_const 16
+    , I32_add
+    , I32_store 2 0
+    , Get_global hp -- [hp + 8] = 0
+    , I32_const 8
+    , I32_add
+    , I32_const 0
+    , I32_store 2 0
+    , Get_global hp -- [hp + 12] = [[sp + 4] + 12] + [[sp + 8] + 12]
+    , I32_const 12
     , I32_add
     , Get_global sp
     , I32_const 4
     , I32_add
     , I32_load 2 0
-    , I32_const 4
+    , I32_const 12
     , I32_add
     , I32_load 2 0
     , Get_global sp
     , I32_const 8
     , I32_add
     , I32_load 2 0
-    , I32_const 4
+    , I32_const 12
     , I32_add
     , I32_load 2 0
     , I32_add
     , I32_store 2 0
-    , Get_global sp  -- bp = [[sp + 4] + 4]
+    , Get_global hp  -- hp = hp + 16
+    , I32_const 16
+    , I32_add
+    , Set_global hp
+    , Get_global sp  -- memcpyhp ([[sp + 4] + 4] + [[sp + 4] + 8]) [[sp + 4] + 12]
     , I32_const 4
     , I32_add
     , I32_load 2 0
     , I32_const 4
     , I32_add
     , I32_load 2 0
-    , Set_global bp
-    , Get_global hp  -- hp = hp + 8
+    , Get_global sp
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
     , I32_const 8
     , I32_add
-    , Set_global hp
-    , Get_global bp  -- PUSH bp
-    , Block Nada
-      [ Loop Nada
-        [ Get_global bp  -- if (bp == 0) break;
-        , I32_eqz
-        , Br_if 1
-
-        , Get_global bp  -- bp = bp - 1
-        , I32_const 1
-        , I32_sub
-        , Set_global bp
-
-        , Get_global hp  -- [hp + i] = [[sp + 4] + 8 + i] | i <- [0..bp - 1]
-        , Get_global bp
-        , I32_add
-        , Get_global sp
-        , I32_const 4
-        , I32_add
-        , I32_load 2 0
-        , I32_const 8
-        , I32_add
-        , Get_global bp
-        , I32_add
-        , I32_load8_u 0 0
-        , I32_store8 0 0
-        , Br 0
-        ]
-      ]
-    , Get_global hp  -- hp = hp + old_bp  ; Via POP.
+    , I32_load 2 0
     , I32_add
-    , Set_global hp
-    , Get_global sp  -- bp = [[sp + 8] + 4]
+    , Get_global sp
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 12
+    , I32_add
+    , I32_load 2 0
+    , Call $ wasmFunNo "#memcpyhp"
+    , Get_global sp  -- memcpyhp ([[sp + 8] + 4] + [[sp + 8] + 8]) [[sp + 8] + 12]
     , I32_const 8
     , I32_add
     , I32_load 2 0
     , I32_const 4
     , I32_add
     , I32_load 2 0
-    , Set_global bp
-    , Get_global bp  -- PUSH bp
-    , Block Nada
-      [ Loop Nada
-        [ Get_global bp  -- if (bp == 0) break;
-        , I32_eqz
-        , Br_if 1
-        , Get_global bp  -- bp = bp - 1
-        , I32_const 1
-        , I32_sub
-        , Set_global bp
-        , Get_global hp  -- [hp + i] = [[sp + 8] + 8 + i] | i <- [0..bp - 1]
-        , Get_global bp
-        , I32_add
-        , Get_global sp
-        , I32_const 8
-        , I32_add
-        , I32_load 2 0
-        , I32_const 8
-        , I32_add
-        , Get_global bp
-        , I32_add
-        , I32_load8_u 0 0
-        , I32_store8 0 0
-        , Br 0
-        ]
-      ]
-    , Get_global hp  -- hp = hp + old_bp  ; Via POP.
+    , Get_global sp
+    , I32_const 8
     , I32_add
-    , Set_global hp
+    , I32_load 2 0
+    , I32_const 8
+    , I32_add
+    , I32_load 2 0
+    , I32_add
+    , Get_global sp
+    , I32_const 8
+    , I32_add
+    , I32_load 2 0
+    , I32_const 12
+    , I32_add
+    , I32_load 2 0
+    , Call $ wasmFunNo "#memcpyhp"
     , I32_store 2 0  -- [sp + 8] = old_hp  ; Via POPs.
     , Get_global sp  -- sp = sp + 4
     , I32_const 4
@@ -954,66 +944,63 @@ insToBin (Boost imps morePrims moreFuns) ((exs, funs, wrapme, ciTypes, (hp0, str
     , I32_add
     , I32_const 0
     , I32_store 2 0
-
-    , Get_global sp  -- bp = [[sp + 4] + 4]
+    , Get_global sp  -- bp = [[sp + 4] + 12]
     , I32_const 4
     , I32_add
     , I32_load 2 0
-    , I32_const 4
+    , I32_const 12
     , I32_add
     , I32_load 2 0
     , Set_global bp
 
     , Block Nada
-      [ Get_global sp  -- if bp /= [[sp + 8] + 4] then break
+      [ Get_global sp  -- if bp /= [[sp + 8] + 12] then break
       , I32_const 8
       , I32_add
       , I32_load 2 0
-      , I32_const 4
+      , I32_const 12
       , I32_add
       , I32_load 2 0
       , Get_global bp
       , I32_ne
       , Br_if 0
 
-      , Loop Nada
-        [ Block Nada
-          [ Get_global bp  -- if bp == 0 then break.
-          , I32_eqz
-          , Br_if 0
-          , Get_global bp  -- bp = bp - 1
-          , I32_const 1
-          , I32_sub
-          , Set_global bp
-
-          , Get_global sp  -- [[sp + 4] + 8 + bp].8u /= [[sp + 8] + 8 + bp].8u
-          , I32_const 4
-          , I32_add
-          , I32_load 2 0
-          , I32_const 8
-          , I32_add
-          , Get_global bp
-          , I32_add
-          , I32_load8_u 0 0
-          , Get_global sp
-          , I32_const 8
-          , I32_add
-          , I32_load 2 0
-          , I32_const 8
-          , I32_add
-          , Get_global bp
-          , I32_add
-          , I32_load8_u 0 0
-          , I32_ne
-          , Br_if 2  -- Break if unequal characters found.
-          , Br 1  -- Keep looping.
-          ]
-        ]
-      , Get_global hp  -- [hp + 4] = 1
+      , Get_global hp  -- PUSH hp + 4.
       , I32_const 4
       , I32_add
-      , I32_const 1
-      , I32_store 2 0
+      , Get_global sp  -- notmemcmp ([[sp + 4] + 4] + [[sp + 4] + 8]) ([[sp + 8] + 4] + [[sp + 8] + 8]) bp
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , Get_global sp
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , I32_const 8
+      , I32_add
+      , I32_load 2 0
+      , I32_add
+      , Get_global sp
+      , I32_const 8
+      , I32_add
+      , I32_load 2 0
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , Get_global sp
+      , I32_const 8
+      , I32_add
+      , I32_load 2 0
+      , I32_const 8
+      , I32_add
+      , I32_load 2 0
+      , I32_add
+      , Get_global bp
+      , Call $ wasmFunNo "#notmemcmp"
+      , I32_store 2 0  -- [hp + 4] = result  ; Via POP.
       ]
     , I32_store 2 0  -- [sp + 8] = old_hp  ; Via POPs.
     , Get_global sp  -- sp = sp + 4
@@ -1668,5 +1655,60 @@ intFromAnyAsm =
   , I32_const 8  -- UpdatePop 1, Eval, End
   , Custom $ CallSym "#updatepop"
   , Custom $ CallSym "#eval"
+  , End
+  ]
+memcpyhpAsm :: [QuasiWasm]
+memcpyhpAsm =
+  [ Loop Nada  -- while (local1 != 0) {
+    [ Get_local 1
+    , I32_eqz
+    , Br_if 1
+    , Get_local 1  -- local1 = local1 - 1
+    , I32_const 1
+    , I32_sub
+    , Set_local 1
+    , Get_global hp  -- [hp].8 = [local0].8
+    , Get_local 0
+    , I32_load8_u 0 0
+    , I32_store8 0 0
+    , Get_local 0  -- local0 = local0 + 1
+    , I32_const 1
+    , I32_add
+    , Set_local 0
+    , Get_global hp  -- hp = hp + 1
+    , I32_const 1
+    , I32_add
+    , Set_global hp
+    , Br 0
+    ]
+  , End
+  ]
+notmemcmpAsm :: [QuasiWasm]
+notmemcmpAsm =
+  [ Loop Nada  -- while (local2 != 0) {
+    [ Get_local 2
+    , I32_eqz
+    , If Nada [ I32_const 1 , Return ]
+    , Get_local 2  -- local2 = local2 - 1
+    , I32_const 1
+    , I32_sub
+    , Set_local 2
+    , Get_local 0  -- [local0].8 /= [local1].8 ?
+    , I32_load8_u 0 0
+    , Get_local 1
+    , I32_load8_u 0 0
+    , I32_ne
+    , If Nada [ I32_const 0 , Return ]
+    , Get_local 0  -- local0 = local0 + 1
+    , I32_const 1
+    , I32_add
+    , Set_local 0
+    , Get_local 1  -- local1 = local1 + 1
+    , I32_const 1
+    , I32_add
+    , Set_local 1
+    , Br 0
+    ]
+  , Unreachable
   , End
   ]
