@@ -18,8 +18,11 @@ syscall :: (String, String) -> HeroVM () -> [WasmOp] -> IO (HeroVM ())
 syscall ("dhc", "system") vm [I32_const n, I32_const sp, I32_const hp]
   | n == 21 = do
     when (getTag /= 6) $ error "BUG! want String"
-    let slen = getNumVM 4 (addr + 4) vm
-    putStr $ [chr $ getNumVM 1 (addr + 8 + i) vm | i <- [0..slen - 1]]
+    let
+      ptr = getNumVM 4 (addr + 4) vm
+      off = getNumVM 4 (addr + 8) vm
+      slen = getNumVM 4 (addr + 12) vm
+    putStr $ [chr $ getNumVM 1 (ptr + off + i) vm | i <- [0..slen - 1]]
     pure
       $ putNumVM 4 hp (5 :: Int)
       $ putNumVM 4 (hp + 4) (0 :: Int)
