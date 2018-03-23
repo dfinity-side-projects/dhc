@@ -36,6 +36,7 @@ stdBoost = Boost
   , ("&&", (TC "Bool" :-> TC "Bool" :-> TC "Bool", boolAsm I32_and))
   , ("||", (TC "Bool" :-> TC "Bool" :-> TC "Bool", boolAsm I32_or))
   , ("++", (TC "String" :-> TC "String" :-> TC "String", catAsm))
+  , ("slice", (TC "Int" :-> TC "String" :-> TApp (TC "()") (TApp (TC "String") (TC "String")), sliceAsm))
   , ("undefined", (a, [Unreachable, End]))
 
   -- | Programmers cannot call the following directly.
@@ -413,5 +414,131 @@ notmemcmpAsm =
     , Br 0
     ]
   , Unreachable
+  , End
+  ]
+sliceAsm :: [QuasiWasm]
+sliceAsm =
+  [ Custom $ ReduceArgs 2
+  -- TODO: Handle lengths out of range.
+  , Get_global sp  -- bp = [[sp + 4] + 8]
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , I32_const 8
+  , I32_add
+  , I32_load 2 0
+  , Set_global bp
+  , Get_global hp  -- [hp] = TagSum | (2 << 8)
+  , I32_const $ fromIntegral $ fromEnum TagSum + 256 * 2
+  , I32_store 2 0
+  , Get_global hp  -- [hp + 4] = 0
+  , I32_const 4
+  , I32_add
+  , I32_const 0
+  , I32_store 2 0
+  , Get_global hp  -- [hp + 8] = hp + 16
+  , I32_const 8
+  , I32_add
+  , Get_global hp
+  , I32_const 16
+  , I32_add
+  , I32_store 2 0
+  , Get_global hp  -- [hp + 12] = hp + 32
+  , I32_const 12
+  , I32_add
+  , Get_global hp
+  , I32_const 32
+  , I32_add
+  , I32_store 2 0
+  , Get_global hp  -- [hp + 16] = TagString
+  , I32_const 16
+  , I32_add
+  , tag_const TagString
+  , I32_store 2 0
+  , Get_global hp  -- [hp + 20] = [[sp + 8] + 4]
+  , I32_const 20
+  , I32_add
+  , Get_global sp
+  , I32_const 8
+  , I32_add
+  , I32_load 2 0
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , I32_store 2 0
+  , Get_global hp  -- [hp + 24] = [[sp + 8] + 8]
+  , I32_const 24
+  , I32_add
+  , Get_global sp
+  , I32_const 8
+  , I32_add
+  , I32_load 2 0
+  , I32_const 8
+  , I32_add
+  , I32_load 2 0
+  , I32_store 2 0
+  , Get_global hp  -- [hp + 28] = bp
+  , I32_const 28
+  , I32_add
+  , Get_global bp
+  , I32_store 2 0
+  , Get_global hp  -- [hp + 32] = TagString
+  , I32_const 32
+  , I32_add
+  , tag_const TagString
+  , I32_store 2 0
+  , Get_global hp  -- [hp + 36] = [[sp + 8] + 4]
+  , I32_const 36
+  , I32_add
+  , Get_global sp
+  , I32_const 8
+  , I32_add
+  , I32_load 2 0
+  , I32_const 4
+  , I32_add
+  , I32_load 2 0
+  , I32_store 2 0
+  , Get_global hp  -- [hp + 40] = [[sp + 8] + 8] + bp
+  , I32_const 40
+  , I32_add
+  , Get_global sp
+  , I32_const 8
+  , I32_add
+  , I32_load 2 0
+  , I32_const 8
+  , I32_add
+  , I32_load 2 0
+  , Get_global bp
+  , I32_add
+  , I32_store 2 0
+  , Get_global hp  -- [hp + 44] = [[sp + 8] + 12] - bp
+  , I32_const 44
+  , I32_add
+  , Get_global sp
+  , I32_const 8
+  , I32_add
+  , I32_load 2 0
+  , I32_const 12
+  , I32_add
+  , I32_load 2 0
+  , Get_global bp
+  , I32_sub
+  , I32_store 2 0
+  , Get_global sp  -- sp = sp + 4
+  , I32_const 4
+  , I32_add
+  , Set_global sp
+  , Get_global sp  -- [sp + 4] = hp
+  , I32_const 4
+  , I32_add
+  , Get_global hp
+  , I32_store 2 0
+  , Get_global hp  -- hp = hp + 48
+  , I32_const 48
+  , I32_add
+  , Set_global hp
+  , I32_const 12  -- UpdatePop 2
+  , Custom $ CallSym "#updatepop"
+  , Custom $ CallSym "#eval"
   , End
   ]

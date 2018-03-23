@@ -562,6 +562,7 @@ dictSolve dsoln soln (Ast ast) = case ast of
 
   Placeholder "==" t -> rec $ Ast $ Placeholder "Eq" $ typeSolve soln t
 
+  -- TODO: Replace this hack with properly implemented typeclass.
   Placeholder "far" t -> Ast $ Far $ basicsFromTuple $ typeSolve soln t
 
   Placeholder "toAny" t -> Ast $ Ast (Var "fst") :@ rec (Ast $ Placeholder "Store" $ typeSolve soln t)
@@ -585,13 +586,14 @@ dictSolve dsoln soln (Ast ast) = case ast of
     findInstance "Store" t = case t of
       TC "Databuf" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Databuf-toAny")) :@ Ast (Var "Databuf-fromAny")
       TC "Port" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Port-toAny")) :@ Ast (Var "Port-fromAny")
+      TC "Actor" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Actor-toAny")) :@ Ast (Var "Actor-fromAny")
       TC "Int" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Int-toAny")) :@ Ast (Var "Int-fromAny")
       TApp (TC "List") a -> let
         ltai = Ast $ Ast (Var "list_to_any_instance") :@ rec (Ast $ Placeholder "Store" a)
         lfai = Ast $ Ast (Var "list_from_any_instance") :@ rec (Ast $ Placeholder "Store" a)
         in Ast (Ast (Pack 0 2) :@ ltai) :@ lfai
       e -> error $ "BUG! no Store for " ++ show e
-    findInstance d _ = error $ "BUG! bad class: " ++ show d
+    findInstance d t = error $ "BUG! bad class: " ++ show (d, t)
 
 typeSolve :: [(String, Type)] -> Type -> Type
 typeSolve soln t = foldl' (flip subst) t soln
@@ -620,6 +622,7 @@ propagate cs t = mapM_ propagateTyCon cs where
   propagateTyCon "Store" = case t of
     TApp (TC "List") a -> propagate ["Store"] a
     TC "Databuf" -> pure ()
+    TC "Actor" -> pure ()
     TC "Port" -> pure ()
     TC "Int" -> pure ()
     _ -> lift $ Left $ "no Store instance: " ++ show t
