@@ -527,12 +527,13 @@ methods = M.fromList
   , ("pure", (a :-> TApp m a, [("Monad", "m")]))
   -- Generates call_indirect ops.
   , ("far", (TC "I32" :-> a :-> TApp (TC "IO") (TC "()"), [("Message", "a")]))
-  , ("toAny", (a :-> TC "I32", [("Store", "a")]))
-  , ("fromAny", (TC "I32" :-> a, [("Store", "a")]))
+  , ("set", (TApp (TC "Persist") a :-> a :-> io (TC "()"), [("Store", "a")]))
+  , ("get", (TApp (TC "Persist") a :-> io a, [("Store", "a")]))
   ] where
     a = GV "a"
     b = GV "b"
     m = GV "m"
+    io = TApp (TC "IO")
 
 getBasic :: String -> Maybe WasmType
 getBasic "Databuf" = Just I32
@@ -557,41 +558,44 @@ dictSolve dsoln soln (Ast ast) = case ast of
   Lam ss a -> Ast $ Lam ss $ rec a
   Cas e alts -> Ast $ Cas (rec e) $ (id *** rec) <$> alts
 
-  Placeholder ">>=" t -> Ast $ Ast (Var "snd") :@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
-  Placeholder "pure" t -> Ast $ Ast (Var "fst") :@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
+  Placeholder ">>=" t -> aVar "snd" @@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
+  Placeholder "pure" t -> aVar "fst" @@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
 
   Placeholder "==" t -> rec $ Ast $ Placeholder "Eq" $ typeSolve soln t
 
   -- TODO: Replace this hack with properly implemented typeclass.
   Placeholder "far" t -> Ast $ Far $ basicsFromTuple $ typeSolve soln t
-
-  Placeholder "toAny" t -> Ast $ Ast (Var "fst") :@ rec (Ast $ Placeholder "Store" $ typeSolve soln t)
-  Placeholder "fromAny" t -> Ast $ Ast (Var "snd") :@ rec (Ast $ Placeholder "Store" $ typeSolve soln t)
-
+  --   set x y = #seti32 x (toAny y)
+  Placeholder "set" t -> Ast $ Lam ["x", "y"] $ aVar "#seti32" @@ aVar "x" @@ (aVar "fst" @@ rec (Ast $ Placeholder "Store" $ typeSolve soln t) @@ aVar "y")
+  --   get x = #geti32 x >>= pure . fromAny
+  Placeholder "get" t -> Ast $ Lam ["x"] $ aVar "io_monad" @@ (aVar "#geti32" @@ aVar "x") @@ (aVar "." @@ aVar "io_pure" @@ (aVar "snd" @@ rec (Ast $ Placeholder "Store" $ typeSolve soln t)))
   Placeholder d t -> case typeSolve soln t of
     TV v -> Ast $ Var $ fromMaybe (error $ "unsolvable: " ++ show (d, v)) $ lookup (d, v) dsoln
-    u -> Ast $ findInstance d u
+    u -> findInstance d u
   _       -> Ast ast
   where
+    aVar = Ast . Var
+    infixl 5 @@
+    x @@ y = Ast $ x :@ y
     rec = dictSolve dsoln soln
     findInstance "Eq" t = case t of
-      TC "String"        -> Var "String-=="
-      TC "Int"           -> Var "Int-=="
-      TApp (TC "List") a -> Ast (Var "list_eq_instance") :@ rec (Ast $ Placeholder "Eq" a)
+      TC "String"        -> aVar "String-=="
+      TC "Int"           -> aVar "Int-=="
+      TApp (TC "List") a -> aVar "list_eq_instance" @@ rec (Ast $ Placeholder "Eq" a)
       e -> error $ "BUG! no Eq for " ++ show e
     findInstance "Monad" t = case t of
-      TC "Maybe" -> Ast (Ast (Pack 0 2) :@ Ast (Var "maybe_pure")) :@ Ast (Var "maybe_monad")
-      TC "IO" -> Ast (Ast (Pack 0 2) :@ Ast (Var "io_pure")) :@ Ast (Var "io_monad")
+      TC "Maybe" -> Ast (Pack 0 2) @@ aVar "maybe_pure" @@ aVar "maybe_monad"
+      TC "IO" -> Ast (Pack 0 2) @@ aVar "io_pure" @@ aVar "io_monad"
       e -> error $ "BUG! no Monad for " ++ show e
     findInstance "Store" t = case t of
-      TC "Databuf" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Databuf-toAny")) :@ Ast (Var "Databuf-fromAny")
-      TC "Port" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Port-toAny")) :@ Ast (Var "Port-fromAny")
-      TC "Actor" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Actor-toAny")) :@ Ast (Var "Actor-fromAny")
-      TC "Int" -> Ast (Ast (Pack 0 2) :@ Ast (Var "Int-toAny")) :@ Ast (Var "Int-fromAny")
+      TC "Databuf" -> Ast (Pack 0 2) @@ aVar "Databuf-toAny" @@ aVar "Databuf-fromAny"
+      TC "Port" -> Ast (Pack 0 2) @@ aVar "Port-toAny" @@ aVar "Port-fromAny"
+      TC "Actor" -> Ast (Pack 0 2) @@ aVar "Actor-toAny" @@ aVar "Actor-fromAny"
+      TC "Int" -> Ast (Pack 0 2) @@ aVar "Int-toAny" @@ aVar "Int-fromAny"
       TApp (TC "List") a -> let
-        ltai = Ast $ Ast (Var "list_to_any_instance") :@ rec (Ast $ Placeholder "Store" a)
-        lfai = Ast $ Ast (Var "list_from_any_instance") :@ rec (Ast $ Placeholder "Store" a)
-        in Ast (Ast (Pack 0 2) :@ ltai) :@ lfai
+        ltai = aVar "list_to_any_instance" @@ rec (Ast $ Placeholder "Store" a)
+        lfai = aVar "list_from_any_instance" @@ rec (Ast $ Placeholder "Store" a)
+        in Ast (Pack 0 2) @@ ltai @@ lfai
       e -> error $ "BUG! no Store for " ++ show e
     findInstance d t = error $ "BUG! bad class: " ++ show (d, t)
 
@@ -600,58 +604,62 @@ typeSolve soln t = foldl' (flip subst) t soln
 
 -- | The `propagateClasses` and `propagateClassTyCon` functions of
 -- "Implementing type classes".
-propagate :: [String] -> Type -> StateT (Map String [String]) (Either String) ()
-propagate cs (TV y) = modify' $ M.insertWith union y cs
-propagate cs t = mapM_ propagateTyCon cs where
+propagate :: [String] -> Type -> Either String [(String, [String])]
+propagate [] _ = Right []
+propagate cs (TV y) = Right [(y, cs)]
+propagate cs t = concat <$> mapM propagateTyCon cs where
   propagateTyCon "Eq" = case t of
-    TC "Int" -> pure ()
-    TC "String" -> pure ()
+    TC "Int" -> Right []
+    TC "String" -> Right []
     TApp (TC "List") a -> propagate ["Eq"] a
-    _ -> lift $ Left $ "no Eq instance: " ++ show t
+    _ -> Left $ "no Eq instance: " ++ show t
   propagateTyCon "Monad" = case t of
-    TC "Maybe" -> pure ()
-    TC "IO" -> pure ()
-    _ -> lift $ Left $ "no Monad instance: " ++ show t
+    TC "Maybe" -> Right []
+    TC "IO" -> Right []
+    _ -> Left $ "no Monad instance: " ++ show t
   propagateTyCon "Message" = case t of
-    TC "()" -> pure ()
+    TC "()" -> Right []
     TC s -> case getBasic s of
-      Nothing -> lift $ Left $ "no Message instance: " ++ s
-      Just _ -> pure ()
+      Nothing -> Left $ "no Message instance: " ++ s
+      Just _ -> Right []
     TApp (TC "()") rest -> allBasic rest
-    _ -> lift $ Left $ "no Message instance: " ++ show t
+    _ -> Left $ "no Message instance: " ++ show t
   propagateTyCon "Store" = case t of
     TApp (TC "List") a -> propagate ["Store"] a
-    TC "Databuf" -> pure ()
-    TC "Actor" -> pure ()
-    TC "Port" -> pure ()
-    TC "Int" -> pure ()
-    _ -> lift $ Left $ "no Store instance: " ++ show t
+    TC "Databuf" -> Right []
+    TC "Actor" -> Right []
+    TC "Port" -> Right []
+    TC "Int" -> Right []
+    _ -> Left $ "no Store instance: " ++ show t
   propagateTyCon c = error $ "TODO: " ++ c
   allBasic (TC s) = case getBasic s of
-    Nothing -> lift $ Left $ "no Message instance: " ++ s
-    Just _ -> pure ()
+    Nothing -> Left $ "no Message instance: " ++ s
+    Just _ -> Right []
   allBasic (TC s `TApp` rest) = case getBasic s of
-    Nothing -> lift $ Left $ "no Message instance: " ++ s
+    Nothing -> Left $ "no Message instance: " ++ s
     Just _ -> allBasic rest
-  allBasic bad = lift $ Left $ "no Message instance: " ++ show bad
+  allBasic bad = Left $ "no Message instance: " ++ show bad
 
 -- TODO: Apply substitutions for friendlier messages.
-unify :: [(Type, Type)] -> StateT (Map String [String]) (Either String) [(String, Type)]
-unify [] = pure []
-unify ((GV _, _):_) = lift $ Left "BUG! generalized variable in constraint"
-unify ((_, GV _):_) = lift $ Left "BUG! generalized variable in constraint"
-unify ((s, t):cs) | s == t = unify cs
-unify ((TV x, t):cs)
-  | x `elem` freeTV t = lift $ Left $ "infinite: " ++ x ++ " = " ++ show t
-  | otherwise         = do
-    -- | The `instantiateTyvar` function of "Implementing type classes".
-    m <- get
-    propagate (fromMaybe [] $ M.lookup x m) t
-    fmap ((x, t):) $ unify $ join (***) (subst (x, t)) <$> cs
-unify ((s, t@(TV _)):cs) = unify ((t, s):cs)
-unify ((TApp s1 s2, TApp t1 t2):cs) = unify ((s1, t1):(s2, t2):cs)
-unify (( s1 :-> s2, t1 :-> t2):cs)  = unify ((s1, t1):(s2, t2):cs)
-unify ((s, t):_) = lift $ Left $ "mismatch: " ++ show s ++ " /= " ++ show t
+unify :: [(Type, Type)] -> Map String [String] -> Either String ([(String, Type)], Map String [String])
+unify constraints = runStateT $ uni constraints where
+  uni :: [(Type, Type)] -> StateT (Map String [String]) (Either String) [(String, Type)]
+  uni [] = pure []
+  uni ((GV _, _):_) = lift $ Left "BUG! generalized variable in constraint"
+  uni ((_, GV _):_) = lift $ Left "BUG! generalized variable in constraint"
+  uni ((s, t):cs) | s == t = uni cs
+  uni ((TV x, t):cs)
+    | x `elem` freeTV t = lift $ Left $ "infinite: " ++ x ++ " = " ++ show t
+    | otherwise         = do
+      -- | The `instantiateTyvar` function of "Implementing type classes".
+      m <- get
+      either (lift . Left) (modify' . M.unionWith union . M.fromList) $
+        propagate (fromMaybe [] $ M.lookup x m) t
+      fmap ((x, t):) $ uni $ join (***) (subst (x, t)) <$> cs
+  uni ((s, t@(TV _)):cs) = uni ((t, s):cs)
+  uni ((TApp s1 s2, TApp t1 t2):cs) = uni ((s1, t1):(s2, t2):cs)
+  uni (( s1 :-> s2, t1 :-> t2):cs)  = uni ((s1, t1):(s2, t2):cs)
+  uni ((s, t):_) = lift $ Left $ "mismatch: " ++ show s ++ " /= " ++ show t
 
 -- TODO: This has devolved into a table of data constructors. Refactor.
 preludeMinimal :: Globals
@@ -751,19 +759,19 @@ inferType findExport globs ds = foldM inferMutual ([], []) $ map (map (\k -> (k,
   sortedDefs = reverse $ scc (callees ds) $ fst <$> ds
   inferMutual :: ([(String, (QualType, Ast))], [(String, Type)]) -> [(String, Ast)] -> Either String ([(String, (QualType, Ast))], [(String, Type)])
   inferMutual (acc, accStorage) grp = do
-    (bs, ConState _ cs m) <- buildConstraints $ do
+    (typedAsts, ConState _ cs m) <- buildConstraints $ do
       ts <- mapM (gather findExport globs env) $ snd <$> grp
       when ("main" `elem` (fst <$> grp)) $ do
         r <- newTV
         addConstraint (TV "*main", TApp (TC "IO") r)
       mapM_ addConstraint $ zip tvs $ annOf <$> ts
       pure ts
-    (soln, ctx) <- runStateT (unify cs) m
+    (soln, ctx) <- unify cs m
     let storageCons = second (typeSolve soln) <$> filter (('@' ==) . head . fst) soln
     -- TODO: Look for conflicting storage constraints.
     -- TODO: The `generalize` stage removes type annotations. May be
     -- beneficial to keep them around longer.
-    pure ((++ acc) $ zip (fst <$> grp) $ generalize soln ctx <$> bs, accStorage ++ storageCons)
+    pure ((++ acc) $ zip (fst <$> grp) $ generalize soln ctx <$> typedAsts, accStorage ++ storageCons)
     where
       annOf (AAst a _) = a
       buildConstraints (Constraints f) = f $ ConState 0 [] M.empty

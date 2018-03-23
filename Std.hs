@@ -15,8 +15,10 @@ stdBoost = Boost
   (unlines
   [ "fst p = case p of (x, y) -> x"
   , "snd p = case p of (x, y) -> y"
-
-  -- TODO: Add `class` and `instance` keywords to clean the following up:
+  , "f . g = \\x -> f (g x)"
+  , "flip f = \\x y -> f y x"
+  , "fromJust m = case m of {Just x -> x}"
+  -- TODO: Add `class` and `instance` keywords to clean up the following:
   , "maybe_pure x = Just x"
   , "maybe_monad x f = case x of { Nothing -> Nothing; Just a -> f a }"
   , "io_pure x rw = (x, rw)"
