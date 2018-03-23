@@ -569,7 +569,7 @@ dictSolve dsoln soln (Ast ast) = case ast of
   Placeholder "fromAny" t -> Ast $ Ast (Var "snd") :@ rec (Ast $ Placeholder "Store" $ typeSolve soln t)
 
   Placeholder d t -> case typeSolve soln t of
-    TV v -> Ast $ Var $ fromJust $ lookup (d, v) dsoln
+    TV v -> Ast $ Var $ fromMaybe (error $ "unsolvable: " ++ show (d, v)) $ lookup (d, v) dsoln
     u -> Ast $ findInstance d u
   _       -> Ast ast
   where
