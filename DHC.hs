@@ -486,11 +486,16 @@ instantiate (ty, qs) = do
     pure $ (m2, t' `TApp` u')
   f m t = pure (m, t)
 
-generalize :: [(String, Type)] -> Map String [String] -> AAst Type -> (QualType, Ast)
+generalize
+  :: Map String Type      -- Solution found through type unification.
+  -> Map String [String]  -- Context for qualified types.
+  -> AAst Type
+  -> (QualType, Ast)
 generalize soln ctx a0@(AAst t0 _) = ((t, qs), dictSolve dsoln soln ast) where
   (t, qs) = runState (generalize' ctx $ typeSolve soln t0) []
   -- TODO: Here, and elsewhere: need to sort qs?
   dsoln = zip qs $ ("#d" ++) . show <$> [(0::Int)..]
+  -- TODO: May be useful to preserve type annotations?
   ast = case deAnn a0 of
     Ast (Lam ss body) -> Ast $ Lam (dvars ++ ss) body
     body -> Ast $ Lam dvars body
@@ -506,19 +511,6 @@ generalize' ctx ty = case ty of
   u :-> v  -> (:->) <$> generalize' ctx u <*> generalize' ctx v
   TApp u v -> TApp  <$> generalize' ctx u <*> generalize' ctx v
   _        -> pure ty
-
-freeTV :: Type -> [String]
-freeTV (TApp a b) = freeTV a ++ freeTV b
-freeTV (a :-> b)  = freeTV a ++ freeTV b
-freeTV (TV tv)    = [tv]
-freeTV _          = []
-
-subst :: (String, Type) -> Type -> Type
-subst (x, t) ty = case ty of
-  TApp a b      -> subst (x, t) a `TApp` subst (x, t) b
-  a :-> b       -> subst (x, t) a :-> subst (x, t) b
-  TV y | x == y -> t
-  _             -> ty
 
 methods :: Map String (Type, [(String, String)])
 methods = M.fromList
@@ -552,7 +544,7 @@ basicsFromTuple (TApp (TC "()") t) = f t where
   f _ = error "expected tuple"
 basicsFromTuple _ = error "expected tuple"
 
-dictSolve :: [((String, String), String)] -> [(String, Type)] -> Ast -> Ast
+dictSolve :: [((String, String), String)] -> Map String Type -> Ast -> Ast
 dictSolve dsoln soln (Ast ast) = case ast of
   u :@ v  -> Ast $ rec u :@ rec v
   Lam ss a -> Ast $ Lam ss $ rec a
@@ -599,8 +591,13 @@ dictSolve dsoln soln (Ast ast) = case ast of
       e -> error $ "BUG! no Store for " ++ show e
     findInstance d t = error $ "BUG! bad class: " ++ show (d, t)
 
-typeSolve :: [(String, Type)] -> Type -> Type
-typeSolve soln t = foldl' (flip subst) t soln
+typeSolve :: Map String Type -> Type -> Type
+typeSolve soln t = case t of
+  TApp a b      -> rec a `TApp` rec b
+  a :-> b       -> rec a :-> rec b
+  TV x          -> fromMaybe t $ M.lookup x soln
+  _             -> t
+  where rec = typeSolve soln
 
 -- | The `propagateClasses` and `propagateClassTyCon` functions of
 -- "Implementing type classes".
@@ -640,26 +637,76 @@ propagate cs t = concat <$> mapM propagateTyCon cs where
     Just _ -> allBasic rest
   allBasic bad = Left $ "no Message instance: " ++ show bad
 
--- TODO: Apply substitutions for friendlier messages.
-unify :: [(Type, Type)] -> Map String [String] -> Either String ([(String, Type)], Map String [String])
-unify constraints = runStateT $ uni constraints where
-  uni :: [(Type, Type)] -> StateT (Map String [String]) (Either String) [(String, Type)]
-  uni [] = pure []
-  uni ((GV _, _):_) = lift $ Left "BUG! generalized variable in constraint"
-  uni ((_, GV _):_) = lift $ Left "BUG! generalized variable in constraint"
-  uni ((s, t):cs) | s == t = uni cs
-  uni ((TV x, t):cs)
-    | x `elem` freeTV t = lift $ Left $ "infinite: " ++ x ++ " = " ++ show t
-    | otherwise         = do
-      -- | The `instantiateTyvar` function of "Implementing type classes".
-      m <- get
-      either (lift . Left) (modify' . M.unionWith union . M.fromList) $
-        propagate (fromMaybe [] $ M.lookup x m) t
-      fmap ((x, t):) $ uni $ join (***) (subst (x, t)) <$> cs
-  uni ((s, t@(TV _)):cs) = uni ((t, s):cs)
-  uni ((TApp s1 s2, TApp t1 t2):cs) = uni ((s1, t1):(s2, t2):cs)
-  uni (( s1 :-> s2, t1 :-> t2):cs)  = uni ((s1, t1):(s2, t2):cs)
-  uni ((s, t):_) = lift $ Left $ "mismatch: " ++ show s ++ " /= " ++ show t
+unify :: [(Type, Type)] -> Map String [String] -> Either String (Map String Type, Map String [String])
+unify constraints ctx = execStateT (uni constraints) (M.empty, ctx)
+  where
+  uni :: [(Type, Type)] -> StateT (Map String Type, Map String [String]) (Either String) ()
+  uni [] = do
+    (tm, qm) <- get
+    as <- forM (M.keys tm) follow
+    put (M.fromList $ zip (M.keys tm) as, qm)
+  uni ((GV _, _):_) = nope "BUG! generalized variable in constraint"
+  uni ((_, GV _):_) = nope "BUG! generalized variable in constraint"
+  uni ((lhs, rhs):cs) = do
+    z <- (,) <$> deepFollow lhs <*> deepFollow rhs
+    case z of
+      (s, t) | s == t -> uni cs
+      (TV x, TV y) -> do
+        when (x /= y) $ do
+          (tm, qm) <- get
+          -- (Ideally should union by rank.)
+          put (M.insert x (TV y) tm, case M.lookup x qm of
+            Just q -> M.insert y q $ M.delete x qm
+            _ -> qm)
+        uni cs
+      (TV x, t) -> do
+        -- TODO: Test infinite type detection.
+        fs <- freeTV t
+        if x `elem` fs then nope $ "infinite: " ++ x ++ " = " ++ show t
+        else do
+          -- The `instantiateTyvar` function of "Implementing type classes".
+          (_, qm) <- get
+          -- For example, Eq [a] propagates to Eq a, which we record.
+          either nope addQuals $ propagate (fromMaybe [] $ M.lookup x qm) t
+          modify' $ first $ M.insert x t
+          uni cs
+      (s, t@(TV _)) -> uni $ (t, s):cs
+      (TApp s1 s2, TApp t1 t2) -> uni $ (s1, t1):(s2, t2):cs
+      (s1 :-> s2, t1 :-> t2) -> uni ((s1, t1):(s2, t2):cs)
+      (s, t) -> nope $ "mismatch: " ++ show s ++ " /= " ++ show t
+  addQuals = modify' . second . M.unionWith union . M.fromList
+  nope = lift . Left
+  -- Galler-Fischer-esque Data.Map (path compression).
+  follow :: String -> StateT (Map String Type, a) (Either String) Type
+  follow x = do
+    (tm, qm) <- get
+    case M.lookup x tm of
+      Just (TV y) -> do
+        z <- follow y
+        when (z /= TV y) $ put (M.insert x z tm, qm)
+        pure z
+      Just t -> pure t
+      Nothing -> pure $ TV x
+  deepFollow :: Type -> StateT (Map String Type, a) (Either String) Type
+  deepFollow t = case t of
+    TApp a b -> TApp <$> deepFollow a <*> deepFollow b
+    a :-> b  -> (:->) <$> deepFollow a <*> deepFollow b
+    TV tv    -> do
+      u <- follow tv
+      case u of
+        TV x -> pure $ TV x
+        _    -> deepFollow u
+    _        -> pure t
+  freeTV :: Type -> StateT (Map String Type, a) (Either String) [String]
+  freeTV t = case t of
+    TApp a b -> (++) <$> freeTV a <*> freeTV b
+    a :-> b  -> (++) <$> freeTV a <*> freeTV b
+    TV tv    -> do
+      u <- follow tv
+      case u of
+        TV x -> pure [x]
+        _    -> freeTV u
+    _        -> pure []
 
 -- TODO: This has devolved into a table of data constructors. Refactor.
 preludeMinimal :: Globals
@@ -738,7 +785,7 @@ hsToAst boost ext prog = do
     storageTypeConstraintHack s = (s, (Nothing, TC "Map" `TApp` TV ('@':s)))
     persistTypeConstraint s = (s, (Nothing, TC "Persist" `TApp` TV ('@':s)))
 
-constrainStorage :: [(String, Type)] -> [(String, (QualType, Ast))] -> [(String, (QualType, Ast))]
+constrainStorage :: Map String Type -> [(String, (QualType, Ast))] -> [(String, (QualType, Ast))]
 constrainStorage cons ds = second (first (first rewriteType)) <$> ds where
   rewriteType (GV ('@':x)) = case typeSolve cons $ TV ('@':x) of
     TC t -> TC t
@@ -753,11 +800,11 @@ inferType
   -> Globals
   -> [(String, Ast)]
   -- | Returns types of definitions and storage maps.
-  -> Either String ([(String, (QualType, Ast))], [(String, Type)])
-inferType findExport globs ds = foldM inferMutual ([], []) $ map (map (\k -> (k, fromJust $ lookup k ds))) sortedDefs where
+  -> Either String ([(String, (QualType, Ast))], Map String Type)
+inferType findExport globs ds = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJust $ lookup k ds))) sortedDefs where
   -- Groups of definitions, sorted in the order we should infer their types.
   sortedDefs = reverse $ scc (callees ds) $ fst <$> ds
-  inferMutual :: ([(String, (QualType, Ast))], [(String, Type)]) -> [(String, Ast)] -> Either String ([(String, (QualType, Ast))], [(String, Type)])
+  inferMutual :: ([(String, (QualType, Ast))], Map String Type) -> [(String, Ast)] -> Either String ([(String, (QualType, Ast))], Map String Type)
   inferMutual (acc, accStorage) grp = do
     (typedAsts, ConState _ cs m) <- buildConstraints $ do
       ts <- mapM (gather findExport globs env) $ snd <$> grp
@@ -767,11 +814,9 @@ inferType findExport globs ds = foldM inferMutual ([], []) $ map (map (\k -> (k,
       mapM_ addConstraint $ zip tvs $ annOf <$> ts
       pure ts
     (soln, ctx) <- unify cs m
-    let storageCons = second (typeSolve soln) <$> filter (('@' ==) . head . fst) soln
+    let storageCons = M.filterWithKey (\k _ -> head k == '@') soln
     -- TODO: Look for conflicting storage constraints.
-    -- TODO: The `generalize` stage removes type annotations. May be
-    -- beneficial to keep them around longer.
-    pure ((++ acc) $ zip (fst <$> grp) $ generalize soln ctx <$> typedAsts, accStorage ++ storageCons)
+    pure ((++ acc) $ zip (fst <$> grp) $ generalize soln ctx <$> typedAsts, accStorage `M.union` storageCons)
     where
       annOf (AAst a _) = a
       buildConstraints (Constraints f) = f $ ConState 0 [] M.empty
@@ -879,7 +924,6 @@ expandCase = ffix $ \h (Ast ast) -> Ast $ case ast of
   _ -> h ast
   where
     rec = expandCase
-
     dupCase e [a] = Cas e $ evalState (expandAlt Nothing [] a) 0
     dupCase e (a:as) = Cas e $ evalState (expandAlt (Just $ rec $ Ast $ Cas e as) [] a) 0
     dupCase _ _ = error "BUG! no case alternatives"
