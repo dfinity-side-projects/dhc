@@ -518,7 +518,7 @@ methods = M.fromList
   , (">>=", (TApp m a :-> (a :-> TApp m b)  :-> TApp m b, [("Monad", "m")]))
   , ("pure", (a :-> TApp m a, [("Monad", "m")]))
   -- Generates call_indirect ops.
-  , ("far", (TC "I32" :-> a :-> TApp (TC "IO") (TC "()"), [("Message", "a")]))
+  , ("callSlot", (TC "I32" :-> a :-> TApp (TC "IO") (TC "()"), [("Message", "a")]))
   , ("set", (TApp (TC "Persist") a :-> a :-> io (TC "()"), [("Store", "a")]))
   , ("get", (TApp (TC "Persist") a :-> io a, [("Store", "a")]))
   ] where
@@ -541,22 +541,18 @@ basicsFromTuple (TC s) = [fromMaybe (error $ "bad basic: " ++ s) $ getBasic s]
 basicsFromTuple (TApp (TC "()") t) = f t where
   f (TC s `TApp` rest) = fromJust (getBasic s):f rest
   f (TC s) = [fromJust $ getBasic s]
-  f _ = error "expected tuple"
-basicsFromTuple _ = error "expected tuple"
+  f _ = error $ "expected Message: " ++ show t
+basicsFromTuple t = error $ "expected Message: " ++ show t
 
 dictSolve :: [((String, String), String)] -> Map String Type -> Ast -> Ast
 dictSolve dsoln soln (Ast ast) = case ast of
   u :@ v  -> Ast $ rec u :@ rec v
   Lam ss a -> Ast $ Lam ss $ rec a
   Cas e alts -> Ast $ Cas (rec e) $ (id *** rec) <$> alts
-
   Placeholder ">>=" t -> aVar "snd" @@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
   Placeholder "pure" t -> aVar "fst" @@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
-
   Placeholder "==" t -> rec $ Ast $ Placeholder "Eq" $ typeSolve soln t
-
-  -- TODO: Replace this hack with properly implemented typeclass.
-  Placeholder "far" t -> Ast $ Far $ basicsFromTuple $ typeSolve soln t
+  Placeholder "callSlot" t -> rec $ Ast $ Placeholder "Message" $ typeSolve soln t
   --   set x y = #seti32 x (toAny y)
   Placeholder "set" t -> Ast $ Lam ["x", "y"] $ aVar "#seti32" @@ aVar "x" @@ (aVar "fst" @@ rec (Ast $ Placeholder "Store" $ typeSolve soln t) @@ aVar "y")
   --   get x = #geti32 x >>= pure . fromAny
@@ -570,6 +566,7 @@ dictSolve dsoln soln (Ast ast) = case ast of
     infixl 5 @@
     x @@ y = Ast $ x :@ y
     rec = dictSolve dsoln soln
+    findInstance "Message" t = Ast $ CallSlot $ basicsFromTuple t
     findInstance "Eq" t = case t of
       TC "String"        -> aVar "String-=="
       TC "Int"           -> aVar "Int-=="
@@ -614,13 +611,6 @@ propagate cs t = concat <$> mapM propagateTyCon cs where
     TC "Maybe" -> Right []
     TC "IO" -> Right []
     _ -> Left $ "no Monad instance: " ++ show t
-  propagateTyCon "Message" = case t of
-    TC "()" -> Right []
-    TC s -> case getBasic s of
-      Nothing -> Left $ "no Message instance: " ++ s
-      Just _ -> Right []
-    TApp (TC "()") rest -> allBasic rest
-    _ -> Left $ "no Message instance: " ++ show t
   propagateTyCon "Store" = case t of
     TApp (TC "List") a -> propagate ["Store"] a
     TC "Databuf" -> Right []
@@ -628,14 +618,28 @@ propagate cs t = concat <$> mapM propagateTyCon cs where
     TC "Port" -> Right []
     TC "Int" -> Right []
     _ -> Left $ "no Store instance: " ++ show t
+  propagateTyCon "Message" =
+    concat <$> (mapM (propagate ["MessageItem"]) =<< listFromTupleType t)
+  propagateTyCon "MessageItem" = case t of
+    TC s -> case getBasic s of
+      Nothing -> Left $ "no Message instance: " ++ s
+      Just _ -> Right []
+    _ -> Left $ "no Message instance: " ++ show t
   propagateTyCon c = error $ "TODO: " ++ c
-  allBasic (TC s) = case getBasic s of
-    Nothing -> Left $ "no Message instance: " ++ s
-    Just _ -> Right []
-  allBasic (TC s `TApp` rest) = case getBasic s of
-    Nothing -> Left $ "no Message instance: " ++ s
-    Just _ -> allBasic rest
-  allBasic bad = Left $ "no Message instance: " ++ show bad
+  listFromTupleType ty = case ty of
+    TC "()" -> Right []
+    TC _ -> Right [ty]
+    TV _ -> Right [ty]
+    TApp (TC "()") rest -> weirdList rest
+    _ -> Left $ "want tuple: " ++ show ty
+    where
+    -- Tuples are represented oddly in our Type data structure.
+    weirdList tup = case tup of
+      TC _ -> Right [tup]
+      TV _ -> Right [tup]
+      TApp h@(TC _) rest -> (h:) <$> weirdList rest
+      TApp h@(TV _) rest -> (h:) <$> weirdList rest
+      _ -> Left $ "want tuple: " ++ show tup
 
 unify :: [(Type, Type)] -> Map String [String] -> Either String (Map String Type, Map String [String])
 unify constraints ctx = execStateT (uni constraints) (M.empty, ctx)
@@ -643,12 +647,12 @@ unify constraints ctx = execStateT (uni constraints) (M.empty, ctx)
   uni :: [(Type, Type)] -> StateT (Map String Type, Map String [String]) (Either String) ()
   uni [] = do
     (tm, qm) <- get
-    as <- forM (M.keys tm) follow
+    as <- forM (M.keys tm) $ follow . TV
     put (M.fromList $ zip (M.keys tm) as, qm)
   uni ((GV _, _):_) = nope "BUG! generalized variable in constraint"
   uni ((_, GV _):_) = nope "BUG! generalized variable in constraint"
   uni ((lhs, rhs):cs) = do
-    z <- (,) <$> deepFollow lhs <*> deepFollow rhs
+    z <- (,) <$> follow lhs <*> follow rhs
     case z of
       (s, t) | s == t -> uni cs
       (TV x, TV y) -> do
@@ -661,8 +665,7 @@ unify constraints ctx = execStateT (uni constraints) (M.empty, ctx)
         uni cs
       (TV x, t) -> do
         -- TODO: Test infinite type detection.
-        fs <- freeTV t
-        if x `elem` fs then nope $ "infinite: " ++ x ++ " = " ++ show t
+        if x `elem` freeTV t then nope $ "infinite: " ++ x ++ " = " ++ show t
         else do
           -- The `instantiateTyvar` function of "Implementing type classes".
           (_, qm) <- get
@@ -677,36 +680,25 @@ unify constraints ctx = execStateT (uni constraints) (M.empty, ctx)
   addQuals = modify' . second . M.unionWith union . M.fromList
   nope = lift . Left
   -- Galler-Fischer-esque Data.Map (path compression).
-  follow :: String -> StateT (Map String Type, a) (Either String) Type
-  follow x = do
-    (tm, qm) <- get
-    case M.lookup x tm of
-      Just (TV y) -> do
-        z <- follow y
-        when (z /= TV y) $ put (M.insert x z tm, qm)
-        pure z
-      Just t -> pure t
-      Nothing -> pure $ TV x
-  deepFollow :: Type -> StateT (Map String Type, a) (Either String) Type
-  deepFollow t = case t of
-    TApp a b -> TApp <$> deepFollow a <*> deepFollow b
-    a :-> b  -> (:->) <$> deepFollow a <*> deepFollow b
-    TV tv    -> do
-      u <- follow tv
-      case u of
-        TV x -> pure $ TV x
-        _    -> deepFollow u
+  follow :: Type -> StateT (Map String Type, a) (Either String) Type
+  follow t = case t of
+    TApp a b -> TApp <$> follow a <*> follow b
+    a :-> b  -> (:->) <$> follow a <*> follow b
+    TV x     -> do
+      (tm, qm) <- get
+      case M.lookup x tm of
+        Just u -> do
+          z <- follow u
+          put (M.insert x z tm, qm)
+          pure z
+        Nothing -> pure $ TV x
     _        -> pure t
-  freeTV :: Type -> StateT (Map String Type, a) (Either String) [String]
+  freeTV :: Type -> [String]
   freeTV t = case t of
-    TApp a b -> (++) <$> freeTV a <*> freeTV b
-    a :-> b  -> (++) <$> freeTV a <*> freeTV b
-    TV tv    -> do
-      u <- follow tv
-      case u of
-        TV x -> pure [x]
-        _    -> freeTV u
-    _        -> pure []
+    TApp a b -> freeTV a ++ freeTV b
+    a :-> b  -> freeTV a ++ freeTV b
+    TV tv    -> [tv]
+    _        -> []
 
 -- TODO: This has devolved into a table of data constructors. Refactor.
 preludeMinimal :: Globals
@@ -880,7 +872,7 @@ freeV scs = map f scs where
   g _    (Qual x y) = AAst [] $ Qual x y
   g _    (CCall x y) = AAst [] $ CCall x y
   g _    (Placeholder x y) = AAst [] $ Placeholder x y
-  g _    (Far t) = AAst [] $ Far t
+  g _    (CallSlot t) = AAst [] $ CallSlot t
 
 caseVars :: AstF Ast -> [String]
 caseVars (Var v) = [v]

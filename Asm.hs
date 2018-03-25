@@ -217,7 +217,7 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
     (snd <$> wrapme) ++  -- wdecl functions.
     (flip (,) [] <$> ciTypes) ++  -- call_indirect types.
     (fst . snd <$> internalFuns)  -- Types of internal functions.
-  exportFun name internalName = encStr name ++ [0, wasmFunNo internalName]
+  exportFun name internalName = encStr name ++ (0 : leb128 (wasmFunNo internalName))
   -- TODO: Remove "#nfsyscall".
   localCount "#nfsyscall" = 2
   localCount _ = 0
@@ -915,7 +915,7 @@ mk1 storage pglobals (Ast ast) = case ast of
     pure $ case last mt of
       Copro _ _ -> mu ++ mt
       _ -> concat [mu, mt, [MkAp]]
-  Far ty -> do
+  CallSlot ty -> do
     st <- get
     put $ st { callIndirectTypes = callIndirectTypes st `union` [ty] }
     pure [PushCallIndirect ty]

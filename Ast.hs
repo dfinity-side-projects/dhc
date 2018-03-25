@@ -27,7 +27,8 @@ instance Binary Type
 
 infixl 5 :@
 data AstF a = Qual String String | CCall String String
-  | Pack Int Int | I Int64 | S ShortByteString | Var String | Far [WasmType]
+  | CallSlot [WasmType]
+  | Pack Int Int | I Int64 | S ShortByteString | Var String
   | a :@ a | Cas a [(a, a)]
   | Lam [String] a | Let [(String, a)] a
   | Placeholder String Type deriving (Read, Show, Functor, Generic)
