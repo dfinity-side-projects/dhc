@@ -139,7 +139,7 @@ mkStrConsts ss = f (0, []) ss where
 
 astToIns :: AstPlus -> (GlobalTable, [(String, [Ins])])
 astToIns (AstPlus es ws storage ps ds ts) = ((es, funs, wasmDecl <$> ws, ciTypes, strConsts, length ps), ins) where
-  compilerOut = second (compile storage ps) <$> ds
+  compilerOut = second (compile storage ps) <$> supers ds
   ciTypes = foldl' union [] $ callIndirectTypes . snd . snd <$> compilerOut
   ins = second fst <$> compilerOut
   strConsts = mkStrConsts $ union (sbs <$> storage) $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
@@ -155,7 +155,7 @@ astToIns (AstPlus es ws storage ps ds ts) = ((es, funs, wasmDecl <$> ws, ciTypes
   translateType (TC "Databuf") = Ref "Databuf"
   translateType (TC "Actor") = Ref "Actor"
   translateType t = error $ "no corresponding wasm type: " ++ show t
-  funs = M.fromList $ ((\(name, Ast (Lam as _)) -> (name, length as)) <$> ds)
+  funs = M.fromList $ ((\(name, Ast (Lam as _)) -> (name, length as)) <$> supers ds)
 
 enc32 :: Int -> [Int]
 enc32 n = (`mod` 256) . (div n) . (256^) <$> [(0 :: Int)..3]

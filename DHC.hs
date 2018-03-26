@@ -3,7 +3,9 @@
 module DHC
   ( parseContract, ExternType, AstF(..), Ast(..), AstPlus(..), Type(..)
   , inferType, parseDefs, lexOffside
-  , arityFromType, hsToAst, liftLambdas) where
+  , arityFromType, hsToAst, liftLambdas
+  , HsProgram(..)
+  ) where
 import Control.Arrow
 import Control.Monad
 #ifdef __HASTE__
@@ -39,12 +41,12 @@ type ExternType = String -> String -> Maybe Int
 data LayoutState = IndentAgain Int | LineStart | LineMiddle | AwaitBrace | Boilerplate deriving (Eq, Show)
 type Parser = Parsec String (LayoutState, [Int])
 
-program :: Parser [(String, Ast)]
+program :: Parser HsProgram
 program = do
   filler
-  defs <- supercombinators
+  r <- toplevels
   eof
-  pure defs
+  pure r
 
 data Associativity = LAssoc | RAssoc | NAssoc deriving (Eq, Show)
 
@@ -73,12 +75,30 @@ standardFixities = M.fromList $ concatMap (f . words)
 fixity :: String -> (Associativity, Int)
 fixity o = fromMaybe (LAssoc, 9) $ M.lookup o standardFixities
 
-supercombinators :: Parser [(String, Ast)]
-supercombinators = catMaybes <$> between (want "{") (want "}") (sc `sepBy` want ";") where
+data HsProgram = HsProgram
+  { supers :: [(String, Ast)]
+  , datas :: [(String, [String])]
+  } deriving Show
+
+addSuper :: (String, Ast) -> HsProgram -> HsProgram
+addSuper sc p = p { supers = sc:supers p }
+
+addData :: (String, [String]) -> HsProgram -> HsProgram
+addData sc p = p { datas = sc:datas p }
+
+toplevels :: Parser HsProgram
+toplevels = foldl' (flip ($)) (HsProgram [] []) <$> between (want "{") (want "}") (topLevel `sepBy` want ";") where
+  topLevel = dataDecl <|> sc
+  dataDecl = do
+    void $ want "data"
+    s <- varStr
+    void $ want "="
+    dataCons <- varStr `sepBy` want "|"
+    pure $ addData (s, dataCons)
   sc = try (do
     (fun:args) <- scOp <|> many1 varStr
     void $ want "="
-    Just . (,) fun . Ast . Lam args <$> expr) <|> pure Nothing
+    addSuper . (,) fun . Ast . Lam args <$> expr) <|> pure id
   scOp = try $ do
     l <- varStr
     op <- varSym
@@ -315,7 +335,7 @@ data AstPlus = AstPlus
   , wdecls :: [String]
   , storages :: [String]
   , stores :: [String]
-  , asts :: [(String, Ast)]
+  , defs :: HsProgram
   , funTypes :: [(String, QualType)]
   } deriving Show
 
@@ -330,10 +350,10 @@ contract = do
   ps <- option [] $ try $ want "store" >>
     (between (want "(") (want ")") $ varStr `sepBy` want ",")
   putState (AwaitBrace, [])
-  ds <- supercombinators
-  when (isNothing $ mapM (`lookup` ds) es) $ fail "bad exports"
-  when (isNothing $ mapM (`lookup` ds) ws) $ fail "bad wdecls"
-  pure $ AstPlus es ws ms ps ds []
+  p <- toplevels
+  when (isNothing $ mapM (`lookup` supers p) es) $ fail "bad exports"
+  when (isNothing $ mapM (`lookup` supers p) ws) $ fail "bad wdecls"
+  pure $ AstPlus es ws ms ps p []
 
 lexOffside :: String -> Either ParseError [String]
 lexOffside = fmap (fmap snd) <$> runParser tokUntilEOF (AwaitBrace, []) "" where
@@ -343,16 +363,16 @@ lexOffside = fmap (fmap snd) <$> runParser tokUntilEOF (AwaitBrace, []) "" where
       LexEOF -> pure []
       _ -> (t:) <$> tokUntilEOF
 
-parseDefs :: String -> Either ParseError [(String, Ast)]
+parseDefs :: String -> Either ParseError HsProgram
 parseDefs = runParser program (AwaitBrace, []) ""
 
 parseContract :: String -> Either ParseError AstPlus
 parseContract = fmap maybeAddMain . runParser contract (Boilerplate, []) ""
 
 maybeAddMain :: AstPlus -> AstPlus
-maybeAddMain a = case lookup "main" $ asts a of
-  Nothing -> a { asts = ("main",
-    Ast $ Ast (Var "pure") :@ Ast (Pack 0 0)):asts a }
+maybeAddMain a = case lookup "main" $ supers $ defs a of
+  Nothing -> a { defs = addSuper ("main",
+    Ast $ Ast (Var "pure") :@ Ast (Pack 0 0)) $ defs a }
   Just _  -> a
 
 -- The Constraints monad combines a State monad and an Either monad.
@@ -717,6 +737,10 @@ preludeMinimal = M.fromList
     a = GV "a"
     b = GV "b"
 
+mkDataTypes :: [(String, [String])] -> Globals
+mkDataTypes ds = M.fromList $ concatMap (\(s, dataCons) ->
+  [(dc, (Just (i, 0), TC s)) | (i, dc) <- zip [0..] dataCons]) ds
+
 arityFromType :: Type -> Int
 arityFromType = f 0 where
   f acc (_ :-> r) = f (acc + 1) r
@@ -757,7 +781,7 @@ boostTypes b = M.fromList $ second (((,) Nothing) . fst) <$> boostHs b
 hsToAst :: Boost -> ExternType -> String -> Either String AstPlus
 hsToAst boost ext prog = do
   a@(AstPlus es _ storage _ ds _) <- showErr $ parseContract prog
-  (preStorageInferred, storageCons) <- inferType (getContractExport ext es) (genTypes storage $ stores a) (ds ++ preludeDefs)
+  (preStorageInferred, storageCons) <- inferType (getContractExport ext es) (genTypes (datas ds) storage $ stores a) (supers ds ++ supers preludeDefs)
   let
     inferred = constrainStorage storageCons preStorageInferred
     arities = second (countArgs . fst . fst) <$> inferred
@@ -766,15 +790,16 @@ hsToAst boost ext prog = do
     transform = expandSyscalls ext arities . expandCase
     subbedDefs = (second transform <$>) . liftLambdas . (second snd <$>) $ inferred
     types = second fst <$> inferred
-  pure a { asts = subbedDefs, funTypes = types }
+  pure a { defs = (defs a) { supers = subbedDefs }, funTypes = types }
   where
-    Right preludeDefs = parseDefs $ boostPrelude boost
-    boostMap = boostTypes boost
-    showErr = either (Left . show) Right
-    genTypes storage ps = preludeMinimal
+    genTypes dataDecls storage ps = preludeMinimal
+      `M.union` mkDataTypes dataDecls
       `M.union` boostMap
       `M.union` (M.fromList $ storageTypeConstraintHack <$> storage)
       `M.union` (M.fromList $ storeTypeConstraint <$> ps)
+    Right preludeDefs = parseDefs $ boostPrelude boost
+    boostMap = boostTypes boost
+    showErr = either (Left . show) Right
     storageTypeConstraintHack s = (s, (Nothing, TC "Map" `TApp` TV ('@':s)))
     storeTypeConstraint s = (s, (Nothing, TC "Store" `TApp` TV ('@':s)))
 
