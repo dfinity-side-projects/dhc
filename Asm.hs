@@ -93,7 +93,7 @@ encWasmOp op = case op of
 --  3. List of wdecl functions.
 --  4. Types needed by call_indirect ops.
 --  5. (Initial HP value, Addresses of string constants).
---  6. Persistent global count.
+--  6. Global store count.
 -- TODO: NAME THESE FIELDS ALREADY!
 type GlobalTable =
   ( [String]
@@ -163,7 +163,7 @@ enc32 :: Int -> [Int]
 enc32 n = (`mod` 256) . (div n) . (256^) <$> [(0 :: Int)..3]
 
 insToBin :: Boost -> (GlobalTable, [(String, [Ins])]) -> DfnWasm
-insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), persistCount), gmachine) = DfnWasm
+insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), storeCount), gmachine) = DfnWasm
   { legacyArities = ((\s -> (s, fst $ getGlobal s)) <$> exs)
   , wasmBinary = wasm
   } where
@@ -179,8 +179,8 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
       , [encType I32, 1, 0x41] ++ leb128 hp0 ++ [0xb]  -- HP
       , [encType I32, 1, 0x41, 0, 0xb]  -- BP
       ]
-      -- Persistent globals.
-      ++ replicate persistCount [encType I32, 1, 0x41, 0, 0xb]
+      -- Global stores.
+      ++ replicate storeCount [encType I32, 1, 0x41, 0, 0xb]
     , sect 7 $  -- Export section.
       [ encStr "memory" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
       , encStr "table" ++ [1, 0]  -- 1 = external_kind Table, 0 = memory index.
@@ -242,8 +242,8 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
     , ("#sethp", (([I32], []), [Get_local 0, Set_global hp, End]))
     , ("#pairwith42", (([I32], []), pairWith42Asm))
     , ("#nil42", (([], []), nil42Asm))
-    , ("#setpersist", (([I32, I32], []), setPersistAsm persistCount))
-    , ("#getpersist", (([I32], [I32]), getPersistAsm persistCount))
+    , ("#setstore", (([I32, I32], []), setStoreAsm storeCount))
+    , ("#getstore", (([I32], [I32]), getStoreAsm storeCount))
     -- Outer "#main" function. It calls the internal "main" function.
     , ("#main", (([], []),
       -- The magic constant 42 represents the RealWorld.
@@ -621,14 +621,14 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
         ]
       nest k = [Block Nada $ nest $ k - 1, Call $ firstPrim + k - 1, Return]
 
-  getPersistAsm :: Int -> [WasmOp]
-  getPersistAsm 0 = [ I32_const 0, End ]
-  getPersistAsm count =
+  getStoreAsm :: Int -> [WasmOp]
+  getStoreAsm 0 = [ I32_const 0, End ]
+  getStoreAsm count =
     nest count ++ [End]
     where
       nest 1 =
         [ Block Nada
-          [ Get_local 0   -- branch on local0 (persistent global index)
+          [ Get_local 0   -- branch on local0 (global store index)
           , Br_table [0..count - 1] (count - 1)
           ]
         , Get_global 3
@@ -639,15 +639,15 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
         , Get_global $ 2 + j
         , Return
         ]
-  setPersistAsm :: Int -> [WasmOp]
-  setPersistAsm 0 = [End]
-  setPersistAsm count =
+  setStoreAsm :: Int -> [WasmOp]
+  setStoreAsm 0 = [End]
+  setStoreAsm count =
     [ Get_local 1   -- PUSH local1 (I32 to store)
     ] ++ nest count ++ [End]
     where
       nest 1 =
         [ Block Nada
-          [ Get_local 0   -- branch on local0 (persistent global index)
+          [ Get_local 0   -- branch on local0 (global store index)
           , Br_table [0..count - 1] (count - 1)
           ]
         , Set_global 3
@@ -925,7 +925,7 @@ mk1 storage pglobals (Ast ast) = case ast of
       Just k -> [Push k]
       -- Storage maps become PushString instructions.
       _ | v `elem` storage -> [PushString $ sbs v]
-      -- Persistent globals become PushRef instructions.
+      -- Global stores become PushRef instructions.
       _ | Just i <- elemIndex v pglobals -> [PushRef $ fromIntegral i]
       _ -> [PushGlobal v]
   Pack n m -> pure [Copro n m]

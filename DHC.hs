@@ -1,8 +1,9 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE PackageImports #-}
-module DHC (parseContract, ExternType, AstF(..), Ast(..), AstPlus(..), Type(..), inferType, parseDefs, lexOffside,
-  arityFromType, hsToAst, liftLambdas) where
-
+module DHC
+  ( parseContract, ExternType, AstF(..), Ast(..), AstPlus(..), Type(..)
+  , inferType, parseDefs, lexOffside
+  , arityFromType, hsToAst, liftLambdas) where
 import Control.Arrow
 import Control.Monad
 #ifdef __HASTE__
@@ -313,7 +314,7 @@ data AstPlus = AstPlus
   { exports :: [String]
   , wdecls :: [String]
   , storages :: [String]
-  , persist :: [String]
+  , stores :: [String]
   , asts :: [(String, Ast)]
   , funTypes :: [(String, QualType)]
   } deriving Show
@@ -326,7 +327,7 @@ contract = do
     (between (want "(") (want ")") $ varStr `sepBy` want ",")
   ms <- option [] $ try $ want "storage" >>
     (between (want "(") (want ")") $ varStr `sepBy` want ",")
-  ps <- option [] $ try $ want "persist" >>
+  ps <- option [] $ try $ want "store" >>
     (between (want "(") (want ")") $ varStr `sepBy` want ",")
   putState (AwaitBrace, [])
   ds <- supercombinators
@@ -519,8 +520,8 @@ methods = M.fromList
   , ("pure", (a :-> TApp m a, [("Monad", "m")]))
   -- Generates call_indirect ops.
   , ("callSlot", (TC "I32" :-> a :-> TApp (TC "IO") (TC "()"), [("Message", "a")]))
-  , ("set", (TApp (TC "Persist") a :-> a :-> io (TC "()"), [("Store", "a")]))
-  , ("get", (TApp (TC "Persist") a :-> io a, [("Store", "a")]))
+  , ("set", (TApp (TC "Store") a :-> a :-> io (TC "()"), [("Store", "a")]))
+  , ("get", (TApp (TC "Store") a :-> io a, [("Store", "a")]))
   ] where
     a = GV "a"
     b = GV "b"
@@ -756,7 +757,7 @@ boostTypes b = M.fromList $ second (((,) Nothing) . fst) <$> boostHs b
 hsToAst :: Boost -> ExternType -> String -> Either String AstPlus
 hsToAst boost ext prog = do
   a@(AstPlus es _ storage _ ds _) <- showErr $ parseContract prog
-  (preStorageInferred, storageCons) <- inferType (getContractExport ext es) (genTypes storage $ persist a) (ds ++ preludeDefs)
+  (preStorageInferred, storageCons) <- inferType (getContractExport ext es) (genTypes storage $ stores a) (ds ++ preludeDefs)
   let
     inferred = constrainStorage storageCons preStorageInferred
     arities = second (countArgs . fst . fst) <$> inferred
@@ -773,9 +774,9 @@ hsToAst boost ext prog = do
     genTypes storage ps = preludeMinimal
       `M.union` boostMap
       `M.union` (M.fromList $ storageTypeConstraintHack <$> storage)
-      `M.union` (M.fromList $ persistTypeConstraint <$> ps)
+      `M.union` (M.fromList $ storeTypeConstraint <$> ps)
     storageTypeConstraintHack s = (s, (Nothing, TC "Map" `TApp` TV ('@':s)))
-    persistTypeConstraint s = (s, (Nothing, TC "Persist" `TApp` TV ('@':s)))
+    storeTypeConstraint s = (s, (Nothing, TC "Store" `TApp` TV ('@':s)))
 
 constrainStorage :: Map String Type -> [(String, (QualType, Ast))] -> [(String, (QualType, Ast))]
 constrainStorage cons ds = second (first (first rewriteType)) <$> ds where
