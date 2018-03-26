@@ -98,7 +98,7 @@ encWasmOp op = case op of
 type GlobalTable =
   ( [String]
   , M.Map String Int
-  , [(String, ([WasmType], [WasmType]))]
+  , [(String, [WasmType])]
   , [[WasmType]]
   , (Int, Map ShortByteString Int)
   , Int
@@ -146,12 +146,10 @@ astToIns (AstPlus es ws storage ps ds ts) = ((es, funs, wasmDecl <$> ws, ciTypes
   wasmDecl w = (w, wasmType [] $ fst $ fromJust $ lookup w ts)
   wasmType acc t = case t of
     a :-> b -> wasmType (translateType a : acc) b
-    r -> (,) (reverse acc) $ case r of
-      TC "()" -> []
-      TApp (TC "IO") _ -> []
-      _ -> [translateType r]
-  -- For JS demos.
-  -- translateType (TC "Int") = I32
+    TApp (TC "IO") (TC "()") -> reverse acc
+    -- TODO: Beef up type inference and make the following an error
+    -- because it will be unreachable.
+    _ -> reverse acc
   translateType (TC "Int") = I64
   translateType (TC "Port") = Ref "Port"
   translateType (TC "Databuf") = Ref "Databuf"
@@ -214,7 +212,7 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
   typeNo ins outs = typeMap BM.!> (ins, outs)
   typeMap = BM.fromList $ zip [0..] $ nub $
     (snd <$> imps) ++  -- Types of imports
-    (snd <$> wrapme) ++  -- wdecl functions.
+    (flip (,) [] . snd <$> wrapme) ++  -- wdecl functions.
     (flip (,) [] <$> ciTypes) ++  -- call_indirect types.
     (fst . snd <$> internalFuns)  -- Types of internal functions.
   exportFun name internalName = encStr name ++ (0 : leb128 (wasmFunNo internalName))
@@ -388,12 +386,11 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
     ]))
 
   wasmFunMap = M.fromList $ zip (((\(m, f) -> m ++ "." ++ f) . fst <$> imps) ++ (fst <$> wasmFuns)) [0..]
-  -- wasmFunNo = (wasmFunMap M.!)
   wasmFunNo s = fromMaybe (error s) $ M.lookup s wasmFunMap
 
   refToI32 (Ref _) = I32
   refToI32 t = t
-  wrap (f, (ins, outs)) = (,) ('@':f) $ (,) (typeNo ins outs, 0) $
+  wrap (f, ins) = (,) ('@':f) $ (,) (typeNo ins [], 0) $
     -- Given a function call represented as a tree t on the stack, the
     -- G-machine ordinarily:
     --
@@ -456,8 +453,6 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
     -- We move these to our stack in reverse order.
     ++ concat (reverse $ zipWith wdeclIn (refToI32 <$> ins) [0..])
     ++ [Call $ wasmFunNo f]
-    -- Push the result to the WebAssembly stack.
-    ++ concatMap wdeclOut (refToI32 <$> outs)
     ++ [End]
   wdeclIn I64 i =
     [ Get_local i
@@ -467,61 +462,7 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
     [ Get_local i
     , Call $ wasmFunNo "#pushref"  -- Evaluate.
     ]
-  {- For JS demos.
-  wdeclIn I32 i =
-    [ Get_global sp  -- [sp] = hp
-    , Get_global hp
-    , I32_store 2 0
-    , Get_global sp  -- sp = sp - 4
-    , I32_const 4
-    , I32_sub
-    , Set_global sp
-    , Get_global hp  -- [hp] = TagInt
-    , tag_const TagInt
-    , I32_store 2 0
-    , Get_global hp  -- [hp + 12] = 0
-    , I32_const 12
-    , I32_add
-    , I32_const 0
-    , I32_store 2 0
-    , Get_global hp  -- [hp + 8] = local i
-    , I32_const 8
-    , I32_add
-    , Get_local i
-    , I32_store 2 0
-    , Get_global hp  -- hp = hp + 16
-    , I32_const 16
-    , I32_add
-    , Set_global hp
-    ]
-  -}
   wdeclIn _ _ = error "TODO"
-  wdeclOut I64 =
-    [ Get_global sp  -- sp = sp + 4
-    , I32_const 4
-    , I32_add
-    , Set_global sp
-    , Get_global sp  -- PUSH [[sp] + 8]
-    , I32_load 2 0
-    , I32_const 8
-    , I32_add
-    , I64_load 3 0
-    ]
-    -- For JS demo. Returns first 32 bits of an Int.
-    {-
-  wdeclOut I32 =
-    [ Get_global sp  -- sp = sp + 4
-    , I32_const 4
-    , I32_add
-    , Set_global sp
-    , Get_global sp  -- PUSH [[sp] + 8]
-    , I32_load 2 0
-    , I32_const 8
-    , I32_add
-    , I32_load 2 0
-    ]
-    -}
-  wdeclOut _ = error "TODO"
   sect t xs = t : lenc (varlen xs ++ concat xs)
   encStr s = lenc $ ord <$> s
   encProcedure ((_, 0), body) = lenc $ 0:concatMap encWasmOp body
