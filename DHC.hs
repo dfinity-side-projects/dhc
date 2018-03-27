@@ -91,18 +91,18 @@ toplevels = foldl' (flip ($)) (HsProgram [] []) <$> between (want "{") (want "}"
   topLevel = dataDecl <|> sc
   dataDecl = do
     void $ want "data"
-    s <- varStr
+    s <- upperVarStr
     void $ want "="
-    dataCons <- varStr `sepBy` want "|"
+    dataCons <- upperVarStr `sepBy` want "|"
     pure $ addData (s, dataCons)
   sc = try (do
-    (fun:args) <- scOp <|> many1 varStr
+    (fun:args) <- scOp <|> many1 lowerVarStr
     void $ want "="
     addSuper . (,) fun . Ast . Lam args <$> expr) <|> pure id
   scOp = try $ do
-    l <- varStr
+    l <- lowerVarStr
     op <- varSym
-    r <- varStr
+    r <- lowerVarStr
     pure [op, l, r]
   expr = caseExpr <|> letExpr <|> doExpr <|> bin 0 False
   bin 10 _ = molecule
@@ -205,6 +205,14 @@ toplevels = foldl' (flip ($)) (HsProgram [] []) <$> between (want "{") (want "}"
   varSym = do
     (t, s) <- tok
     when (t /= LexSymbol || s `elem` ["..", "::", "=", "|", "<-", "->", "=>"]) $ fail ""
+    pure s
+  lowerVarStr = do
+    s <- varStr
+    when (isUpper $ head s) $ fail "first letter must be lowercase"
+    pure s
+  upperVarStr = do
+    s <- varStr
+    when (isLower $ head s) $ fail "first letter must be uppercase"
     pure s
 
 varStr :: Parser String
