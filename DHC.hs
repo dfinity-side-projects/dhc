@@ -77,14 +77,14 @@ fixity o = fromMaybe (LAssoc, 9) $ M.lookup o standardFixities
 
 data HsProgram = HsProgram
   { supers :: [(String, Ast)]
-  , datas :: [(String, [String])]
+  , datas :: [(String, (Maybe (Int, Int), Type))]
   } deriving Show
 
 addSuper :: (String, Ast) -> HsProgram -> HsProgram
 addSuper sc p = p { supers = sc:supers p }
 
-addData :: (String, [String]) -> HsProgram -> HsProgram
-addData sc p = p { datas = sc:datas p }
+addData :: [(String, (Maybe (Int, Int), Type))] -> HsProgram -> HsProgram
+addData xs p = p { datas = xs ++ datas p }
 
 toplevels :: Parser HsProgram
 toplevels = foldl' (flip ($)) (HsProgram [] []) <$> between (want "{") (want "}") (topLevel `sepBy` want ";") where
@@ -92,9 +92,20 @@ toplevels = foldl' (flip ($)) (HsProgram [] []) <$> between (want "{") (want "}"
   dataDecl = do
     void $ want "data"
     s <- upperVarStr
+    args <- many lowerVarStr
     void $ want "="
-    dataCons <- upperVarStr `sepBy` want "|"
-    pure $ addData (s, dataCons)
+    let
+      t = foldl' TApp (TC s) $ GV <$> args
+      typeCon = do
+        con <- upperVarStr
+        ts <- many $ (TC <$> upperVarStr) <|> (GV <$> lowerVarStr) <|> between (want "(") (want ")") typeExpr
+        pure (con, foldr (:->) t ts)
+    typeCons <- typeCon `sepBy` want "|"
+    pure $ addData [(con, (Just (i, arityFromType typ), typ))
+      | (i, (con, typ)) <- zip [0..] typeCons]
+  typeExpr = do
+    ts <- many1 $ (TC <$> upperVarStr) <|> (GV <$> lowerVarStr) <|> between (want "(") (want ")") typeExpr
+    pure $ foldl1' TApp ts
   sc = try (do
     (fun:args) <- scOp <|> many1 lowerVarStr
     void $ want "="
@@ -206,11 +217,11 @@ toplevels = foldl' (flip ($)) (HsProgram [] []) <$> between (want "{") (want "}"
     (t, s) <- tok
     when (t /= LexSymbol || s `elem` ["..", "::", "=", "|", "<-", "->", "=>"]) $ fail ""
     pure s
-  lowerVarStr = do
+  lowerVarStr = try $ do
     s <- varStr
     when (isUpper $ head s) $ fail "first letter must be lowercase"
     pure s
-  upperVarStr = do
+  upperVarStr = try $ do
     s <- varStr
     when (isLower $ head s) $ fail "first letter must be uppercase"
     pure s
@@ -745,10 +756,6 @@ preludeMinimal = M.fromList
     a = GV "a"
     b = GV "b"
 
-mkDataTypes :: [(String, [String])] -> Globals
-mkDataTypes ds = M.fromList $ concatMap (\(s, dataCons) ->
-  [(dc, (Just (i, 0), TC s)) | (i, dc) <- zip [0..] dataCons]) ds
-
 arityFromType :: Type -> Int
 arityFromType = f 0 where
   f acc (_ :-> r) = f (acc + 1) r
@@ -801,7 +808,7 @@ hsToAst boost ext prog = do
   pure a { defs = (defs a) { supers = subbedDefs }, funTypes = types }
   where
     genTypes dataDecls storage ps = preludeMinimal
-      `M.union` mkDataTypes dataDecls
+      `M.union` M.fromList dataDecls
       `M.union` boostMap
       `M.union` (M.fromList $ storageTypeConstraintHack <$> storage)
       `M.union` (M.fromList $ storeTypeConstraint <$> ps)

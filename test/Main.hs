@@ -1,3 +1,4 @@
+{-# LANGUAGE QuasiQuotes #-}
 import Data.ByteString.Char8 (unpack)
 import Data.ByteString.Short (ShortByteString, fromShort, toShort)
 import Data.Int
@@ -5,11 +6,13 @@ import qualified Data.Map as M
 import Data.Maybe
 import Data.Monoid
 import Test.HUnit
+import Text.Heredoc (here)
 import Asm
 import Boost
 import DHC
 import Std
 import WebDemo
+import WebHero
 
 data Node = NInt Int64 | NString ShortByteString | NAp Int Int | NGlobal Int String | NInd Int | NCon Int [Int] | RealWorld [String] deriving Show
 
@@ -194,5 +197,64 @@ lexOffsideTests = (\(result, source) -> TestCase $
       "f x = (case x of True -> 1; False -> 0)")
     ]
 
+webTests :: [Test]
+webTests = (\(result, source) -> TestCase $ runWebDHC source >>= assertEqual source result) <$>
+  [ ("Hello, World!\n", "main = putStr \"Hello, World!\\n\"")
+  , ("9876543210", "main = putInt 9876543210")
+  , (unlines
+    [ "recursion with fix: 10000"
+    , "5! + (10 + 20 + 30 + 40 + 50) = 270"
+    ], [here|
+factorial n = case n == 0 of True  -> 1
+                             False -> n * factorial2 (n - 1)
+factorial2 n = case n == 0 of True  -> 1
+                              False -> n * factorial (n - 1)
+foldr f n xs = case xs of [] -> n
+                          (a:as) -> f a (foldr f n as)
+uncurry f p = case p of (a, b) -> f a b
+sum = foldr (+) 0
+enumFromTo a b = case a > b of True  -> []
+                               False -> a : enumFromTo (a + 1) b
+map f = foldr (\x xs -> f x:xs) []
+tenTimes x = 10 * x
+f $ x = f x
+f rec n = case n == 0 of True -> 0
+                         False -> rec (n - 1) + 2*n - 1
+main = do
+  putStr "recursion with fix: "
+  let {fixedf = f fixedf} in putInt $ fixedf 100
+  putStr "\n5! + (10 + 20 + 30 + 40 + 50) = "
+  putInt $ uncurry (+) (factorial 5, sum $ map tenTimes [1..5])
+  putStr "\n"
+|])
+  , ("314", unlines
+    [ "data List x = Nil | Cons x (List x)"
+    , "main = f (Cons 3 (Cons 1 (Cons 4 Nil)))"
+    , "f l = case l of"
+    , "  Nil -> putStr \"\""
+    , "  Cons n rest -> do"
+    , "    putInt n"
+    , "    f rest"
+    ])
+  , ("1123459", unlines
+    [ "data Tree a = Nil | Node a (Tree a) (Tree a)"
+    , "main = pr (f Nil [3, 1, 4, 1, 5, 9, 2])"
+    , "f t l = case l of"
+    , "  [] -> t"
+    , "  x:xs -> f (ins x t) xs"
+    , "ins x t = case t of"
+    , "  Nil -> Node x Nil Nil"
+    , "  Node y a b -> case x > y of"
+    , "    True -> Node y a (ins x b)"
+    , "    False -> Node y (ins x a) b"
+    , "pr t = case t of"
+    , "  Nil -> pure ()"
+    , "  Node x a b -> do"
+    , "    pr a"
+    , "    putInt x"
+    , "    pr b"
+    ])
+  ]
+
 main :: IO Counts
-main = runTestTT $ TestList $ lexOffsideTests ++ gmachineTests
+main = runTestTT $ TestList $ lexOffsideTests ++ gmachineTests ++ webTests
