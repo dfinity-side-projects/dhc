@@ -27,7 +27,7 @@ data Wasm = Wasm
   , start :: Maybe Int
   , code :: [Body]
   , dataSection :: [([WasmOp], String)]
-  , dfnExports :: [(String, ([WasmType], [WasmType]))]
+  , dfnExports :: [(String, [WasmType])]
   } deriving Show
 
 emptyWasm :: Wasm

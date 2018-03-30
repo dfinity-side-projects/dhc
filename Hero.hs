@@ -3,7 +3,7 @@
 module Hero (Wasm, HeroVM, parseWasm,
   runWasm, mkHeroVM, setArgsVM,
   setTable,
-  globalVM,
+  globalVM, setGlobalVM,
   getNumVM, putNumVM,
   stateVM, putStateVM,
   CustomWasmOp(I32_const, I64_const), WasmOp) where
@@ -42,8 +42,11 @@ putStateVM a vm = vm {state = a}
 getNumVM :: Integral n => Int -> Int32 -> HeroVM a -> n
 getNumVM w addr vm = getNum w addr $ mem vm
 
-globalVM ::  HeroVM a -> IntMap WasmOp
+globalVM :: HeroVM a -> IntMap WasmOp
 globalVM vm = globs vm
+
+setGlobalVM :: [(Int, WasmOp)] -> HeroVM a -> HeroVM a
+setGlobalVM m vm = vm { globs = IM.fromList m `IM.union` globs vm }
 
 putNumVM :: Integral n => Int -> Int32 -> n -> HeroVM a -> HeroVM a
 putNumVM w addr n vm@(HeroVM {mem}) = vm { mem = putNum w addr n mem }
