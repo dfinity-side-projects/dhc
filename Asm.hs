@@ -183,17 +183,11 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
       [ encStr "memory" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
       , encStr "table" ++ [1, 0]  -- 1 = external_kind Table, 0 = memory index.
       , exportFun "#main" "#main"
-      , exportFun "#getsp" "#getsp"
-      , exportFun "#setsp" "#setsp"
-      , exportFun "#gethp" "#gethp"
-      , exportFun "#sethp" "#sethp"
       ]
       -- The "contract" functions are exported with "_" prepended.
       ++ [exportFun ('_':s) s | s <- exs]
       -- The "wdecl" functions are exported verbatim.
       ++ [exportFun s ('@':s) | (s, _) <- wrapme]
-      -- The call_indirect functions for each type.
-      ++ [exportFun s s | (s, _) <- ciFuns]
     , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
     , sect 11 $ encStrConsts <$> M.assocs strConsts  -- Data section.
     , 0 : lenc (encStr "dfn" ++ (ord <$> show wrapme))  -- Custom section.
@@ -234,10 +228,6 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
     , ("#updatepop", (([I32], []), updatePopAsm))
     , ("#updateind", (([I32], []), updateIndAsm))
     , ("#alloc", (([I32], []), allocAsm))
-    , ("#getsp", (([], [I32]), [Get_global sp, End]))
-    , ("#setsp", (([I32], []), [Get_local 0, Set_global sp, End]))
-    , ("#gethp", (([], [I32]), [Get_global hp, End]))
-    , ("#sethp", (([I32], []), [Get_local 0, Set_global hp, End]))
     , ("#pairwith42", (([I32], []), pairWith42Asm))
     , ("#nil42", (([], []), nil42Asm))
     , ("#setstore", (([I32, I32], []), setStoreAsm storeCount))
@@ -649,7 +639,6 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
   deQuasi :: QuasiWasm -> [WasmOp]
   deQuasi (Custom x) = case x of
     CallSym s -> [Call $ wasmFunNo s]
-    CallIndirectType ins outs -> [Call_indirect $ typeNo ins outs]
     ReduceArgs n -> concat $ replicate n $ concatMap fromIns [Push (n - 1), Eval]
 
   deQuasi (Block t body) = [Block t $ concatMap deQuasi body]
