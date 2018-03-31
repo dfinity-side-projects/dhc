@@ -98,14 +98,16 @@ toplevels = foldl' (flip ($)) (HsProgram [] []) <$> between (want "{") (want "}"
       t = foldl' TApp (TC s) $ GV <$> args
       typeCon = do
         con <- upperVarStr
-        ts <- many $ (TC <$> upperVarStr) <|> (GV <$> lowerVarStr) <|> between (want "(") (want ")") typeExpr
+        ts <- many typeAtom
         pure (con, foldr (:->) t ts)
     typeCons <- typeCon `sepBy` want "|"
     pure $ addData [(con, (Just (i, arityFromType typ), typ))
       | (i, (con, typ)) <- zip [0..] typeCons]
-  typeExpr = do
-    ts <- many1 $ (TC <$> upperVarStr) <|> (GV <$> lowerVarStr) <|> between (want "(") (want ")") typeExpr
-    pure $ foldl1' TApp ts
+  typeExpr = foldl1' TApp <$> many1 typeAtom
+  typeAtom = (TC <$> upperVarStr)
+    <|> (GV <$> lowerVarStr)
+    <|> between (want "(") (want ")") typeExpr
+    <|> (TApp (TC "[]") <$> between (want "[") (want "]") typeExpr)
   sc = try (do
     (fun:args) <- scOp <|> many1 lowerVarStr
     void $ want "="
@@ -610,7 +612,7 @@ dictSolve dsoln soln (Ast ast) = case ast of
     findInstance "Eq" t = case t of
       TC "String"        -> aVar "String-=="
       TC "Int"           -> aVar "Int-=="
-      TApp (TC "List") a -> aVar "list_eq_instance" @@ rec (Ast $ Placeholder "Eq" a)
+      TApp (TC "[]") a -> aVar "list_eq_instance" @@ rec (Ast $ Placeholder "Eq" a)
       e -> error $ "BUG! no Eq for " ++ show e
     findInstance "Monad" t = case t of
       TC "Maybe" -> Ast (Pack 0 2) @@ aVar "maybe_pure" @@ aVar "maybe_monad"
@@ -621,7 +623,7 @@ dictSolve dsoln soln (Ast ast) = case ast of
       TC "Port" -> Ast (Pack 0 2) @@ aVar "Port-toAny" @@ aVar "Port-fromAny"
       TC "Actor" -> Ast (Pack 0 2) @@ aVar "Actor-toAny" @@ aVar "Actor-fromAny"
       TC "Int" -> Ast (Pack 0 2) @@ aVar "Int-toAny" @@ aVar "Int-fromAny"
-      TApp (TC "List") a -> let
+      TApp (TC "[]") a -> let
         ltai = aVar "list_to_any_instance" @@ rec (Ast $ Placeholder "Store" a)
         lfai = aVar "list_from_any_instance" @@ rec (Ast $ Placeholder "Store" a)
         in Ast (Pack 0 2) @@ ltai @@ lfai
@@ -645,14 +647,14 @@ propagate cs t = concat <$> mapM propagateTyCon cs where
   propagateTyCon "Eq" = case t of
     TC "Int" -> Right []
     TC "String" -> Right []
-    TApp (TC "List") a -> propagate ["Eq"] a
+    TApp (TC "[]") a -> propagate ["Eq"] a
     _ -> Left $ "no Eq instance: " ++ show t
   propagateTyCon "Monad" = case t of
     TC "Maybe" -> Right []
     TC "IO" -> Right []
     _ -> Left $ "no Monad instance: " ++ show t
   propagateTyCon "Store" = case t of
-    TApp (TC "List") a -> propagate ["Store"] a
+    TApp (TC "[]") a -> propagate ["Store"] a
     TC "Databuf" -> Right []
     TC "Actor" -> Right []
     TC "Port" -> Right []
@@ -749,8 +751,8 @@ preludeMinimal = M.fromList
   , ("Just",    (jp 1 1, a :-> TApp (TC "Maybe") a))
   , ("Left",    (jp 0 1, a :-> TApp (TApp (TC "Either") a) b))
   , ("Right",   (jp 1 1, b :-> TApp (TApp (TC "Either") a) b))
-  , ("[]",      (jp 0 0, TApp (TC "List") a))
-  , (":",       (jp 1 2, a :-> TApp (TC "List") a :-> TApp (TC "List") a))
+  , ("[]",      (jp 0 0, TApp (TC "[]") a))
+  , (":",       (jp 1 2, a :-> TApp (TC "[]") a :-> TApp (TC "[]") a))
   ] where
     jp m n = Just (m, n)
     a = GV "a"
