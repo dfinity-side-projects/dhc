@@ -811,11 +811,10 @@ hsToAst boost ext prog = do
   where
     genTypes dataDecls storage ps = preludeMinimal
       `M.union` M.fromList dataDecls
-      `M.union` boostMap
+      `M.union` boostTypes boost
       `M.union` (M.fromList $ storageTypeConstraintHack <$> storage)
       `M.union` (M.fromList $ storeTypeConstraint <$> ps)
     Right preludeDefs = parseDefs $ boostPrelude boost
-    boostMap = boostTypes boost
     showErr = either (Left . show) Right
     storageTypeConstraintHack s = (s, (Nothing, TC "Map" `TApp` TV ('@':s)))
     storeTypeConstraint s = (s, (Nothing, TC "Store" `TApp` TV ('@':s)))
@@ -858,21 +857,45 @@ inferType findExport globs ds = foldM inferMutual ([], M.empty) $ map (map (\k -
       tvs = TV . ('*':) . fst <$> grp
       env = zip (fst <$> grp) (zip tvs $ repeat $ []) ++ map (second fst) acc
 
+-- TODO: For finding strongly-connected components, there's no need to find
+-- all dependencies. If a node has already been processed, we should avoid
+-- finding all its dependencies again. We can do this by passing in a list of
+-- nodes that have already been explored.
 callees :: [(String, Ast)] -> String -> [String]
-callees ds f = deps f (fromJust $ lookup f ds) where
-  deps name (Ast body) = case body of
-    Lam ss t | name `notElem` ss -> rec t
-    -- TODO: Look for shadowed function name in case and let statements.
-    -- Or add deshadowing phase.
-    CCall "" v         -> [v]
-    Cas x as          -> rec x ++ concatMap rec (snd <$> as)
-    Let as x          -> rec x ++ concatMap rec (snd <$> as)
-    x :@ y            -> rec x ++ rec y
-    Var v | v /= name -> case lookup v ds of
-      Nothing -> []
-      Just _  -> [v]
-    _                 -> []
-    where rec = deps name
+callees ds s = snd $ execState (go s) ([], []) where
+  go :: String -> State ([String], [String]) ()
+  go f = do
+    (env, acc) <- get
+    when (not $ elem f env || elem f acc || M.member f methods) $ case lookup f ds of
+      -- TODO: If we knew the primitives (functions implemented in wasm, such
+      -- as `*`), then we could detect out-of-scope identifiers here.
+      Nothing -> pure ()  -- error $ "not in scope: " ++ f
+      Just d -> do
+        put (env, f:acc)
+        ast d
+  ast (Ast d) = case d of
+    x :@ y -> ast x >> ast y
+    Lam ss t -> do
+      env <- gets fst
+      modify $ first (ss ++)
+      ast t
+      modify $ first (const env)
+    Var v -> go v
+    CCall "" v -> go v
+    Cas x as -> do
+      ast x
+      forM_ as $ \(Ast p, e) -> do
+        env <- gets fst
+        modify $ first (caseVars p ++)
+        ast e
+        modify $ first (const env)
+    Let as x -> do
+      env <- gets fst
+      modify $ first ((fst <$> as) ++)
+      mapM_ ast $ snd <$> as
+      ast x
+      modify $ first (const env)
+    _ -> pure ()
 
 -- | Returns strongly connected components in topological order.
 scc :: Eq a => (a -> [a]) -> [a] -> [[a]]

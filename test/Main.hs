@@ -120,7 +120,7 @@ gmachineTests = (\(result, source) -> TestCase $
     -- Test cases from Peyton Jones and Lester,
     -- "Implementing Functional Languages; a tutorial".
     -- Each case either contains a `main` function of type `IO a`, or
-    -- a `main_` function which should be pure, and which we reduce to WHNF.
+    -- a pure `main_` function which we reduce to WHNF.
     [ ("81", "square x = x * x; main_ = square (square 3)")
     , ("3", "i x = x; main_ = i 3")
     , ("3", "id = s k k; s x y z = x z (y z); k x y = x; main_ = id 3")
