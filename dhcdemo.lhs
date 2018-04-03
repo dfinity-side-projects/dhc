@@ -21,10 +21,9 @@ https://github.com/dfinity/dhc[Source].
 <script type="text/javascript">
 var dv;
 function load8(addr) { return dv.getUint8(addr); }
-function load32(addr) { return dv.getUint32(addr, true); }
-function store32(addr, x) { dv.setUint32(addr, x, true); }
 function runWasmInts(a){WebAssembly.instantiate(new Uint8Array(a),
-{dhc:{system:(n,sp,hp) => { return Haste.syscall(n,sp,hp); } }}).then(x => {
+{system:{putInt:(lo,hi) => { Haste.sysPutInt(lo,hi); },
+putStr:(a,n) => { Haste.sysPutStr(a,n) } }}).then(x => {
 expo = x.instance.exports;
 dv = new DataView(expo.memory.buffer);
 document.getElementById('out').innerHTML ="";
@@ -69,58 +68,35 @@ import Data.Char
 import Haste.DOM
 import Haste.Events
 import Haste.Foreign
-import WebDemo
+import Asm
+import Demo
 
 append :: Elem -> String -> IO ()
 append e s = do
   v <- getProp e "innerHTML"
   setProp e "innerHTML" $ v ++ s
 
-syscall :: Elem -> Int -> Int -> Int -> IO ()
-syscall e n sp hp
-  | n == 21 = do
-    addr <- load32 $ sp + 4
-    tag <- load8 addr
-    when (tag /= 6) $ error $ "BUG! want string (tag 6), got " ++ show tag
-    ptr <- load32 $ addr + 4
-    off <- load32 $ addr + 8
-    slen <- load32 $ addr + 12
-    s <- mapM load8 [ptr + off + i | i <- [0..slen - 1]]
-    append e $ chr <$> s
-    store32 hp 4
-    store32 (hp + 4) 0
-    store32 sp hp
-    store32 (sp - 4) $ hp + 8
-  | n == 22 = do
-    addr <- load32 $ sp + 4
-    tag <- load8 addr
-    when (tag /= 3) $ error $ "BUG! want int (tag 3), got " ++ show tag
-    x <- load32 $ addr + 12
-    y <- load32 $ addr + 8
-    let b = 2^(32 :: Int) :: Integer
-    append e $ case x of
-      0 -> show y ++ if y >= 0 then "" else
-        " (unsigned = " ++ show (fromIntegral y + b) ++ ")"
-      _ -> show $ fromIntegral x * b + ((fromIntegral y + b) `mod` b)
-    store32 hp 4
-    store32 (hp + 4) 0
-    store32 sp hp
-    store32 (sp - 4) $ hp + 8
-  | otherwise =  error "bad syscall"
-  where
-    load8 = ffi "load8" :: Int -> IO Int
-    load32 = ffi "load32" :: Int -> IO Int
-    store32 = ffi "store32" :: Int -> Int -> IO ()
+sysPutStr :: Elem -> Int -> Int -> IO ()
+sysPutStr e a n = append e =<< mapM (fmap chr . load8 . (a +)) [0..n - 1]
+  where load8 = ffi "load8" :: Int -> IO Int
+
+sysPutInt :: Elem -> Int -> Int -> IO ()
+sysPutInt e y x = append e $ case x of
+  0 -> show y ++ if y >= 0 then "" else
+    " (unsigned = " ++ show (fromIntegral y + b) ++ ")"
+  _ -> show $ fromIntegral x * b + ((fromIntegral y + b) `mod` b)
+  where b = 2^(32 :: Int) :: Integer
 
 main :: IO ()
 main = withElems ["src", "asm", "go", "out"] $ \[src, asmEl, goB, outE] -> do
-  export "syscall" $ syscall outE
+  export "sysPutStr" $ sysPutStr outE
+  export "sysPutInt" $ sysPutInt outE
   void $ goB `onEvent` Click $ const $ do
     setProp asmEl "value" ""
     s <- getProp src "value"
-    case hsToWasmWebDemo s of
+    case hsToWasm jsDemoBoost (\_ _ -> Nothing) s of
       Left err -> setProp asmEl "value" err
-      Right asm -> do
+      Right (DfnWasm _ asm) -> do
         setProp asmEl "value" $ show asm
         ffi "runWasmInts" asm :: IO ()
 \end{code}

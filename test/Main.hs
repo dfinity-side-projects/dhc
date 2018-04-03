@@ -1,6 +1,10 @@
 {-# LANGUAGE QuasiQuotes #-}
+import Control.Arrow
+import Control.Monad
+import qualified Data.ByteString as B
 import Data.ByteString.Char8 (unpack)
 import Data.ByteString.Short (ShortByteString, fromShort, toShort)
+import Data.Char (chr)
 import Data.Int
 import qualified Data.Map as M
 import Data.Maybe
@@ -10,11 +14,23 @@ import Text.Heredoc (here)
 import Asm
 import Boost
 import DHC
+import Hero
+import SoloSyscall
 import Std
-import WebDemo
-import WebHero
+import WasmOp
+import Demo
 
 data Node = NInt Int64 | NString ShortByteString | NAp Int Int | NGlobal Int String | NInd Int | NCon Int [Int] | RealWorld [String] deriving Show
+
+hsToGMachine :: String -> Either String (GlobalTable, [(String, [Ins])])
+hsToGMachine haskell = hsToIns (Boost
+  [] []
+  -- We'll intercept `putStr` so there's no need for an implementation.
+  [ ("putStr", (TC "String" :-> io (TC "()"), []))
+  , ("putInt", (TC "Int" :-> io (TC "()"), []))
+  ] [])
+  (\_ _ -> Nothing) haskell
+  where io = TApp (TC "IO")
 
 -- | Interprets G-Machine instructions.
 gmachine :: String -> String
@@ -25,11 +41,12 @@ gmachine prog = if "main_" `M.member` funs then
   where
   drop' n as | n > length as = error "BUG!"
              | otherwise     = drop n as
-  ((_, funs, _, _, _, _), m) = either error id $ hsToGMachineWebDemo prog
-  boost = webDemoBoost <> stdBoost
+  ((_, funs, _, _, _, _), m) = either error id $ hsToGMachine prog
+  arity "putStr" = 1
+  arity "putInt" = 1
   arity s = case M.lookup s funs of
     Just a -> a
-    Nothing -> arityFromType $ fst $ fromJust $ lookup s $ boostHs boost
+    Nothing -> arityFromType $ fst $ fromJust $ lookup s $ boostHs stdBoost
   go (fOrIns:rest) s h = either prim exec fOrIns where
     k = M.size h
     heapAdd x = M.insert k x h
@@ -197,8 +214,8 @@ lexOffsideTests = (\(result, source) -> TestCase $
       "f x = (case x of True -> 1; False -> 0)")
     ]
 
-webTests :: [Test]
-webTests = (\(result, source) -> TestCase $ runWebDHC source >>= assertEqual source result) <$>
+demoCases :: [(String, String)]
+demoCases =
   [ ("Hello, World!\n", "main = putStr \"Hello, World!\\n\"")
   , ("9876543210", "main = putInt 9876543210")
   , (unlines
@@ -256,5 +273,77 @@ main = do
     ])
   ]
 
+demoTests :: [Test]
+demoTests = (\(result, source) -> TestCase $ runDemo source >>= assertEqual source result) <$> demoCases
+
+-- Could be turned into a runhaskell-like tool with:
+--
+--   main = putStr =<< runDemo =<< getContents
+runDemo :: String -> IO String
+runDemo src = case hsToWasm demoBoost (\_ _ -> Nothing) src of
+  Left err -> error err
+  Right (DfnWasm _ ints) -> let
+    Right wasm = parseWasm $ B.pack $ fromIntegral <$> ints
+    in stateVM . snd <$> (runWasm syscall "#main" $ mkHeroVM "" wasm [])
+  where
+  syscall ("system", "putStr") vm [I32_const ptr, I32_const len] = pure
+    $ putStateVM (stateVM vm ++
+      [chr $ getNumVM 1 (ptr + i) vm | i <- [0..len - 1]]) vm
+  syscall ("system", "putInt") vm [I64_const i] = pure
+    $ putStateVM (stateVM vm ++ show i) vm
+  syscall _ _ _ = error "BUG! bad syscall"
+
+altWebTests :: [Test]
+altWebTests = (\(result, source) -> TestCase $ runAltWeb source >>= assertEqual source result) <$> demoCases
+
+-- Alternate host for putStr and putInt using SoloSyscall.
+altWebBoost :: Boost
+altWebBoost = Boost [(("dhc", "system"), ([I32, I32, I32], []))]
+  []
+  (second (uncurry genSyscallFromType) <$>
+  [ ("putStr", (21, TC "String" :-> io (TC "()")))
+  , ("putInt", (22, TC "Int" :-> io (TC "()")))
+  ])
+  []
+  where io = TApp (TC "IO")
+
+runAltWeb :: String -> IO String
+runAltWeb src = case hsToWasm altWebBoost (\_ _ -> Nothing) src of
+  Left err -> error err
+  Right (DfnWasm _ ints) -> let
+    Right wasm = parseWasm $ B.pack $ fromIntegral <$> ints
+    in stateVM . snd <$> (runWasm altWebSys "#main" $ mkHeroVM "" wasm [])
+
+altWebSys :: (String, String) -> HeroVM String -> [WasmOp] -> IO (HeroVM String)
+altWebSys ("dhc", "system") vm [I32_const n, I32_const sp, I32_const hp]
+  | n == 21 = do
+    when (getTag /= 6) $ error "BUG! want String"
+    let
+      ptr = getNumVM 4 (addr + 4) vm
+      off = getNumVM 4 (addr + 8) vm
+      slen = getNumVM 4 (addr + 12) vm
+    pure
+      $ putNumVM 4 hp (5 :: Int)
+      $ putNumVM 4 (hp + 4) (0 :: Int)
+      $ putNumVM 4 sp hp
+      $ putNumVM 4 (sp - 4) (hp + 8)
+      $ putStateVM (stateVM vm ++
+        [chr $ getNumVM 1 (ptr + off + i) vm | i <- [0..slen - 1]])
+      vm
+  | n == 22 = do
+    when (getTag /= 3) $ error "BUG! want Int"
+    pure
+      $ putNumVM 4 hp (5 :: Int)
+      $ putNumVM 4 (hp + 4) (0 :: Int)
+      $ putNumVM 4 sp hp
+      $ putNumVM 4 (sp - 4) (hp + 8)
+      $ putStateVM (stateVM vm ++ show (getNumVM 8 (addr + 8) vm :: Int))
+      vm
+  | otherwise = error $ "BUG! bad syscall " ++ show n
+  where
+    addr = getNumVM 4 (sp + 4) vm :: Int32
+    getTag = getNumVM 1 addr vm :: Int
+altWebSys _ _ _ = error "BUG! bad syscall "
+
 main :: IO Counts
-main = runTestTT $ TestList $ lexOffsideTests ++ gmachineTests ++ webTests
+main = runTestTT $ TestList $ lexOffsideTests ++ gmachineTests ++ demoTests ++ altWebTests
