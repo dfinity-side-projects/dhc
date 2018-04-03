@@ -54,9 +54,6 @@ repNext n = ByteParser f where
   f s | B8.length s < n = Left "missing bytes or size too large"
       | otherwise = Right $ B8.splitAt n s
 
-remainder :: ByteParser ByteString
-remainder = ByteParser $ \s -> Right (s, "")
-
 isEof :: ByteParser Bool
 isEof = ByteParser f where f s = Right (B8.null s, s)
 
@@ -266,9 +263,6 @@ wasm = do
     sectCustom w = do
       name <- lstr
       case name of
-        "dfn" -> do
-          s <- remainder
-          pure w { dfnExports = read $ B8.unpack s }
         "types" -> do
           t <- rep varuint32 martinFuncType
           pure w { martinTypes = t }
