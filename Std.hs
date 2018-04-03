@@ -42,7 +42,7 @@ stdBoost = Boost
   , ("slice", (TC "Int" :-> TC "String" :-> TApp (TC "()") (TApp (TC "String") (TC "String")), sliceAsm))
   , ("undefined", (a, [Unreachable, End]))
 
-  -- | Programmers cannot call the following directly.
+  -- Programmers cannot call the following directly.
   -- We keep their types around for various checks.
   , ("Int-==", (TC "Int" :-> TC "Int" :-> TC "Bool", cmpAsm I64_eq))
   , ("String-==", (TC "String" :-> TC "String" :-> TC "Bool", strEqAsm))
