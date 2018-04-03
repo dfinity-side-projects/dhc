@@ -28,10 +28,12 @@ data Wasm = Wasm
   , code :: [Body]
   , dataSection :: [([WasmOp], String)]
   , dfnExports :: [(String, [WasmType])]
+  , martinTypes :: [[WasmType]]
+  , martinTypeMap :: [(Int, Int)]
   } deriving Show
 
 emptyWasm :: Wasm
-emptyWasm = Wasm [] [] [] 0 [] [] [] Nothing [] [] []
+emptyWasm = Wasm [] [] [] 0 [] [] [] Nothing [] [] [] [] []
 
 data ByteParser a = ByteParser (ByteString -> Either String (a, ByteString))
 
@@ -108,21 +110,21 @@ wasm = do
       t <- varuint7
       case lookup t [(0x7f, I32), (0x7e, I64), (0x7d, F32), (0x7c, F64), (0x70, AnyFunc), (0x60, Func), (0x40, Nada)] of
         Just ty -> pure ty
-        Nothing -> error $ "bad type: " ++ show t
+        Nothing -> bad $ "bad type: " ++ show t
 
     valueType = do
       t <- allType
-      when (t `notElem` [I32, I64, F32, F64]) $ error "bad value_type"
+      when (t `notElem` [I32, I64, F32, F64]) $ bad "bad value_type"
       pure t
 
     blockType = do
       t <- allType
-      when (t `notElem` [I32, I64, F32, F64, Nada]) $ error "bad value_type"
+      when (t `notElem` [I32, I64, F32, F64, Nada]) $ bad "bad value_type"
       pure t
 
     elemType = do
       t <- allType
-      when (t /= AnyFunc) $ error "bad elem_type"
+      when (t /= AnyFunc) $ bad "bad elem_type"
 
     externalKind = do
       k <- varuint7
@@ -191,8 +193,8 @@ wasm = do
       if n == 0 then pure w else do
         elemType
         flags <- varuint1
-        when (flags == 1) $ bad "unhandled"
         m <- varuint32
+        when (flags == 1) $ void varuint32  -- TODO: Record maximum.
         pure w { tableSize = m }
 
     sectMemory w = do
@@ -237,11 +239,43 @@ wasm = do
         (,) offset <$> lstr
       pure w { dataSection = ds }
 
+    martinFuncType = do
+      form <- varint7
+      when (form /= -32) $ bad "expected func type"
+      paramTypes <- rep varuint32 martinValueType
+      z <- varuint1
+      when (z /= 0) $ bad "must have no return value"
+      pure paramTypes
+
+    martinValueType = do
+      t <- varuint7
+      maybe (bad "bad value Type") pure $ lookup t
+        [ (0x7f, I32)
+        , (0x7e, I64)
+        , (0x7d, F32)
+        , (0x7c, F64)
+        , (0x70, AnyFunc)
+        , (0x6f, Ref "Actor")
+        , (0x6e, Ref "Port")
+        , (0x6d, Ref "Databuf")
+        , (0x6c, Ref "Elem")
+        , (0x6b, Ref "Link")
+        , (0x6a, Ref "Id")
+        ]
+
     sectCustom w = do
       name <- lstr
-      when (name /= "dfn") $ bad $ "unknown custom section: " ++ name
-      s <- remainder
-      pure w { dfnExports = read $ B8.unpack s }
+      case name of
+        "dfn" -> do
+          s <- remainder
+          pure w { dfnExports = read $ B8.unpack s }
+        "types" -> do
+          t <- rep varuint32 martinFuncType
+          pure w { martinTypes = t }
+        "typeMap" -> do
+          tm <- rep varuint32 $ (,) <$> varuint32 <*> varuint32
+          pure w { martinTypeMap = tm }
+        _ -> bad $ "unknown custom section: " ++ name
 
     codeBlock :: ByteParser [WasmOp]
     codeBlock = do
@@ -315,4 +349,8 @@ wasm = do
   else sect emptyWasm  -- Sections.
 
 parseWasm :: B8.ByteString -> Either String Wasm
-parseWasm = byteParse wasm
+parseWasm b = do
+  w <- byteParse wasm b
+  if not (null $ martinTypeMap w) then
+    pure w { dfnExports = (\(f, t) -> (fst (exports w !! f), martinTypes w !! t)) <$> martinTypeMap w }
+  else pure w

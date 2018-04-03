@@ -1,6 +1,6 @@
 {-# LANGUAGE NamedFieldPuns #-}
 
-module Hero (Wasm, HeroVM, parseWasm,
+module Hero (Wasm(dfnExports), HeroVM, parseWasm,
   runWasm, mkHeroVM, setArgsVM,
   setTable,
   globalVM, setGlobalVM,
@@ -219,7 +219,7 @@ runWasm fns s herovm = let
       boolBinOp64 f = run $ step (c:drop 2 stack) where
         (I64_const b:I64_const a:_) = stack
         c = I32_const $ fromIntegral $ fromEnum $ f a b
-  Just fI = lookup s exports
+  fI = fromMaybe (error $ "no such export: " ++ s) $ lookup s exports
   in run herovm { insts = [[Call fI]] }
 
 -- | Builds a HeroVM for given Wasm binary and persistent globals.
