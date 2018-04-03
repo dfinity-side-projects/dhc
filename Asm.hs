@@ -160,6 +160,24 @@ astToIns (AstPlus es ws storage ps ds ts) = ((es, funs, wasmDecl <$> ws, ciTypes
 enc32 :: Int -> [Int]
 enc32 n = (`mod` 256) . (div n) . (256^) <$> [(0 :: Int)..3]
 
+encMartinTypes :: [WasmType] -> [Int]
+encMartinTypes ts = 0x60 : lenc (map f ts) ++ [0] where
+  f I32 = 0x7f
+  f I64 = 0x7e
+  f F32 = 0x7d
+  f F64 = 0x7c
+  f AnyFunc = 0x70
+  f (Ref "Actor") = 0x6f
+  f (Ref "Port") = 0x6e
+  f (Ref "Databuf") = 0x6d
+  f (Ref "Elem") = 0x6c
+  f (Ref "Link") = 0x6b
+  f (Ref "Id") = 0x6a
+  f _ = error "bad type"
+
+encMartinTM :: Int -> Int -> [Int]
+encMartinTM f t = leb128 f ++ leb128 t
+
 insToBin :: Boost -> (GlobalTable, [(String, [Ins])]) -> DfnWasm
 insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), storeCount), gmachine) = DfnWasm
   { legacyArities = ((\s -> (s, fst $ getGlobal s)) <$> exs)
@@ -167,6 +185,11 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
   } where
   wasm = concat
     [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
+
+    -- Custom sections for Martin's Primea.
+    , sectCustom "types" $ encMartinTypes . snd <$> wrapme
+    , sectCustom "typeMap" $ zipWith encMartinTM [0..length wrapme - 1] [0..]
+
     , sect 1 $ uncurry encSig . snd <$> BM.assocs typeMap  -- Type section.
     , sect 2 $ importFun <$> imps  -- Import section.
     , sect 3 $ pure . fst . fst . snd <$> wasmFuns  -- Function section.
@@ -180,14 +203,15 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
       -- Global stores.
       ++ replicate storeCount [encType I32, 1, 0x41, 0, 0xb]
     , sect 7 $  -- Export section.
+      -- The "wdecl" functions are exported verbatim.
+      [exportFun s ('@':s) | (s, _) <- wrapme] ++
       [ encStr "memory" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
       , encStr "table" ++ [1, 0]  -- 1 = external_kind Table, 0 = memory index.
+      --, exportFun "#main" "#main"
       , exportFun "#main" "#main"
-      ]
+      ] ++
       -- The "contract" functions are exported with "_" prepended.
-      ++ [exportFun ('_':s) s | s <- exs]
-      -- The "wdecl" functions are exported verbatim.
-      ++ [exportFun s ('@':s) | (s, _) <- wrapme]
+      [exportFun ('_':s) s | s <- exs]
     , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
     , sect 11 $ encStrConsts <$> M.assocs strConsts  -- Data section.
     , 0 : lenc (encStr "dfn" ++ (ord <$> show wrapme))  -- Custom section.
@@ -454,6 +478,7 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
     ]
   wdeclIn _ _ = error "TODO"
   sect t xs = t : lenc (varlen xs ++ concat xs)
+  sectCustom s xs = 0 : lenc (encStr s ++ varlen xs ++ concat xs)
   encStr s = lenc $ ord <$> s
   encProcedure ((_, 0), body) = lenc $ 0:concatMap encWasmOp body
   encProcedure ((_, locCount), body) = lenc $ ([1, locCount, encType I32] ++) $ concatMap encWasmOp body
