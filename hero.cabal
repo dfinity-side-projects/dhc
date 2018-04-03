@@ -17,10 +17,13 @@ library
   build-depends:
     base,
     bytestring,
+    containers,
+    dhc,
     parsec
   default-language:
     Haskell2010
   exposed-modules:
+    Hero
     Network.DFINITY.Parse
   ghc-options:
     -O2
@@ -31,6 +34,7 @@ executable hero
     base,
     bytestring,
     containers,
+    dhc,
     parsec
   default-language:
     Haskell2010
