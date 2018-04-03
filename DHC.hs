@@ -833,7 +833,7 @@ inferType
   :: (String -> String -> Either String Type)
   -> Globals
   -> [(String, Ast)]
-  -- | Returns types of definitions and storage maps.
+  -- Returns types of definitions and storage maps.
   -> Either String ([(String, (QualType, Ast))], Map String Type)
 inferType findExport globs ds = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJust $ lookup k ds))) sortedDefs where
   -- Groups of definitions, sorted in the order we should infer their types.

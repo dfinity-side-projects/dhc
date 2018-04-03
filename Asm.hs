@@ -851,7 +851,7 @@ compile storage ps d = runState (mk1 storage ps d) $ CompilerState [] [] []
 
 mk1 :: [String] -> [String] -> Ast -> State CompilerState [Ins]
 mk1 storage pglobals (Ast ast) = case ast of
-  -- | Thanks to lambda lifting, `Lam` can only occur at the top level.
+  -- Thanks to lambda lifting, `Lam` can only occur at the top level.
   Lam as b -> do
     putBindings $ zip as [0..]
     (++ [UpdatePop $ length as, Eval]) <$> rec b

@@ -23,7 +23,11 @@ library
     Haskell2010
   exposed-modules:
     Asm
+    Ast
+    Boost
     DHC
+    Std
+    WasmOp
   ghc-options:
     -O2
     -Wall
