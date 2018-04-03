@@ -27,7 +27,7 @@ putStr:(a,n) => { Haste.sysPutStr(a,n) } }}).then(x => {
 expo = x.instance.exports;
 dv = new DataView(expo.memory.buffer);
 document.getElementById('out').innerHTML ="";
-expo['#main']()});
+expo['main']()});
 }
 </script>
 <script src="dhcdemo.js">

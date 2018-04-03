@@ -284,7 +284,7 @@ runDemo src = case hsToWasm demoBoost (\_ _ -> Nothing) src of
   Left err -> error err
   Right (DfnWasm _ ints) -> let
     Right wasm = parseWasm $ B.pack $ fromIntegral <$> ints
-    in stateVM . snd <$> (runWasm syscall "#main" $ mkHeroVM "" wasm [])
+    in stateVM . snd <$> (runWasm syscall "main" $ mkHeroVM "" wasm [])
   where
   syscall ("system", "putStr") vm [I32_const ptr, I32_const len] = pure
     $ putStateVM (stateVM vm ++
@@ -312,7 +312,7 @@ runAltWeb src = case hsToWasm altWebBoost (\_ _ -> Nothing) src of
   Left err -> error err
   Right (DfnWasm _ ints) -> let
     Right wasm = parseWasm $ B.pack $ fromIntegral <$> ints
-    in stateVM . snd <$> (runWasm altWebSys "#main" $ mkHeroVM "" wasm [])
+    in stateVM . snd <$> (runWasm altWebSys "main" $ mkHeroVM "" wasm [])
 
 altWebSys :: (String, String) -> HeroVM String -> [WasmOp] -> IO (HeroVM String)
 altWebSys ("dhc", "system") vm [I32_const n, I32_const sp, I32_const hp]
