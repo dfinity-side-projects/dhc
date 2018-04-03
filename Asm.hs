@@ -207,14 +207,12 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
       [exportFun s ('@':s) | (s, _) <- wrapme] ++
       [ encStr "memory" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
       , encStr "table" ++ [1, 0]  -- 1 = external_kind Table, 0 = memory index.
-      --, exportFun "#main" "#main"
-      , exportFun "#main" "#main"
+      , exportFun "main" "#main"
       ] ++
       -- The "contract" functions are exported with "_" prepended.
       [exportFun ('_':s) s | s <- exs]
     , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
     , sect 11 $ encStrConsts <$> M.assocs strConsts  -- Data section.
-    , 0 : lenc (encStr "dfn" ++ (ord <$> show wrapme))  -- Custom section.
     ]
   encStrConsts (s, offset) = concat
     [ [0, 0x41] ++ leb128 offset ++ [0xb]
