@@ -346,5 +346,8 @@ parseWasm :: B8.ByteString -> Either String Wasm
 parseWasm b = do
   w <- byteParse wasm b
   if not (null $ martinTypeMap w) then
-    pure w { dfnExports = (\(f, t) -> (fst (exports w !! f), martinTypes w !! t)) <$> martinTypeMap w }
+    pure w { dfnExports = (\(f, t) -> (fromJust $ lookup (f + length (imports w)) (swp <$> exports w), martinTypes w !! t)) <$> martinTypeMap w }
   else pure w
+
+swp :: (a, b) -> (b, a)
+swp (a, b) = (b, a)
