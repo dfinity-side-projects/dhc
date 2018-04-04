@@ -3,6 +3,7 @@
 {-# LANGUAGE PackageImports #-}
 module Asm
   ( hsToWasm
+  , hsToWasmLegacy
   , Ins(..)
   , DfnWasm(..)
   , WasmType(Ref)  -- Re-export from WasmOp.
@@ -109,8 +110,13 @@ data DfnWasm = DfnWasm
   , wasmBinary :: [Int]
   }
 
-hsToWasm :: Boost -> ExternType -> String -> Either String DfnWasm
-hsToWasm boost ext prog = insToBin b . astToIns <$> hsToAst b ext prog where
+hsToWasm :: Boost -> String -> Either String DfnWasm
+hsToWasm boost s = insToBin b . astToIns <$> hsToAst b ext s where
+  ext _ _ = Nothing
+  b = stdBoost <> boost
+
+hsToWasmLegacy :: Boost -> ExternType -> String -> Either String DfnWasm
+hsToWasmLegacy boost ext s = insToBin b . astToIns <$> hsToAst b ext s where
   b = stdBoost <> boost
 
 hsToIns :: Boost -> ExternType -> String -> Either String (GlobalTable, [(String, [Ins])])
@@ -175,29 +181,28 @@ encMartinTypes ts = 0x60 : lenc (map f ts) ++ [0] where
   f (Ref "Id") = 0x6a
   f _ = error "bad type"
 
-encMartinTM :: Int -> Int -> [Int]
-encMartinTM f t = leb128 f ++ leb128 t
-
 insToBin :: Boost -> (GlobalTable, [(String, [Ins])]) -> DfnWasm
 insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), storeCount), gmachine) = DfnWasm
   { legacyArities = ((\s -> (s, fst $ getGlobal s)) <$> exs)
   , wasmBinary = wasm
   } where
+  encMartinTM :: String -> Int -> [Int]
+  encMartinTM f t = leb128 (wasmFunNo ('@':f) - length imps) ++ leb128 t
   wasm = concat
     [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
 
     -- Custom sections for Martin's Primea.
     , sectCustom "types" $ encMartinTypes . snd <$> wrapme
-    , sectCustom "typeMap" $ zipWith encMartinTM [0..length wrapme - 1] [0..]
+    , sectCustom "typeMap" $ zipWith encMartinTM (fst <$> wrapme) [0..]
 
     , sect 1 $ uncurry encSig . snd <$> BM.assocs typeMap  -- Type section.
     , sect 2 $ importFun <$> imps  -- Import section.
     , sect 3 $ pure . fst . fst . snd <$> wasmFuns  -- Function section.
     , sect 4 [[encType AnyFunc, 0] ++ leb128 256]  -- Table section (0 = no-maximum).
-    , sect 5 [[0, nPages]]  -- Memory section (0 = no-maximum).
+    , sect 5 [0 : leb128 nPages]  -- Memory section (0 = no-maximum).
     , sect 6 $  -- Global section (1 = mutable).
-      [ [encType I32, 1, 0x41] ++ leb128 (65536*nPages - 4) ++ [0xb]  -- SP
-      , [encType I32, 1, 0x41] ++ leb128 hp0 ++ [0xb]  -- HP
+      [ [encType I32, 1, 0x41] ++ sleb128 (65536*nPages - 4) ++ [0xb]  -- SP
+      , [encType I32, 1, 0x41] ++ sleb128 hp0 ++ [0xb]  -- HP
       , [encType I32, 1, 0x41, 0, 0xb]  -- BP
       ]
       -- Global stores.
@@ -213,9 +218,11 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
       [exportFun ('_':s) s | s <- exs]
     , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
     , sect 11 $ encStrConsts <$> M.assocs strConsts  -- Data section.
+    , sectCustom "dfndbg" [ord <$> show (sort $ swp <$> (M.assocs $ wasmFunMap))]
     ]
+  swp (a, b) = (b, a)
   encStrConsts (s, offset) = concat
-    [ [0, 0x41] ++ leb128 offset ++ [0xb]
+    [ [0, 0x41] ++ sleb128 offset ++ [0xb]
     , leb128 $ 16 + sbslen s
     , [fromEnum TagString, 0, 0, 0]
     , enc32 $ offset + 16
@@ -827,8 +834,7 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
       ]
 
 leb128 :: Int -> [Int]
-leb128 n | n < 64    = [n]
-         | n < 128   = [128 + n, 0]
+leb128 n | n < 128   = [n]
          | otherwise = 128 + (n `mod` 128) : leb128 (n `div` 128)
 
 -- TODO: FIX!

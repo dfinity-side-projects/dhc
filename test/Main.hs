@@ -280,7 +280,7 @@ demoTests = (\(result, source) -> TestCase $ runDemo source >>= assertEqual sour
 --
 --   main = putStr =<< runDemo =<< getContents
 runDemo :: String -> IO String
-runDemo src = case hsToWasm demoBoost (\_ _ -> Nothing) src of
+runDemo src = case hsToWasm demoBoost src of
   Left err -> error err
   Right (DfnWasm _ ints) -> let
     Right wasm = parseWasm $ B.pack $ fromIntegral <$> ints
@@ -308,7 +308,7 @@ altWebBoost = Boost [(("dhc", "system"), ([I32, I32, I32], []))]
   where io = TApp (TC "IO")
 
 runAltWeb :: String -> IO String
-runAltWeb src = case hsToWasm altWebBoost (\_ _ -> Nothing) src of
+runAltWeb src = case hsToWasm altWebBoost src of
   Left err -> error err
   Right (DfnWasm _ ints) -> let
     Right wasm = parseWasm $ B.pack $ fromIntegral <$> ints
