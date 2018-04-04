@@ -98,16 +98,21 @@ toplevels = foldl' (flip ($)) (HsProgram [] []) <$> between (want "{") (want "}"
       t = foldl' TApp (TC s) $ GV <$> args
       typeCon = do
         con <- upperVarStr
-        ts <- many typeAtom
+        ts <- many atype
         pure (con, foldr (:->) t ts)
     typeCons <- typeCon `sepBy` want "|"
     pure $ addData [(con, (Just (i, arityFromType typ), typ))
       | (i, (con, typ)) <- zip [0..] typeCons]
-  typeExpr = foldl1' TApp <$> many1 typeAtom
-  typeAtom = (TC <$> upperVarStr)
+  typeExpr = foldr1 (:->) <$> btype `sepBy` want "->"
+  btype = foldl1' TApp <$> many1 atype
+  -- Unsupported: [] (->) (,{,}) constructors.
+  atype = (TC <$> upperVarStr)
     <|> (GV <$> lowerVarStr)
-    <|> between (want "(") (want ")") typeExpr
     <|> (TApp (TC "[]") <$> between (want "[") (want "]") typeExpr)
+    <|> (parenType <$> between (want "(") (want ")") (typeExpr `sepBy` want ","))
+  parenType []  = TC "()"
+  parenType [x] = x
+  parenType xs  = foldr1 TApp $ TC "()":xs
   sc = try (do
     (fun:args) <- scOp <|> many1 lowerVarStr
     void $ want "="

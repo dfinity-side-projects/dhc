@@ -470,9 +470,17 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
     ]
     -- Input arguments are local variables.
     -- We move these to our stack in reverse order.
-    ++ concat (reverse $ zipWith wdeclIn (refToI32 <$> ins) [0..])
-    ++ [Call $ wasmFunNo f]
-    ++ [End]
+    ++ concat (reverse $ zipWith wdeclIn (refToI32 <$> ins) [0..]) ++
+    [ Call $ wasmFunNo f
+    -- We restore the stack to its original state so that our synchronous
+    -- test variant of Primea works.
+    -- In the real Primea, calls are asynchronous and we could skip this.
+    , Get_global sp  -- sp = sp + 4
+    , I32_const 4
+    , I32_add
+    , Set_global sp
+    , End
+    ]
   wdeclIn I64 i =
     [ Get_local i
     , Call $ wasmFunNo "#pushint"
@@ -702,26 +710,10 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
       , Set_global sp
       ]
     PushCallIndirect ty ->
-      [ Get_global sp  -- [sp] = hp
-      , Get_global hp
-      , I32_store 2 0
       -- 3 arguments: slot, argument tuple, #RealWorld.
-      , Get_global hp  -- [hp] = TagGlobal | (3 << 8)
-      , I32_const $ fromIntegral $ fromEnum TagGlobal + 256*3
-      , I32_store 2 0
-      , Get_global hp  -- [hp + 4] = wrapCallIndirect (show ty)
-      , I32_const 4
-      , I32_add
+      [ I32_const $ fromIntegral $ fromEnum TagGlobal + 256*3
       , I32_const $ fromIntegral $ wasmFunNo (show ty) - firstPrim
-      , I32_store 2 0
-      , Get_global hp  -- hp = hp + 16
-      , I32_const 16
-      , I32_add
-      , Set_global hp
-      , Get_global sp  -- sp = sp - 4
-      , I32_const 4
-      , I32_sub
-      , Set_global sp
+      , Call $ wasmFunNo "#pushglobal"
       ]
     Slide 0 -> []
     Slide n ->
@@ -1037,8 +1029,8 @@ pushGlobalAsm =
   , I32_add
   , Get_local 1
   , I32_store 2 0
-  , Get_global hp  -- hp = hp + 16
-  , I32_const 16
+  , Get_global hp  -- hp = hp + 8
+  , I32_const 8
   , I32_add
   , Set_global hp
   , Get_global sp  -- sp = sp - 4
