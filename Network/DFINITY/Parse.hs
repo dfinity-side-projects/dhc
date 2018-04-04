@@ -64,6 +64,9 @@ byteParse :: ByteParser a -> ByteString -> Either String a
 byteParse (ByteParser f) s = f s >>= (\(w, t) ->
   if B8.null t then Right w else Left "expected EOF")
 
+remainder :: ByteParser ByteString
+remainder = ByteParser $ \s -> Right (s, "")
+
 initLocal :: WasmType -> WasmOp
 initLocal I32 = I32_const 0
 initLocal _ = error "TODO"
@@ -269,6 +272,7 @@ wasm = do
         "typeMap" -> do
           tm <- rep varuint32 $ (,) <$> varuint32 <*> varuint32
           pure w { martinTypeMap = tm }
+        "dfndbg" -> remainder >> pure w
         _ -> bad $ "unknown custom section: " ++ name
 
     codeBlock :: ByteParser [WasmOp]
