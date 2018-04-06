@@ -78,6 +78,7 @@ fixity o = fromMaybe (LAssoc, 9) $ M.lookup o standardFixities
 data HsProgram = HsProgram
   { supers :: [(String, Ast)]
   , datas :: [(String, (Maybe (Int, Int), Type))]
+  , classes :: [(String, (Type, [(String, String)]))]
   } deriving Show
 
 addSuper :: (String, Ast) -> HsProgram -> HsProgram
@@ -86,47 +87,63 @@ addSuper sc p = p { supers = sc:supers p }
 addData :: [(String, (Maybe (Int, Int), Type))] -> HsProgram -> HsProgram
 addData xs p = p { datas = xs ++ datas p }
 
+addClass :: [(String, (Type, [(String, String)]))] -> HsProgram -> HsProgram
+addClass xs p = p { classes = xs ++ classes p }
+
 toplevels :: Parser HsProgram
-toplevels = foldl' (flip ($)) (HsProgram [] []) <$> between (want "{") (want "}") (topLevel `sepBy` want ";") where
-  topLevel = dataDecl <|> sc
+toplevels = foldl' (flip ($)) (HsProgram [] [] []) <$> topDecls where
+  topDecls = between (want "{") (want "}") (topDecl `sepBy` want ";")
+  topDecl = dataDecl <|> classDecl <|> sc
+  classDecl = do
+    void $ want "class"
+    s <- con
+    t <- tyVar
+    void $ want "where"
+    ms <- between (want "{") (want "}") $ cDecl `sepBy` want ";"
+    pure $ addClass $ second (flip (,) [(s, t)]) <$> ms
+  cDecl = do
+    v <- var
+    void $ want "::"
+    t <- typeExpr
+    pure (v, t)
   dataDecl = do
     void $ want "data"
-    s <- upperVarStr
-    args <- many lowerVarStr
+    s <- con
+    args <- many tyVar
     void $ want "="
     let
       t = foldl' TApp (TC s) $ GV <$> args
       typeCon = do
-        con <- upperVarStr
+        c <- con
         ts <- many atype
-        pure (con, foldr (:->) t ts)
+        pure (c, foldr (:->) t ts)
     typeCons <- typeCon `sepBy` want "|"
-    pure $ addData [(con, (Just (i, arityFromType typ), typ))
-      | (i, (con, typ)) <- zip [0..] typeCons]
+    pure $ addData [(c, (Just (i, arityFromType typ), typ))
+      | (i, (c, typ)) <- zip [0..] typeCons]
   typeExpr = foldr1 (:->) <$> btype `sepBy` want "->"
   btype = foldl1' TApp <$> many1 atype
   -- Unsupported: [] (->) (,{,}) constructors.
-  atype = (TC <$> upperVarStr)
-    <|> (GV <$> lowerVarStr)
+  atype = (TC <$> con)
+    <|> (GV <$> tyVar)
     <|> (TApp (TC "[]") <$> between (want "[") (want "]") typeExpr)
     <|> (parenType <$> between (want "(") (want ")") (typeExpr `sepBy` want ","))
   parenType []  = TC "()"
   parenType [x] = x
   parenType xs  = foldr1 TApp $ TC "()":xs
   sc = try (do
-    (fun:args) <- scOp <|> many1 lowerVarStr
+    (fun:args) <- scOp <|> many1 var
     void $ want "="
     addSuper . (,) fun . Ast . Lam args <$> expr) <|> pure id
   scOp = try $ do
-    l <- lowerVarStr
+    l <- var
     op <- varSym
-    r <- lowerVarStr
+    r <- var
     pure [op, l, r]
   expr = caseExpr <|> letExpr <|> doExpr <|> bin 0 False
   bin 10 _ = molecule
   bin prec isR = rec False =<< bin (prec + 1) False where
     rec isL m = (try $ do
-      o <- varSym <|> between (want "`") (want "`") varStr
+      o <- varSym <|> between (want "`") (want "`") var
       let (a, p) = fixity o
       when (p /= prec) $ fail ""
       case a of
@@ -143,7 +160,7 @@ toplevels = foldl' (flip ($)) (HsProgram [] []) <$> between (want "{") (want "}"
           pure $ Ast $ Ast (Ast (Var o) :@ m) :@ n
       ) <|> pure m
   letDefn = do
-    s <- varStr
+    s <- var
     void $ want "="
     ast <- expr
     pure (s, ast)
@@ -180,13 +197,15 @@ toplevels = foldl' (flip ($)) (HsProgram [] []) <$> between (want "{") (want "}"
     void $ want "->"
     x <- expr
     pure $ Just (p, x)) <|> pure Nothing
-  lambda = fmap Ast $ Lam <$> between (want "\\") (want "->") (many1 varStr) <*> expr
+  -- TODO: Introduce patterns to deal with _.
+  lambda = fmap Ast $ Lam <$> between (want "\\") (want "->") (many1 (var <|> want "_")) <*> expr
   molecule = lambda <|> foldl1' ((Ast .) . (:@)) <$> many1 atom
-  var = Ast . Var <$> varStr
-  atom = preOp <|> tup <|> call <|> qvar <|> var <|> num <|> str
-    <|> lis <|> enumLis
-  preOp = try $ Ast . Var <$> between (want "(") (want ")") varSym
-  tup = do
+  atom = tup <|> call <|> qvar
+    <|> (Ast . Var <$> want "_")
+    <|> (Ast . Var <$> var)
+    <|> (Ast . Var <$> con)
+    <|> num <|> str <|> lis <|> enumLis
+  tup = try $ do
     xs <- between (want "(") (want ")") $ expr `sepBy` want ","
     pure $ case xs of  -- Abuse Pack to represent tuples.
       [] -> Ast $ Pack 0 0
@@ -220,24 +239,32 @@ toplevels = foldl' (flip ($)) (HsProgram [] []) <$> between (want "{") (want "}"
     (t, s) <- tok
     when (t /= LexString) $ fail ""
     pure $ Ast $ S $ sbs s
-  varSym = do
+  con = try $ do
     (t, s) <- tok
-    when (t /= LexSymbol || s `elem` ["..", "::", "=", "|", "<-", "->", "=>"]) $ fail ""
+    when (t /= LexCon) $ fail ""
     pure s
-  lowerVarStr = try $ do
-    s <- varStr
-    when (isUpper $ head s) $ fail "first letter must be lowercase"
-    pure s
-  upperVarStr = try $ do
-    s <- varStr
-    when (isLower $ head s) $ fail "first letter must be uppercase"
-    pure s
+  tyVar = varId
 
-varStr :: Parser String
-varStr = try $ do
+varId :: Parser String
+varId = try $ do
   (t, s) <- tok
-  when (t /= LexVar || s `elem` words "case of let where do in call") $ fail ""
+  when (t /= LexVar) $ fail ""
   pure s
+
+varSym :: Parser String
+varSym = do
+  (t, s) <- tok
+  when (t /= LexVarSym) $ fail ""
+  pure s
+
+var :: Parser String
+var = varId <|> (try $ between (want "(") (want ")") varSym)
+
+reservedIds :: [String]
+reservedIds = words "class data default deriving do else foreign if import in infix infixl infixr instance let module newtype of then type where _"
+
+reservedOps :: [String]
+reservedOps = ["..", "::", "=", "|", "<-", "->", "=>"]
 
 want :: String -> Parser String
 want t = expect <|> autoCloseBrace where
@@ -256,7 +283,7 @@ want t = expect <|> autoCloseBrace where
     unless (ty /= LexString && s == t) $ fail $ "expected " ++ t
     pure s
 
-data LexemeType = LexString | LexNumber | LexVar | LexSpecial | LexSymbol | LexQual | LexEOF deriving (Eq, Show)
+data LexemeType = LexString | LexNumber | LexReserved | LexVar | LexCon | LexSpecial | LexVarSym | LexQual | LexEOF deriving (Eq, Show)
 type Lexeme = (LexemeType, String)
 
 -- | Layout-aware lexer.
@@ -313,25 +340,34 @@ tok = do
 
 rawTok :: Parser Lexeme
 rawTok = do
-  r <- symbol <|> ident <|> special <|> str
+  r <- symbol <|> qId <|> num <|> special <|> str
   pure r
   where
-  ident = do
-    s <- many1 (alphaNum <|> char '_')
+  hashId = try $ do  -- TODO: Deprecate after removing legacy contracts. Identifiers should not start with digits. Also, the case of the first letter matters.
+    s <- replicateM 64 alphaNum
+    pure (LexVar, s)
+  lowId = do
+    s <- (:) <$> (lower <|> char '_') <*> many (alphaNum <|> oneOf "_'")
+    when (s `elem` ["let", "where", "do", "of"]) $ do
+      (_, is) <- getState
+      putState (AwaitBrace, is)
+    pure (if s `elem` reservedIds then LexReserved else LexVar, s)
+  uppId = do
+    s <- (:) <$> upper <*> many (alphaNum <|> oneOf "_'")
+    pure (LexCon, s)
+  qId = do  -- TODO: Rewrite after removing legacy contracts.
+    r@(_, m) <- hashId <|> lowId <|> uppId
     (try $ do
       void $ char '.'
-      v <- many1 (alphaNum <|> char '_')
-      pure (LexQual, s ++ '.':v)) <|> do
-      when (s `elem` ["let", "where", "do", "of"]) $ do
-        (_, is) <- getState
-        putState (AwaitBrace, is)
-      -- Allowing hashes to refer to contracts means identifiers can start
-      -- with digits. We may want to change this.
-      if all isDigit s
-      then pure (LexNumber, s)
-      else pure (LexVar, s)
+      (_, v) <- lowId <|> uppId
+      pure (LexQual, m ++ '.':v)) <|> pure r
+  num = do
+    s <- many1 digit
+    pure (LexNumber, s)
   special = (,) LexSpecial <$> foldl1' (<|>) (string . pure <$> "(),;[]`{}")
-  symbol = (,) LexSymbol <$> many1 (oneOf "!#$%&*+./<=>?@\\^|-~:")
+  symbol = do
+    s <- many1 (oneOf "!#$%&*+./<=>?@\\^|-~:")
+    pure (if s `elem` reservedOps then LexReserved else LexVarSym, s)
   str = do
     void $ char '"'
     s <- many $ (char '\\' >> escapes) <|> noneOf "\""
@@ -368,13 +404,13 @@ data AstPlus = AstPlus
 contract :: Parser AstPlus
 contract = do
   es <- option [] $ try $ want "contract" >>
-    (between (want "(") (want ")") $ varStr `sepBy` want ",")
+    (between (want "(") (want ")") $ var `sepBy` want ",")
   ws <- option [] $ try $ want "wdecl" >>
-    (between (want "(") (want ")") $ varStr `sepBy` want ",")
+    (between (want "(") (want ")") $ var `sepBy` want ",")
   ms <- option [] $ try $ want "storage" >>
-    (between (want "(") (want ")") $ varStr `sepBy` want ",")
+    (between (want "(") (want ")") $ var `sepBy` want ",")
   ps <- option [] $ try $ want "store" >>
-    (between (want "(") (want ")") $ varStr `sepBy` want ",")
+    (between (want "(") (want ")") $ var `sepBy` want ",")
   putState (AwaitBrace, [])
   p <- toplevels
   when (isNothing $ mapM (`lookup` supers p) es) $ fail "bad exports"
@@ -536,17 +572,24 @@ instantiate (ty, qs) = do
 generalize
   :: Map String Type      -- Solution found through type unification.
   -> Map String [String]  -- Context for qualified types.
-  -> AAst Type
-  -> (QualType, Ast)
-generalize soln ctx a0@(AAst t0 _) = ((t, qs), dictSolve dsoln soln ast) where
-  (t, qs) = runState (generalize' ctx $ typeSolve soln t0) []
+  -> (String, AAst Type)
+  -> (String, (QualType, Ast))
+generalize soln ctx (fun, a0@(AAst t0 _)) = (fun, (qt, a1)) where
+  qt@(_, qs) = runState (generalize' ctx $ typeSolve soln t0) []
   -- TODO: Here, and elsewhere: need to sort qs?
   dsoln = zip qs $ ("#d" ++) . show <$> [(0::Int)..]
   -- TODO: May be useful to preserve type annotations?
+  a1 = dictSolve dsoln soln ast
+  dvars = snd <$> dsoln
   ast = case deAnn a0 of
-    Ast (Lam ss body) -> Ast $ Lam (dvars ++ ss) body
-    body -> Ast $ Lam dvars body
-    where dvars = snd <$> dsoln
+    Ast (Lam ss body) -> Ast $ Lam (dvars ++ ss) $ expandFun body
+    body -> Ast $ Lam dvars $ expandFun body
+  -- TODO: Take shadowing into account.
+  expandFun
+    | null dvars = id
+    | otherwise  = ffix $ \h (Ast a) -> Ast $ case a of
+      Var v | v == fun -> foldl' (\x d -> (Ast x :@ Ast (Var d))) a dvars
+      _ -> h a
 
 generalize' :: Map String [String] -> Type -> State [(String, String)] Type
 generalize' ctx ty = case ty of
@@ -566,8 +609,8 @@ methods = M.fromList
   , ("pure", (a :-> TApp m a, [("Monad", "m")]))
   -- Generates call_indirect ops.
   , ("callSlot", (TC "I32" :-> a :-> TApp (TC "IO") (TC "()"), [("Message", "a")]))
-  , ("set", (TApp (TC "Store") a :-> a :-> io (TC "()"), [("Store", "a")]))
-  , ("get", (TApp (TC "Store") a :-> io a, [("Store", "a")]))
+  , ("set", (TApp (TC "Storage") a :-> a :-> io (TC "()"), [("Store", "a")]))
+  , ("get", (TApp (TC "Storage") a :-> io a, [("Store", "a")]))
   ] where
     a = GV "a"
     b = GV "b"
@@ -632,6 +675,10 @@ dictSolve dsoln soln (Ast ast) = case ast of
         ltai = aVar "list_to_any_instance" @@ rec (Ast $ Placeholder "Store" a)
         lfai = aVar "list_from_any_instance" @@ rec (Ast $ Placeholder "Store" a)
         in Ast (Pack 0 2) @@ ltai @@ lfai
+      TApp (TC "()") (TApp a b) -> let
+        ptai = aVar "pair_to_any_instance" @@ rec (Ast $ Placeholder "Store" a) @@ rec (Ast $ Placeholder "Store" b)
+        pfai = aVar "pair_from_any_instance" @@ rec (Ast $ Placeholder "Store" a) @@ rec (Ast $ Placeholder "Store" b)
+        in Ast (Pack 0 2) @@ ptai @@ pfai
       e -> error $ "BUG! no Store for " ++ show e
     findInstance d t = error $ "BUG! bad class: " ++ show (d, t)
 
@@ -659,6 +706,7 @@ propagate cs t = concat <$> mapM propagateTyCon cs where
     TC "IO" -> Right []
     _ -> Left $ "no Monad instance: " ++ show t
   propagateTyCon "Store" = case t of
+    TApp (TC "()") (TApp a b) -> (++) <$> propagate ["Store"] a <*> propagate ["Store"] b
     TApp (TC "[]") a -> propagate ["Store"] a
     TC "Databuf" -> Right []
     TC "Actor" -> Right []
@@ -747,22 +795,6 @@ unify constraints ctx = execStateT (uni constraints) (M.empty, ctx)
     TV tv    -> [tv]
     _        -> []
 
--- TODO: This has devolved into a table of data constructors. Refactor.
-preludeMinimal :: Globals
-preludeMinimal = M.fromList
-  [ ("False",   (jp 0 0, TC "Bool"))
-  , ("True",    (jp 1 0, TC "Bool"))
-  , ("Nothing", (jp 0 0, TApp (TC "Maybe") a))
-  , ("Just",    (jp 1 1, a :-> TApp (TC "Maybe") a))
-  , ("Left",    (jp 0 1, a :-> TApp (TApp (TC "Either") a) b))
-  , ("Right",   (jp 1 1, b :-> TApp (TApp (TC "Either") a) b))
-  , ("[]",      (jp 0 0, TApp (TC "[]") a))
-  , (":",       (jp 1 2, a :-> TApp (TC "[]") a :-> TApp (TC "[]") a))
-  ] where
-    jp m n = Just (m, n)
-    a = GV "a"
-    b = GV "b"
-
 arityFromType :: Type -> Int
 arityFromType = f 0 where
   f acc (_ :-> r) = f (acc + 1) r
@@ -814,7 +846,14 @@ hsToAst boost ext prog = do
     types = second fst <$> inferred
   pure a { defs = (defs a) { supers = subbedDefs }, funTypes = types }
   where
-    genTypes dataDecls storage ps = preludeMinimal
+    -- List notation is a special case in Haskell.
+    -- This is "data [a] = [] | a : [a]" in spirit.
+    listPresets = M.fromList
+      [ ("[]", (Just (0, 0), TApp (TC "[]") a))
+      , (":",  (Just (1, 2), a :-> TApp (TC "[]") a :-> TApp (TC "[]") a))
+      ] where a = GV "a"
+    genTypes dataDecls storage ps = listPresets
+      `M.union` M.fromList (datas preludeDefs)
       `M.union` M.fromList dataDecls
       `M.union` boostTypes boost
       `M.union` (M.fromList $ storageTypeConstraintHack <$> storage)
@@ -822,7 +861,7 @@ hsToAst boost ext prog = do
     Right preludeDefs = parseDefs $ boostPrelude boost
     showErr = either (Left . show) Right
     storageTypeConstraintHack s = (s, (Nothing, TC "Map" `TApp` TV ('@':s)))
-    storeTypeConstraint s = (s, (Nothing, TC "Store" `TApp` TV ('@':s)))
+    storeTypeConstraint s = (s, (Nothing, TC "Storage" `TApp` TV ('@':s)))
 
 constrainStorage :: Map String Type -> [(String, (QualType, Ast))] -> [(String, (QualType, Ast))]
 constrainStorage cons ds = second (first (first rewriteType)) <$> ds where
@@ -846,16 +885,17 @@ inferType findExport globs ds = foldM inferMutual ([], M.empty) $ map (map (\k -
   inferMutual :: ([(String, (QualType, Ast))], Map String Type) -> [(String, Ast)] -> Either String ([(String, (QualType, Ast))], Map String Type)
   inferMutual (acc, accStorage) grp = do
     (typedAsts, ConState _ cs m) <- buildConstraints $ do
+      let ids = fst <$> grp
       ts <- mapM (gather findExport globs env) $ snd <$> grp
-      when ("main" `elem` (fst <$> grp)) $ do
+      when ("main" `elem` ids) $ do
         r <- newTV
         addConstraint (TV "*main", TApp (TC "IO") r)
       mapM_ addConstraint $ zip tvs $ annOf <$> ts
-      pure ts
+      pure $ zip ids ts
     (soln, ctx) <- unify cs m
     let storageCons = M.filterWithKey (\k _ -> head k == '@') soln
     -- TODO: Look for conflicting storage constraints.
-    pure ((++ acc) $ zip (fst <$> grp) $ generalize soln ctx <$> typedAsts, accStorage `M.union` storageCons)
+    pure ((++ acc) $ generalize soln ctx <$> typedAsts, accStorage `M.union` storageCons)
     where
       annOf (AAst a _) = a
       buildConstraints (Constraints f) = f $ ConState 0 [] M.empty

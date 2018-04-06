@@ -218,32 +218,6 @@ demoCases :: [(String, String)]
 demoCases =
   [ ("Hello, World!\n", "main = putStr \"Hello, World!\\n\"")
   , ("9876543210", "main = putInt 9876543210")
-  , (unlines
-    [ "recursion with fix: 10000"
-    , "5! + (10 + 20 + 30 + 40 + 50) = 270"
-    ], [here|
-factorial n = case n == 0 of True  -> 1
-                             False -> n * factorial2 (n - 1)
-factorial2 n = case n == 0 of True  -> 1
-                              False -> n * factorial (n - 1)
-foldr f n xs = case xs of [] -> n
-                          (a:as) -> f a (foldr f n as)
-uncurry f p = case p of (a, b) -> f a b
-sum = foldr (+) 0
-enumFromTo a b = case a > b of True  -> []
-                               False -> a : enumFromTo (a + 1) b
-map f = foldr (\x xs -> f x:xs) []
-tenTimes x = 10 * x
-f $ x = f x
-f rec n = case n == 0 of True -> 0
-                         False -> rec (n - 1) + 2*n - 1
-main = do
-  putStr "recursion with fix: "
-  let {fixedf = f fixedf} in putInt $ fixedf 100
-  putStr "\n5! + (10 + 20 + 30 + 40 + 50) = "
-  putInt $ uncurry (+) (factorial 5, sum $ map tenTimes [1..5])
-  putStr "\n"
-|])
   , ("314", unlines
     [ "data List x = Nil | Cons x (List x)"
     , "main = f (Cons 3 (Cons 1 (Cons 4 Nil)))"
@@ -271,6 +245,46 @@ main = do
     , "    putInt x"
     , "    pr b"
     ])
+  , ("hello", [here|
+f $ x = f x
+xs =  [(271828, "l"), (318310, "he"), (618034, "o")]
+main = do
+  putStr $ fromJust $ lookup 318310 xs
+  putStr $ fromJust $ lookup 271828 xs
+  putStr $ fromJust $ lookup 271828 xs
+  putStr $ fromJust $ lookup 618034 xs
+lookup n xs = case xs of
+  [] -> Nothing
+  ((k, v):rest) -> case k == n of
+    True -> Just v
+    False -> lookup n rest
+|])
+  , (unlines
+    [ "recursion with fix: 10000"
+    , "5! + (10 + 20 + 30 + 40 + 50) = 270"
+    ], [here|
+factorial n = case n == 0 of True  -> 1
+                             False -> n * factorial2 (n - 1)
+factorial2 n = case n == 0 of True  -> 1
+                              False -> n * factorial (n - 1)
+foldr f n xs = case xs of [] -> n
+                          (a:as) -> f a (foldr f n as)
+uncurry f p = case p of (a, b) -> f a b
+sum = foldr (+) 0
+enumFromTo a b = case a > b of True  -> []
+                               False -> a : enumFromTo (a + 1) b
+map f = foldr (\x xs -> f x:xs) []
+tenTimes x = 10 * x
+f $ x = f x
+f rec n = case n == 0 of True -> 0
+                         False -> rec (n - 1) + 2*n - 1
+main = do
+  putStr "recursion with fix: "
+  let {fixedf = f fixedf} in putInt $ fixedf 100
+  putStr "\n5! + (10 + 20 + 30 + 40 + 50) = "
+  putInt $ uncurry (+) (factorial 5, sum $ map tenTimes [1..5])
+  putStr "\n"
+|])
   ]
 
 demoTests :: [Test]

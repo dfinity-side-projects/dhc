@@ -13,7 +13,10 @@ stdBoost = Boost
   []
   -- Prelude functions.
   (unlines
-  [ "fst p = case p of (x, y) -> x"
+  [ "data Bool = False | True"
+  , "data Maybe a = Nothing | Just a"
+  , "data Either a b = Left a | Right b"
+  , "fst p = case p of (x, y) -> x"
   , "snd p = case p of (x, y) -> y"
   , "f . g = \\x -> f (g x)"
   , "flip f = \\x y -> f y x"

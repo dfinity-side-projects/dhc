@@ -2,11 +2,12 @@
 -- WebAssembly which is dumped to standard output.
 
 import qualified Data.ByteString as B
-import WebDemo
+import Asm
+import Demo
 
 main :: IO ()
 main = do
   s <- getContents
-  case hsToWasmWebDemo s of
+  case hsToWasm demoBoost s of
     Left err -> error err
-    Right asm -> B.putStr $ B.pack $ fromIntegral <$> asm
+    Right bin -> B.putStr $ B.pack $ fromIntegral <$> wasmBinary bin
