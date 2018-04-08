@@ -111,16 +111,28 @@ data DfnWasm = DfnWasm
   }
 
 hsToWasm :: Boost -> String -> Either String DfnWasm
-hsToWasm boost s = insToBin b . astToIns <$> hsToAst b ext s where
+hsToWasm boost s = insToBin b . astToIns <$> hsToAst b ext qq s where
   ext _ _ = Nothing
   b = stdBoost <> boost
+  qq "here" h = Right h
+  qq "wasm" prog = case hsToWasm boost prog of
+    Left err -> Left err
+    Right (DfnWasm _ ints) -> Right $ chr <$> ints
+  qq _ _ = Left "bad scheme"
 
 hsToWasmLegacy :: Boost -> ExternType -> String -> Either String DfnWasm
-hsToWasmLegacy boost ext s = insToBin b . astToIns <$> hsToAst b ext s where
+hsToWasmLegacy boost ext s = insToBin b . astToIns <$> hsToAst b ext qq s where
   b = stdBoost <> boost
+  qq "here" h = Right h
+  qq "wasm" prog = case hsToWasmLegacy boost ext prog of
+    Left err -> Left err
+    Right (DfnWasm _ ints) -> Right $ chr <$> ints
+  qq _ _ = Left "bad scheme"
 
 hsToIns :: Boost -> ExternType -> String -> Either String (GlobalTable, [(String, [Ins])])
-hsToIns boost ext prog = astToIns <$> hsToAst (stdBoost <> boost) ext prog where
+hsToIns boost ext s = astToIns <$> hsToAst (stdBoost <> boost) ext qq s where
+  qq "here" h = Right h
+  qq _ _ = Left "bad scheme"
 
 data CompilerState = CompilerState
   -- Bindings are local. They start empty and finish empty.

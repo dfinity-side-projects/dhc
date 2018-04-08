@@ -42,7 +42,7 @@ type ExternType = String -> String -> Maybe Int
 
 data LayoutState = IndentAgain Int | LineStart | LineMiddle | AwaitBrace | Boilerplate deriving (Eq, Show)
 type Parser = ParsecT String (LayoutState, [Int])
-  (Reader (String -> String -> Maybe String))
+  (Reader (String -> String -> Either String String))
 
 program :: Parser HsProgram
 program = do
@@ -351,7 +351,7 @@ rawTok = do
     q <- try $ between (char '[') (char '|') $ many alphaNum
     s <- manyTill anyChar (try $ string "|]") <|> (many anyChar >> fail "")
     f <- ask
-    maybe (fail "bad quasiquotation type") (pure . (,) LexString) $ f q s
+    either (fail . ("quasiquotation: " ++)) (pure . (,) LexString) $ f q s
   hashId = try $ do  -- TODO: Deprecate after removing legacy contracts. Identifiers should not start with digits. Also, the case of the first letter matters.
     s <- replicateM 64 alphaNum
     pure (LexVar, s)
@@ -433,9 +433,9 @@ qParse :: Parser a
   -> Either ParseError a
 qParse a b c d = runReader (runParserT a b c d) justHere
 
-justHere :: String -> String -> Maybe String
-justHere "here" s = Just s
-justHere _ _ = Nothing
+justHere :: String -> String -> Either String String
+justHere "here" s = Right s
+justHere _ _ = Left "bad scheme"
 
 lexOffside :: String -> Either ParseError [String]
 lexOffside = fmap (fmap snd) <$> qParse tokUntilEOF (AwaitBrace, []) "" where
@@ -852,9 +852,9 @@ getContractExport f _ c v = case f c v of
 boostTypes :: Boost -> Map String (Maybe (Int, Int), Type)
 boostTypes b = M.fromList $ second (((,) Nothing) . fst) <$> boostHs b
 
-hsToAst :: Boost -> ExternType -> String -> Either String AstPlus
-hsToAst boost ext prog = do
-  a@(AstPlus es _ storage _ ds _) <- showErr $ parseContract prog
+hsToAst :: Boost -> ExternType -> (String -> String -> Either String String) -> String -> Either String AstPlus
+hsToAst boost ext qq prog = do
+  a@(AstPlus es _ storage _ ds _) <- showErr $ fmap maybeAddMain $ runReader (runParserT contract (Boilerplate, []) "" prog) qq
   (preStorageInferred, storageCons) <- inferType (getContractExport ext es) (genTypes (datas ds) storage $ stores a) (supers ds ++ supers preludeDefs)
   let
     inferred = constrainStorage storageCons preStorageInferred
