@@ -10,7 +10,9 @@ import Control.Arrow
 import Control.Monad
 #ifdef __HASTE__
 import "mtl" Control.Monad.State
+import "mtl" Control.Monad.Reader
 #else
+import Control.Monad.Reader
 import Control.Monad.State
 import qualified Data.ByteString.Char8 as B
 import Data.ByteString.Short (ShortByteString, toShort)
@@ -39,7 +41,8 @@ sbs = toShort . B.pack
 type ExternType = String -> String -> Maybe Int
 
 data LayoutState = IndentAgain Int | LineStart | LineMiddle | AwaitBrace | Boilerplate deriving (Eq, Show)
-type Parser = Parsec String (LayoutState, [Int])
+type Parser = ParsecT String (LayoutState, [Int])
+  (Reader (String -> String -> Maybe String))
 
 program :: Parser HsProgram
 program = do
@@ -340,9 +343,15 @@ tok = do
 
 rawTok :: Parser Lexeme
 rawTok = do
-  r <- symbol <|> qId <|> num <|> special <|> str
+  r <- oxford <|> symbol <|> qId <|> num <|> special <|> str
   pure r
   where
+  oxford = do
+    -- TODO: Nested quasiquotes.
+    q <- try $ between (char '[') (char '|') $ many alphaNum
+    s <- manyTill anyChar (try $ string "|]") <|> (many anyChar >> fail "")
+    f <- ask
+    maybe (fail "bad quasiquotation type") (pure . (,) LexString) $ f q s
   hashId = try $ do  -- TODO: Deprecate after removing legacy contracts. Identifiers should not start with digits. Also, the case of the first letter matters.
     s <- replicateM 64 alphaNum
     pure (LexVar, s)
@@ -417,8 +426,19 @@ contract = do
   when (isNothing $ mapM (`lookup` supers p) ws) $ fail "bad wdecls"
   pure $ AstPlus es ws ms ps p []
 
+qParse :: Parser a
+  -> (LayoutState, [Int])
+  -> String
+  -> String
+  -> Either ParseError a
+qParse a b c d = runReader (runParserT a b c d) justHere
+
+justHere :: String -> String -> Maybe String
+justHere "here" s = Just s
+justHere _ _ = Nothing
+
 lexOffside :: String -> Either ParseError [String]
-lexOffside = fmap (fmap snd) <$> runParser tokUntilEOF (AwaitBrace, []) "" where
+lexOffside = fmap (fmap snd) <$> qParse tokUntilEOF (AwaitBrace, []) "" where
   tokUntilEOF = do
     t <- tok
     case fst t of
@@ -426,10 +446,10 @@ lexOffside = fmap (fmap snd) <$> runParser tokUntilEOF (AwaitBrace, []) "" where
       _ -> (t:) <$> tokUntilEOF
 
 parseDefs :: String -> Either ParseError HsProgram
-parseDefs = runParser program (AwaitBrace, []) ""
+parseDefs = qParse program (AwaitBrace, []) ""
 
 parseContract :: String -> Either ParseError AstPlus
-parseContract = fmap maybeAddMain . runParser contract (Boilerplate, []) ""
+parseContract = fmap maybeAddMain . qParse contract (Boilerplate, []) ""
 
 maybeAddMain :: AstPlus -> AstPlus
 maybeAddMain a = case lookup "main" $ supers $ defs a of

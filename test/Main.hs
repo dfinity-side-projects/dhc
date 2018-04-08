@@ -217,6 +217,7 @@ lexOffsideTests = (\(result, source) -> TestCase $
 demoCases :: [(String, String)]
 demoCases =
   [ ("Hello, World!\n", "main = putStr \"Hello, World!\\n\"")
+  , ("Hello, Quasi!\n", "main = putStr [here|Hello, Quasi!\n|]")
   , ("9876543210", "main = putInt 9876543210")
   , ("314", unlines
     [ "data List x = Nil | Cons x (List x)"
