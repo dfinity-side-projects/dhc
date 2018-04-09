@@ -41,8 +41,13 @@ sbs = toShort . B.pack
 type ExternType = String -> String -> Maybe Int
 
 data LayoutState = IndentAgain Int | LineStart | LineMiddle | AwaitBrace | Boilerplate deriving (Eq, Show)
-type Parser = ParsecT String (LayoutState, [Int])
-  (Reader (String -> String -> Either String String))
+
+-- | For some reason (too much backtracking + strict evaluation somewhere?)
+-- quasiquotation parsing repeatedly visits the same quasiquoted code.
+-- We use a cache so we only compile code once.
+type QQCache = Map (String, String) (Either String String)
+type QQMonad = State (String -> String -> Either String String, QQCache)
+type Parser = ParsecT String (LayoutState, [Int]) QQMonad
 
 program :: Parser HsProgram
 program = do
@@ -347,11 +352,25 @@ rawTok = do
   pure r
   where
   oxford = do
-    -- TODO: Nested quasiquotes.
     q <- try $ between (char '[') (char '|') $ many alphaNum
-    s <- manyTill anyChar (try $ string "|]") <|> (many anyChar >> fail "")
-    f <- ask
-    either (fail . ("quasiquotation: " ++)) (pure . (,) LexString) $ f q s
+    s <- oxfordClose <|> more
+    (f, cache) <- get
+    answer <- case M.lookup (q, s) cache of
+      Nothing -> do
+        let x = f q s
+        put (f, M.insert (q, s) x cache)
+        pure x
+      Just x -> pure x
+    either (fail . ("quasiquotation: " ++)) (pure . (,) LexString) answer
+    where
+    oxfordClose = try (string "|]") >> pure ""
+    more = do
+      s <- innerOxford <|> (pure <$> anyChar)
+      (s ++) <$> (oxfordClose <|> more)
+    innerOxford = do
+      q <- try $ between (char '[') (char '|') $ many alphaNum
+      s <- oxfordClose <|> more
+      pure $ '[':q ++ ('|':s) ++ "|]"
   hashId = try $ do  -- TODO: Deprecate after removing legacy contracts. Identifiers should not start with digits. Also, the case of the first letter matters.
     s <- replicateM 64 alphaNum
     pure (LexVar, s)
@@ -431,7 +450,7 @@ qParse :: Parser a
   -> String
   -> String
   -> Either ParseError a
-qParse a b c d = runReader (runParserT a b c d) justHere
+qParse a b c d = evalState (runParserT a b c d) (justHere, M.empty)
 
 justHere :: String -> String -> Either String String
 justHere "here" s = Right s
@@ -854,7 +873,7 @@ boostTypes b = M.fromList $ second (((,) Nothing) . fst) <$> boostHs b
 
 hsToAst :: Boost -> ExternType -> (String -> String -> Either String String) -> String -> Either String AstPlus
 hsToAst boost ext qq prog = do
-  a@(AstPlus es _ storage _ ds _) <- showErr $ fmap maybeAddMain $ runReader (runParserT contract (Boilerplate, []) "" prog) qq
+  a@(AstPlus es _ storage _ ds _) <- showErr $ fmap maybeAddMain $ evalState (runParserT contract (Boilerplate, []) "" prog) (qq, M.empty)
   (preStorageInferred, storageCons) <- inferType (getContractExport ext es) (genTypes (datas ds) storage $ stores a) (supers ds ++ supers preludeDefs)
   let
     inferred = constrainStorage storageCons preStorageInferred
