@@ -30,10 +30,11 @@ data Wasm = Wasm
   , dfnExports :: [(String, [WasmType])]
   , martinTypes :: [[WasmType]]
   , martinTypeMap :: [(Int, Int)]
+  , haskell :: String
   } deriving Show
 
 emptyWasm :: Wasm
-emptyWasm = Wasm [] [] [] 0 [] [] [] Nothing [] [] [] [] []
+emptyWasm = Wasm [] [] [] 0 [] [] [] Nothing [] [] [] [] [] ""
 
 data ByteParser a = ByteParser (ByteString -> Either String (a, ByteString))
 
@@ -273,7 +274,11 @@ wasm = do
           tm <- rep varuint32 $ (,) <$> varuint32 <*> varuint32
           pure w { martinTypeMap = tm }
         "dfndbg" -> remainder >> pure w
-        _ -> bad $ "unknown custom section: " ++ name
+        "dfnhs" -> do
+          void $ varuint32  -- Should be 1.
+          s <- remainder
+          pure w { haskell = B8.unpack s }
+        _ -> remainder >> pure w
 
     codeBlock :: ByteParser [WasmOp]
     codeBlock = do

@@ -1,6 +1,6 @@
 {-# LANGUAGE NamedFieldPuns #-}
 
-module Hero (Wasm(dfnExports), HeroVM, parseWasm,
+module Hero (Wasm(dfnExports, haskell), HeroVM, parseWasm,
   runWasm, mkHeroVM, setArgsVM,
   setTable,
   globalVM, setGlobalVM,
@@ -86,8 +86,8 @@ take' :: Int -> [a] -> [a]
 take' n as | n > length as = error "BAD TAKE"
            | otherwise = take n as
 
--- The `End` opcode is reintroduced at the ends of function calls, so that we
--- know when to pop locals.
+-- The `End` opcode is reintroduced at the ends of function calls, so we
+-- know when to pop locals, and when to stop popping instructions for `Return`.
 runWasm :: ((String, String) -> HeroVM a -> [WasmOp] -> IO (HeroVM a))
   -> [Char] -> HeroVM a -> IO ([WasmOp], HeroVM a)
 runWasm fns s herovm = let
