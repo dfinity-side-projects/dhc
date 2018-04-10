@@ -111,7 +111,7 @@ data DfnWasm = DfnWasm
   }
 
 hsToWasm :: Boost -> String -> Either String DfnWasm
-hsToWasm boost s = insToBin b . astToIns <$> hsToAst b ext qq s where
+hsToWasm boost s = insToBin s b . astToIns <$> hsToAst b ext qq s where
   ext _ _ = Nothing
   b = stdBoost <> boost
   qq "here" h = Right h
@@ -121,7 +121,7 @@ hsToWasm boost s = insToBin b . astToIns <$> hsToAst b ext qq s where
   qq _ _ = Left "bad scheme"
 
 hsToWasmLegacy :: Boost -> ExternType -> String -> Either String DfnWasm
-hsToWasmLegacy boost ext s = insToBin b . astToIns <$> hsToAst b ext qq s where
+hsToWasmLegacy boost ext s = insToBin s b . astToIns <$> hsToAst b ext qq s where
   b = stdBoost <> boost
   qq "here" h = Right h
   qq "wasm" prog = case hsToWasmLegacy boost ext prog of
@@ -193,8 +193,8 @@ encMartinTypes ts = 0x60 : lenc (map f ts) ++ [0] where
   f (Ref "Id") = 0x6a
   f _ = error "bad type"
 
-insToBin :: Boost -> (GlobalTable, [(String, [Ins])]) -> DfnWasm
-insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), storeCount), gmachine) = DfnWasm
+insToBin :: String -> Boost -> (GlobalTable, [(String, [Ins])]) -> DfnWasm
+insToBin src (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), storeCount), gmachine) = DfnWasm
   { legacyArities = ((\s -> (s, fst $ getGlobal s)) <$> exs)
   , wasmBinary = wasm
   } where
@@ -231,6 +231,7 @@ insToBin (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0,
     , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
     , sect 11 $ encStrConsts <$> M.assocs strConsts  -- Data section.
     , sectCustom "dfndbg" [ord <$> show (sort $ swp <$> (M.assocs $ wasmFunMap))]
+    , sectCustom "dfnhs" [ord <$> src]
     ]
   swp (a, b) = (b, a)
   encStrConsts (s, offset) = concat
