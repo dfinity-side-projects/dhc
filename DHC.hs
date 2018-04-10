@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE PackageImports #-}
 module DHC
-  ( parseContract, AstF(..), Ast(..), AstPlus(..), Type(..)
+  ( parseModule, AstF(..), Ast(..), AstPlus(..), Type(..)
   , inferType, parseDefs, lexOffside
   , arityFromType, hsToAst, liftLambdas
   , HsProgram(..)
@@ -41,7 +41,8 @@ data LayoutState = IndentAgain Int | LineStart | LineMiddle | AwaitBrace | Boile
 -- quasiquotation parsing repeatedly visits the same quasiquoted code.
 -- We use a cache so we only compile code once.
 type QQCache = Map (String, String) (Either String String)
-type QQMonad = State (String -> String -> Either String String, QQCache)
+type QQuoter = String -> String -> Either String String
+type QQMonad = State (QQuoter, QQCache)
 type Parser = ParsecT String (LayoutState, [Int]) QQMonad
 
 program :: Parser HsProgram
@@ -430,7 +431,7 @@ qParse :: Parser a
   -> Either ParseError a
 qParse a b c d = evalState (runParserT a b c d) (justHere, M.empty)
 
-justHere :: String -> String -> Either String String
+justHere :: QQuoter
 justHere "here" s = Right s
 justHere _ _ = Left "bad scheme"
 
@@ -445,8 +446,8 @@ lexOffside = fmap (fmap snd) <$> qParse tokUntilEOF (AwaitBrace, []) "" where
 parseDefs :: String -> Either ParseError HsProgram
 parseDefs = qParse program (AwaitBrace, []) ""
 
-parseContract :: String -> Either ParseError AstPlus
-parseContract = fmap maybeAddMain . qParse contract (Boilerplate, []) ""
+parseModule :: String -> Either ParseError AstPlus
+parseModule = fmap maybeAddMain . qParse contract (Boilerplate, []) ""
 
 maybeAddMain :: AstPlus -> AstPlus
 maybeAddMain a = case lookup "main" $ supers $ defs a of
@@ -812,7 +813,7 @@ arityFromType = f 0 where
 boostTypes :: Boost -> Map String (Maybe (Int, Int), Type)
 boostTypes b = M.fromList $ second (((,) Nothing) . fst) <$> boostHs b
 
-hsToAst :: Boost -> (String -> String -> Either String String) -> String -> Either String AstPlus
+hsToAst :: Boost -> QQuoter -> String -> Either String AstPlus
 hsToAst boost qq prog = do
   a@(AstPlus _ _ ds _) <- showErr $ fmap maybeAddMain $ evalState (runParserT contract (Boilerplate, []) "" prog) (qq, M.empty)
   (preStorageInferred, storageCons) <- inferType (genTypes (datas ds) $ stores a) (supers ds ++ supers preludeDefs)

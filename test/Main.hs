@@ -22,16 +22,6 @@ import Demo
 
 data Node = NInt Int64 | NString ShortByteString | NAp Int Int | NGlobal Int String | NInd Int | NCon Int [Int] | RealWorld [String] deriving Show
 
-hsToGMachine :: String -> Either String (GlobalTable, [(String, [Ins])])
-hsToGMachine hs = hsToIns (Boost
-  [] []
-  -- We'll intercept `putStr` so there's no need for an implementation.
-  [ ("putStr", (TC "String" :-> io (TC "()"), []))
-  , ("putInt", (TC "Int" :-> io (TC "()"), []))
-  ] [])
-  hs
-  where io = TApp (TC "IO")
-
 -- | Interprets G-Machine instructions.
 gmachine :: String -> String
 gmachine prog = if "main_" `M.member` funs then
@@ -41,7 +31,12 @@ gmachine prog = if "main_" `M.member` funs then
   where
   drop' n as | n > length as = error "BUG!"
              | otherwise     = drop n as
-  ((funs, _, _, _, _), m) = either error id $ hsToGMachine prog
+  (funs, m) = either error id $ hsToGMachine toyBoost prog
+  toyBoost = Boost [] []
+    -- We'll intercept `putStr` so there's no need for an implementation.
+    [ ("putStr", (TC "String" :-> TApp (TC "IO") (TC "()"), []))
+    , ("putInt", (TC "Int" :-> TApp (TC "IO") (TC "()"), []))
+    ] []
   arity "putStr" = 1
   arity "putInt" = 1
   arity s = case M.lookup s funs of

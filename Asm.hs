@@ -1,13 +1,15 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE PackageImports #-}
+{-# LANGUAGE NamedFieldPuns #-}
 module Asm
   ( hsToWasm
   , Ins(..)
   , WasmType(Ref)  -- Re-export from WasmOp.
   , hsToIns
+  , hsToGMachine
   , enc32
-  , GlobalTable) where
+  ) where
 
 import Control.Arrow
 #ifdef __HASTE__
@@ -81,21 +83,19 @@ encWasmOp op = case op of
   Loop _ as -> [3, 0x40] ++ concatMap encWasmOp as ++ [0xb]
   _ -> maybe (error $ "unsupported: " ++ show op) pure $ lookup op rZeroOps
 
--- | Tuple of:
---  1. Arity of each user-defined function, whether exported or not.
---     Eval uses this to remove the spine correctly.
---  2. List of wdecl functions.
---  3. Types needed by call_indirect ops.
---  4. (Initial HP value, Addresses of string constants).
---  5. Global store count.
--- TODO: NAME THESE FIELDS ALREADY!
-type GlobalTable =
-  ( Map String Int
-  , [(String, [WasmType])]
-  , [[WasmType]]
-  , (Int, Map ShortByteString Int)
-  , Int
-  )
+data WasmMeta = WasmMeta
+  -- Arity of each user-defined function, whether exported or not.
+  -- Eval uses this to remove the spine correctly.
+  { arities :: Map String Int
+  , exports :: [(String, [WasmType])]  -- List of wdecl functions.
+  , callTypes :: [[WasmType]]  -- Types needed by call_indirect ops.
+  , initialHP :: Int  -- Initial HP.
+  , strAddrs :: Map ShortByteString Int  -- String constant addresses.
+  , storeCount :: Int  -- Global store count.
+  }
+
+hsToGMachine :: Boost -> String -> Either String (Map String Int, [(String, [Ins])])
+hsToGMachine boost hs = first arities <$> hsToIns boost hs
 
 hsToWasm :: Boost -> String -> Either String [Int]
 hsToWasm boost s = insToBin s b . astToIns <$> hsToAst b qq s where
@@ -106,7 +106,7 @@ hsToWasm boost s = insToBin s b . astToIns <$> hsToAst b qq s where
     Right ints -> Right $ chr <$> ints
   qq _ _ = Left "bad scheme"
 
-hsToIns :: Boost -> String -> Either String (GlobalTable, [(String, [Ins])])
+hsToIns :: Boost -> String -> Either String (WasmMeta, [(String, [Ins])])
 hsToIns boost s = astToIns <$> hsToAst (stdBoost <> boost) qq s where
   qq "here" h = Right h
   qq _ _ = Left "bad scheme"
@@ -132,12 +132,12 @@ mkStrConsts ss = f (0, []) ss where
   f (p, ds) [] = (p, M.fromList ds)
   f (k, ds) (s:rest) = f (k + 16 + align4 (sbslen s), ((s, k):ds)) rest
 
-astToIns :: AstPlus -> (GlobalTable, [(String, [Ins])])
-astToIns (AstPlus ws ps ds ts) = ((funs, wasmDecl <$> ws, ciTypes, strConsts, length ps), ins) where
+astToIns :: AstPlus -> (WasmMeta, [(String, [Ins])])
+astToIns (AstPlus ws ps ds ts) = (WasmMeta funs (wasmDecl <$> ws) ciTypes initHP addrs $ length ps, ins) where
   compilerOut = second (compile ps) <$> supers ds
   ciTypes = foldl' union [] $ callIndirectTypes . snd . snd <$> compilerOut
   ins = second fst <$> compilerOut
-  strConsts = mkStrConsts $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
+  (initHP, addrs) = mkStrConsts $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
   wasmDecl w = (w, wasmType [] $ fst $ fromJust $ lookup w ts)
   wasmType acc t = case t of
     a :-> b -> wasmType (translateType a : acc) b
@@ -170,16 +170,16 @@ encMartinTypes ts = 0x60 : lenc (map f ts) ++ [0] where
   f (Ref "Id") = 0x6a
   f _ = error "bad type"
 
-insToBin :: String -> Boost -> (GlobalTable, [(String, [Ins])]) -> [Int]
-insToBin src (Boost imps _ boostPrims boostFuns) ((funs, wrapme, ciTypes, (hp0, strConsts), storeCount), gmachine) = wasm where
+insToBin :: String -> Boost -> (WasmMeta, [(String, [Ins])]) -> [Int]
+insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs, storeCount}, gmachine) = wasm where
   encMartinTM :: String -> Int -> [Int]
   encMartinTM f t = leb128 (wasmFunNo ('@':f) - length imps) ++ leb128 t
   wasm = concat
     [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
 
     -- Custom sections for Martin's Primea.
-    , sectCustom "types" $ encMartinTypes . snd <$> wrapme
-    , sectCustom "typeMap" $ zipWith encMartinTM (fst <$> wrapme) [0..]
+    , sectCustom "types" $ encMartinTypes . snd <$> exports
+    , sectCustom "typeMap" $ zipWith encMartinTM (fst <$> exports) [0..]
 
     , sect 1 $ uncurry encSig . snd <$> BM.assocs typeMap  -- Type section.
     , sect 2 $ importFun <$> imps  -- Import section.
@@ -188,20 +188,20 @@ insToBin src (Boost imps _ boostPrims boostFuns) ((funs, wrapme, ciTypes, (hp0, 
     , sect 5 [0 : leb128 nPages]  -- Memory section (0 = no-maximum).
     , sect 6 $  -- Global section (1 = mutable).
       [ [encType I32, 1, 0x41] ++ sleb128 (65536*nPages - 4) ++ [0xb]  -- SP
-      , [encType I32, 1, 0x41] ++ sleb128 hp0 ++ [0xb]  -- HP
+      , [encType I32, 1, 0x41] ++ sleb128 (initialHP wm) ++ [0xb]  -- HP
       , [encType I32, 1, 0x41, 0, 0xb]  -- BP
       ]
       -- Global stores.
       ++ replicate storeCount [encType I32, 1, 0x41, 0, 0xb]
     , sect 7 $  -- Export section.
       -- The "wdecl" functions are exported verbatim.
-      [exportFun s ('@':s) | (s, _) <- wrapme] ++
+      [exportFun s ('@':s) | (s, _) <- exports] ++
       [ encStr "memory" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
       , encStr "table" ++ [1, 0]  -- 1 = external_kind Table, 0 = memory index.
       , exportFun "main" "#main"
       ]
     , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
-    , sect 11 $ encStrConsts <$> M.assocs strConsts  -- Data section.
+    , sect 11 $ encStrConsts <$> M.assocs strAddrs  -- Data section.
     , sectCustom "dfndbg" [ord <$> show (sort $ swp <$> (M.assocs $ wasmFunMap))]
     , sectCustom "dfnhs" [ord <$> src]
     ]
@@ -220,15 +220,15 @@ insToBin src (Boost imps _ boostPrims boostFuns) ((funs, wrapme, ciTypes, (hp0, 
   typeNo ins outs = typeMap BM.!> (ins, outs)
   typeMap = BM.fromList $ zip [0..] $ nub $
     (snd <$> imps) ++  -- Types of imports
-    (flip (,) [] . snd <$> wrapme) ++  -- wdecl functions.
-    (flip (,) [] <$> ciTypes) ++  -- call_indirect types.
+    (flip (,) [] . snd <$> exports) ++  -- wdecl functions.
+    (flip (,) [] <$> callTypes wm) ++  -- call_indirect types.
     (fst . snd <$> internalFuns)  -- Types of internal functions.
   exportFun name internalName = encStr name ++ (0 : leb128 (wasmFunNo internalName))
   -- TODO: Remove "#nfsyscall".
   localCount "#nfsyscall" = 2
   localCount _ = 0
   -- Returns arity and 0-indexed number of given global function.
-  getGlobal s = case M.lookup s funs of
+  getGlobal s = case M.lookup s $ arities wm of
     Just arity -> (arity, wasmFunNo s - firstPrim)
     Nothing -> (arityFromType $ fromMaybe (error $ "BUG! bad global: " ++ s) $ M.lookup s primsType, wasmFunNo s - firstPrim)
   firstPrim = wasmFunNo $ fst $ head prims
@@ -271,9 +271,9 @@ insToBin src (Boost imps _ boostPrims boostFuns) ((funs, wrapme, ciTypes, (hp0, 
     -- Wrappers for call_indirect calls.
     ++ ciFuns
     -- Wrappers for functions in "wdecl" section.
-    ++ (wrap <$> wrapme)
+    ++ (wrap <$> exports)
 
-  ciFuns = wrapCallIndirect <$> ciTypes
+  ciFuns = wrapCallIndirect <$> callTypes wm
   -- When sending a message with only one item, we have a bare argument
   -- instead of an argument tuple
   wrapCallIndirect [t] = (show [t], ((typeNo [] [], 0),
@@ -687,7 +687,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) ((funs, wrapme, ciTypes, (hp0, 
       ]
     PushString s ->
       [ Get_global sp  -- [sp] = address of string const
-      , I32_const $ fromIntegral $ strConsts M.! s
+      , I32_const $ fromIntegral $ strAddrs M.! s
       , I32_store 2 0
       , Get_global sp  -- sp = sp - 4
       , I32_const 4
