@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE PackageImports #-}
 module DHC
-  ( parseContract, ExternType, AstF(..), Ast(..), AstPlus(..), Type(..)
+  ( parseContract, AstF(..), Ast(..), AstPlus(..), Type(..)
   , inferType, parseDefs, lexOffside
   , arityFromType, hsToAst, liftLambdas
   , HsProgram(..)
@@ -10,7 +10,6 @@ import Control.Arrow
 import Control.Monad
 #ifdef __HASTE__
 import "mtl" Control.Monad.State
-import "mtl" Control.Monad.Reader
 #else
 import Control.Monad.Reader
 import Control.Monad.State
@@ -35,10 +34,6 @@ type ShortByteString = String
 #else
 sbs = toShort . B.pack
 #endif
-
--- | Knowing the arity of functions from other contracts
--- can aid correctness checks during compilation.
-type ExternType = String -> String -> Maybe Int
 
 data LayoutState = IndentAgain Int | LineStart | LineMiddle | AwaitBrace | Boilerplate deriving (Eq, Show)
 
@@ -208,7 +203,7 @@ toplevels = foldl' (flip ($)) (HsProgram [] [] []) <$> topDecls where
   -- TODO: Introduce patterns to deal with _.
   lambda = fmap Ast $ Lam <$> between (want "\\") (want "->") (many1 (var <|> want "_")) <*> expr
   molecule = lambda <|> foldl1' ((Ast .) . (:@)) <$> many1 atom
-  atom = tup <|> call <|> qvar
+  atom = tup <|> qvar
     <|> (Ast . Var <$> want "_")
     <|> (Ast . Var <$> var)
     <|> (Ast . Var <$> con)
@@ -232,13 +227,6 @@ toplevels = foldl' (flip ($)) (HsProgram [] [] []) <$> topDecls where
     (t, s) <- tok
     when (t /= LexQual) $ fail ""
     pure $ Ast $ uncurry Qual $ splitDot s
-  call = do
-    void $ want "call"
-    (t, s) <- tok
-    case t of
-      LexQual -> pure $ Ast $ uncurry CCall $ splitDot s
-      LexVar  -> pure $ Ast $ CCall "" s
-      _ -> fail "bad call"
   num = try $ do
     (t, s) <- tok
     when (t /= LexNumber) $ fail ""
@@ -371,9 +359,6 @@ rawTok = do
       q <- try $ between (char '[') (char '|') $ many alphaNum
       s <- oxfordClose <|> more
       pure $ '[':q ++ ('|':s) ++ "|]"
-  hashId = try $ do  -- TODO: Deprecate after removing legacy contracts. Identifiers should not start with digits. Also, the case of the first letter matters.
-    s <- replicateM 64 alphaNum
-    pure (LexVar, s)
   lowId = do
     s <- (:) <$> (lower <|> char '_') <*> many (alphaNum <|> oneOf "_'")
     when (s `elem` ["let", "where", "do", "of"]) $ do
@@ -383,8 +368,8 @@ rawTok = do
   uppId = do
     s <- (:) <$> upper <*> many (alphaNum <|> oneOf "_'")
     pure (LexCon, s)
-  qId = do  -- TODO: Rewrite after removing legacy contracts.
-    r@(_, m) <- hashId <|> lowId <|> uppId
+  qId = do
+    r@(_, m) <- lowId <|> uppId
     (try $ do
       void $ char '.'
       (_, v) <- lowId <|> uppId
@@ -421,9 +406,7 @@ filler = void $ many $ void (char ' ') <|> nl <|> com
     when (st == LineMiddle) $ putState (LineStart, is)
 
 data AstPlus = AstPlus
-  { exports :: [String]
-  , wdecls :: [String]
-  , storages :: [String]
+  { wdecls :: [String]
   , stores :: [String]
   , defs :: HsProgram
   , funTypes :: [(String, QualType)]
@@ -431,19 +414,14 @@ data AstPlus = AstPlus
 
 contract :: Parser AstPlus
 contract = do
-  es <- option [] $ try $ want "contract" >>
-    (between (want "(") (want ")") $ var `sepBy` want ",")
   ws <- option [] $ try $ want "wdecl" >>
-    (between (want "(") (want ")") $ var `sepBy` want ",")
-  ms <- option [] $ try $ want "storage" >>
     (between (want "(") (want ")") $ var `sepBy` want ",")
   ps <- option [] $ try $ want "store" >>
     (between (want "(") (want ")") $ var `sepBy` want ",")
   putState (AwaitBrace, [])
   p <- toplevels
-  when (isNothing $ mapM (`lookup` supers p) es) $ fail "bad exports"
   when (isNothing $ mapM (`lookup` supers p) ws) $ fail "bad wdecls"
-  pure $ AstPlus es ws ms ps p []
+  pure $ AstPlus ws ps p []
 
 qParse :: Parser a
   -> (LayoutState, [Int])
@@ -509,12 +487,11 @@ type QualType = (Type, [(String, String)])
 -- Replaces overloaded methods with Placeholder.
 -- Replaces data constructors with Pack.
 gather
-  :: (String -> String -> Either String Type)
-  -> Globals
+  :: Globals
   -> [(String, QualType)]
   -> Ast
   -> Constraints (AAst Type)
-gather findExport globs env (Ast ast) = case ast of
+gather globs env (Ast ast) = case ast of
   I i -> pure $ AAst (TC "Int") $ I i
   S s -> pure $ AAst (TC "String") $ S s
   Pack m n -> do  -- Only tuples are pre`Pack`ed.
@@ -569,16 +546,9 @@ gather findExport globs env (Ast ast) = case ast of
     mapM_ addConstraint $ zip (snd <$> es) (afst <$> ts)
     body1@(AAst t _) <- rec envLet body
     pure $ AAst t $ Let (zip (fst <$> ds) ts) body1
-  -- TODO: Type classes for CCall and Qual.
-  CCall c f -> case findExport c f of
-    Left err -> bad err
-    Right t -> flip AAst (CCall c f) . (TC "String" :->) . fst <$> instantiate (t, [])
-  Qual c f -> case findExport c f of
-    Left err -> bad err
-    Right t -> flip AAst (Qual c f) . fst <$> instantiate (t, [])
   _ -> fail $ "BUG! unhandled: " ++ show ast
   where
-    rec = gather findExport globs
+    rec = gather globs
     bad = Constraints . const . Left
     afst (AAst t _) = t
 
@@ -839,49 +809,16 @@ arityFromType = f 0 where
   f acc (_ :-> r) = f (acc + 1) r
   f acc _ = acc
 
-expandSyscalls :: ExternType -> [(String, Int)] -> Ast -> Ast
-expandSyscalls ext arities = ffix $ \rec (Ast ast) -> Ast $ case ast of
-{-
-  Cas (Ast x) as -> Cas (Ast $ rec x) (second (Ast . rec. unAst) <$> as)
--}
-  -- Example:
-  --  target.fun 1 2 "three"
-  -- becomes:
-  --  #nfsyscall 6 0 "target" "fun" 3 1 2 "three"
-  Qual c f | Just n <- ext c f -> foldl1' appIt [Var "#nfsyscall", I (fromIntegral $ n + 3), I 0, S $ sbs c, S $ sbs f, I (fromIntegral n)]
-  -- Example:
-  --  call target.fun "abc123" 1 2 "three"
-  --  call fun "abc123" 1 2 "three"
-  -- becomes:
-  --  #nfsyscall 7 8 "target" "fun" 3 "abc123" 1 2 "three"
-  --  #nfsyscall 6 9 "fun" 3 "abc123" 1 2 "three"
-  CCall "" f | Just n <- lookup f arities -> foldl1' appIt [Var "#nfsyscall", I (fromIntegral $ n + 3), I 9, S $ sbs f, I (fromIntegral n)]
-  CCall c f | Just n <- ext c f -> foldl1' appIt [Var "#nfsyscall", I (fromIntegral $ n + 4), I 8, S $ sbs c, S $ sbs f, I (fromIntegral n)]
-  _ -> rec ast
-  where appIt x y = Ast x :@ Ast y
-
-getContractExport :: ExternType -> [String] -> String -> String -> Either String Type
-getContractExport _ es "" v = if v `elem` es
-  then Right $ TV $ '*':v
-  else Left $ "no such export " ++ v
-getContractExport f _ c v = case f c v of
-  Nothing -> Left $ "no such export " ++ c ++ "." ++ v
-  Just n -> Right $ foldr (:->) (TC "IO" `TApp` GV "r") [GV $ "x" ++ show i | i <- [1..n]]
-
 boostTypes :: Boost -> Map String (Maybe (Int, Int), Type)
 boostTypes b = M.fromList $ second (((,) Nothing) . fst) <$> boostHs b
 
-hsToAst :: Boost -> ExternType -> (String -> String -> Either String String) -> String -> Either String AstPlus
-hsToAst boost ext qq prog = do
-  a@(AstPlus es _ storage _ ds _) <- showErr $ fmap maybeAddMain $ evalState (runParserT contract (Boilerplate, []) "" prog) (qq, M.empty)
-  (preStorageInferred, storageCons) <- inferType (getContractExport ext es) (genTypes (datas ds) storage $ stores a) (supers ds ++ supers preludeDefs)
+hsToAst :: Boost -> (String -> String -> Either String String) -> String -> Either String AstPlus
+hsToAst boost qq prog = do
+  a@(AstPlus _ _ ds _) <- showErr $ fmap maybeAddMain $ evalState (runParserT contract (Boilerplate, []) "" prog) (qq, M.empty)
+  (preStorageInferred, storageCons) <- inferType (genTypes (datas ds) $ stores a) (supers ds ++ supers preludeDefs)
   let
     inferred = constrainStorage storageCons preStorageInferred
-    arities = second (countArgs . fst . fst) <$> inferred
-    countArgs (_ :-> b) = 1 + countArgs b
-    countArgs _ = 0
-    transform = expandSyscalls ext arities . expandCase
-    subbedDefs = (second transform <$>) . liftLambdas . (second snd <$>) $ inferred
+    subbedDefs = (second expandCase <$>) . liftLambdas . (second snd <$>) $ inferred
     types = second fst <$> inferred
   pure a { defs = (defs a) { supers = subbedDefs }, funTypes = types }
   where
@@ -891,15 +828,13 @@ hsToAst boost ext qq prog = do
       [ ("[]", (Just (0, 0), TApp (TC "[]") a))
       , (":",  (Just (1, 2), a :-> TApp (TC "[]") a :-> TApp (TC "[]") a))
       ] where a = GV "a"
-    genTypes dataDecls storage ps = listPresets
+    genTypes dataDecls ps = listPresets
       `M.union` M.fromList (datas preludeDefs)
       `M.union` M.fromList dataDecls
       `M.union` boostTypes boost
-      `M.union` (M.fromList $ storageTypeConstraintHack <$> storage)
       `M.union` (M.fromList $ storeTypeConstraint <$> ps)
     Right preludeDefs = parseDefs $ boostPrelude boost
     showErr = either (Left . show) Right
-    storageTypeConstraintHack s = (s, (Nothing, TC "Map" `TApp` TV ('@':s)))
     storeTypeConstraint s = (s, (Nothing, TC "Storage" `TApp` TV ('@':s)))
 
 constrainStorage :: Map String Type -> [(String, (QualType, Ast))] -> [(String, (QualType, Ast))]
@@ -913,19 +848,18 @@ constrainStorage cons ds = second (first (first rewriteType)) <$> ds where
   rec = rewriteType
 
 inferType
-  :: (String -> String -> Either String Type)
-  -> Globals
+  :: Globals
   -> [(String, Ast)]
-  -- Returns types of definitions and storage maps.
+  -- Returns types of definitions and stores.
   -> Either String ([(String, (QualType, Ast))], Map String Type)
-inferType findExport globs ds = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJust $ lookup k ds))) sortedDefs where
+inferType globs ds = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJust $ lookup k ds))) sortedDefs where
   -- Groups of definitions, sorted in the order we should infer their types.
   sortedDefs = reverse $ scc (callees ds) $ fst <$> ds
   inferMutual :: ([(String, (QualType, Ast))], Map String Type) -> [(String, Ast)] -> Either String ([(String, (QualType, Ast))], Map String Type)
   inferMutual (acc, accStorage) grp = do
     (typedAsts, ConState _ cs m) <- buildConstraints $ do
       let ids = fst <$> grp
-      ts <- mapM (gather findExport globs env) $ snd <$> grp
+      ts <- mapM (gather globs env) $ snd <$> grp
       when ("main" `elem` ids) $ do
         r <- newTV
         addConstraint (TV "*main", TApp (TC "IO") r)
@@ -965,7 +899,6 @@ callees ds s = snd $ execState (go s) ([], []) where
       ast t
       modify $ first (const env)
     Var v -> go v
-    CCall "" v -> go v
     Cas x as -> do
       ast x
       forM_ as $ \(Ast p, e) -> do
@@ -1016,13 +949,7 @@ freeV scs = map f scs where
     binders = fst <$> ds
     ds1 = map h ds
     h (s, Ast x) = (s, g (cand `union` binders) x)
-  g _    (I i) = AAst [] $ I i
-  g _    (S s) = AAst [] $ S s
-  g _    (Pack m n) = AAst [] $ Pack m n
-  g _    (Qual x y) = AAst [] $ Qual x y
-  g _    (CCall x y) = AAst [] $ CCall x y
-  g _    (Placeholder x y) = AAst [] $ Placeholder x y
-  g _    (CallSlot t) = AAst [] $ CallSlot t
+  g _ x = ffix (\h (Ast ast) -> AAst [] $ h ast) $ Ast x
 
 caseVars :: AstF Ast -> [String]
 caseVars (Var v) = [v]
@@ -1070,7 +997,7 @@ expandCase = ffix $ \h (Ast ast) -> Ast $ case ast of
     dupCase e (a:as) = Cas e $ evalState (expandAlt (Just $ rec $ Ast $ Cas e as) [] a) 0
     dupCase _ _ = error "BUG! no case alternatives"
 
-    -- TODO: CCall `fromApList` only in last case alternative.
+    -- TODO: Call `fromApList` only in last case alternative.
     expandAlt :: Maybe Ast -> [(Ast, Ast)] -> (Ast, Ast) -> State Int [(Ast, Ast)]
     expandAlt onFail deeper (p, a) = do
       case fromApList p of

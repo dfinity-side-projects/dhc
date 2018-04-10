@@ -26,7 +26,7 @@ type ShortByteString = String
 instance Binary Type
 
 infixl 5 :@
-data AstF a = Qual String String | CCall String String
+data AstF a = Qual String String
   | CallSlot [WasmType]
   | Pack Int Int | I Int64 | S ShortByteString | Var String
   | a :@ a | Cas a [(a, a)]
@@ -40,11 +40,6 @@ data AAst a = AAst a (AstF (AAst a)) deriving (Show, Functor)
 
 deAnn :: AAst a -> Ast
 deAnn = ffix $ \h (AAst _ ast) -> Ast $ h ast
-
-{-
-unAst :: Ast -> AstF Ast
-unAst (Ast a) = a
--}
 
 ffix :: Functor f => ((f a -> f b) -> a -> b) -> a -> b
 ffix f = f $ fmap $ ffix f

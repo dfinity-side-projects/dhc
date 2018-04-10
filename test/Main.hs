@@ -23,13 +23,13 @@ import Demo
 data Node = NInt Int64 | NString ShortByteString | NAp Int Int | NGlobal Int String | NInd Int | NCon Int [Int] | RealWorld [String] deriving Show
 
 hsToGMachine :: String -> Either String (GlobalTable, [(String, [Ins])])
-hsToGMachine haskell = hsToIns (Boost
+hsToGMachine hs = hsToIns (Boost
   [] []
   -- We'll intercept `putStr` so there's no need for an implementation.
   [ ("putStr", (TC "String" :-> io (TC "()"), []))
   , ("putInt", (TC "Int" :-> io (TC "()"), []))
   ] [])
-  (\_ _ -> Nothing) haskell
+  hs
   where io = TApp (TC "IO")
 
 -- | Interprets G-Machine instructions.
@@ -41,7 +41,7 @@ gmachine prog = if "main_" `M.member` funs then
   where
   drop' n as | n > length as = error "BUG!"
              | otherwise     = drop n as
-  ((_, funs, _, _, _, _), m) = either error id $ hsToGMachine prog
+  ((funs, _, _, _, _), m) = either error id $ hsToGMachine prog
   arity "putStr" = 1
   arity "putInt" = 1
   arity s = case M.lookup s funs of
@@ -297,7 +297,7 @@ demoTests = (\(result, source) -> TestCase $ runDemo source >>= assertEqual sour
 runDemo :: String -> IO String
 runDemo src = case hsToWasm demoBoost src of
   Left err -> error err
-  Right (DfnWasm _ ints) -> let
+  Right ints -> let
     Right wasm = parseWasm $ B.pack $ fromIntegral <$> ints
     in stateVM . snd <$> (runWasm syscall "main" $ mkHeroVM "" wasm [])
   where
@@ -325,7 +325,7 @@ altWebBoost = Boost [(("dhc", "system"), ([I32, I32, I32], []))]
 runAltWeb :: String -> IO String
 runAltWeb src = case hsToWasm altWebBoost src of
   Left err -> error err
-  Right (DfnWasm _ ints) -> let
+  Right ints -> let
     Right wasm = parseWasm $ B.pack $ fromIntegral <$> ints
     in stateVM . snd <$> (runWasm altWebSys "main" $ mkHeroVM "" wasm [])
 

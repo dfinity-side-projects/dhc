@@ -96,7 +96,7 @@ main = withElems ["src", "asm", "go", "out"] $ \[src, asmEl, goB, outE] -> do
     s <- getProp src "value"
     case hsToWasm jsDemoBoost s of
       Left err -> setProp asmEl "value" err
-      Right (DfnWasm _ asm) -> do
+      Right asm -> do
         setProp asmEl "value" $ show asm
         ffi "runWasmInts" asm :: IO ()
 \end{code}

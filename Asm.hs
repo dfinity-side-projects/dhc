@@ -3,9 +3,7 @@
 {-# LANGUAGE PackageImports #-}
 module Asm
   ( hsToWasm
-  , hsToWasmLegacy
   , Ins(..)
-  , DfnWasm(..)
   , WasmType(Ref)  -- Re-export from WasmOp.
   , hsToIns
   , enc32
@@ -16,7 +14,6 @@ import Control.Arrow
 import "mtl" Control.Monad.State
 #else
 import Control.Monad.State
-import qualified Data.ByteString.Char8 as B
 import Data.ByteString.Short (ShortByteString, unpack)
 import qualified Data.ByteString.Short as SBS
 import Data.Semigroup
@@ -34,16 +31,13 @@ import DHC
 import Std
 import WasmOp
 
-sbs :: String -> ShortByteString
 #ifdef __HASTE__
-sbs = id
 sbslen :: String -> Int
 sbslen = length
 unpack :: String -> [Int]
 unpack = fmap ord
 type ShortByteString = String
 #else
-sbs = SBS.toShort . B.pack
 sbslen :: ShortByteString -> Int
 sbslen = SBS.length
 #endif
@@ -88,49 +82,32 @@ encWasmOp op = case op of
   _ -> maybe (error $ "unsupported: " ++ show op) pure $ lookup op rZeroOps
 
 -- | Tuple of:
---  1. List of exported functions. Hopefully will be removed soon.
---  2. Arity of each user-defined function, whether exported or not.
+--  1. Arity of each user-defined function, whether exported or not.
 --     Eval uses this to remove the spine correctly.
---  3. List of wdecl functions.
---  4. Types needed by call_indirect ops.
---  5. (Initial HP value, Addresses of string constants).
---  6. Global store count.
+--  2. List of wdecl functions.
+--  3. Types needed by call_indirect ops.
+--  4. (Initial HP value, Addresses of string constants).
+--  5. Global store count.
 -- TODO: NAME THESE FIELDS ALREADY!
 type GlobalTable =
-  ( [String]
-  , M.Map String Int
+  ( Map String Int
   , [(String, [WasmType])]
   , [[WasmType]]
   , (Int, Map ShortByteString Int)
   , Int
   )
 
-data DfnWasm = DfnWasm
-  { legacyArities :: [(String, Int)]  -- Arities of legacy exports.
-  , wasmBinary :: [Int]
-  }
-
-hsToWasm :: Boost -> String -> Either String DfnWasm
-hsToWasm boost s = insToBin s b . astToIns <$> hsToAst b ext qq s where
-  ext _ _ = Nothing
+hsToWasm :: Boost -> String -> Either String [Int]
+hsToWasm boost s = insToBin s b . astToIns <$> hsToAst b qq s where
   b = stdBoost <> boost
   qq "here" h = Right h
   qq "wasm" prog = case hsToWasm boost prog of
     Left err -> Left err
-    Right (DfnWasm _ ints) -> Right $ chr <$> ints
+    Right ints -> Right $ chr <$> ints
   qq _ _ = Left "bad scheme"
 
-hsToWasmLegacy :: Boost -> ExternType -> String -> Either String DfnWasm
-hsToWasmLegacy boost ext s = insToBin s b . astToIns <$> hsToAst b ext qq s where
-  b = stdBoost <> boost
-  qq "here" h = Right h
-  qq "wasm" prog = case hsToWasmLegacy boost ext prog of
-    Left err -> Left err
-    Right (DfnWasm _ ints) -> Right $ chr <$> ints
-  qq _ _ = Left "bad scheme"
-
-hsToIns :: Boost -> ExternType -> String -> Either String (GlobalTable, [(String, [Ins])])
-hsToIns boost ext s = astToIns <$> hsToAst (stdBoost <> boost) ext qq s where
+hsToIns :: Boost -> String -> Either String (GlobalTable, [(String, [Ins])])
+hsToIns boost s = astToIns <$> hsToAst (stdBoost <> boost) qq s where
   qq "here" h = Right h
   qq _ _ = Left "bad scheme"
 
@@ -156,11 +133,11 @@ mkStrConsts ss = f (0, []) ss where
   f (k, ds) (s:rest) = f (k + 16 + align4 (sbslen s), ((s, k):ds)) rest
 
 astToIns :: AstPlus -> (GlobalTable, [(String, [Ins])])
-astToIns (AstPlus es ws storage ps ds ts) = ((es, funs, wasmDecl <$> ws, ciTypes, strConsts, length ps), ins) where
-  compilerOut = second (compile storage ps) <$> supers ds
+astToIns (AstPlus ws ps ds ts) = ((funs, wasmDecl <$> ws, ciTypes, strConsts, length ps), ins) where
+  compilerOut = second (compile ps) <$> supers ds
   ciTypes = foldl' union [] $ callIndirectTypes . snd . snd <$> compilerOut
   ins = second fst <$> compilerOut
-  strConsts = mkStrConsts $ union (sbs <$> storage) $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
+  strConsts = mkStrConsts $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
   wasmDecl w = (w, wasmType [] $ fst $ fromJust $ lookup w ts)
   wasmType acc t = case t of
     a :-> b -> wasmType (translateType a : acc) b
@@ -193,11 +170,8 @@ encMartinTypes ts = 0x60 : lenc (map f ts) ++ [0] where
   f (Ref "Id") = 0x6a
   f _ = error "bad type"
 
-insToBin :: String -> Boost -> (GlobalTable, [(String, [Ins])]) -> DfnWasm
-insToBin src (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (hp0, strConsts), storeCount), gmachine) = DfnWasm
-  { legacyArities = ((\s -> (s, fst $ getGlobal s)) <$> exs)
-  , wasmBinary = wasm
-  } where
+insToBin :: String -> Boost -> (GlobalTable, [(String, [Ins])]) -> [Int]
+insToBin src (Boost imps _ boostPrims boostFuns) ((funs, wrapme, ciTypes, (hp0, strConsts), storeCount), gmachine) = wasm where
   encMartinTM :: String -> Int -> [Int]
   encMartinTM f t = leb128 (wasmFunNo ('@':f) - length imps) ++ leb128 t
   wasm = concat
@@ -225,9 +199,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) ((exs, funs, wrapme, ciTypes, (
       [ encStr "memory" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
       , encStr "table" ++ [1, 0]  -- 1 = external_kind Table, 0 = memory index.
       , exportFun "main" "#main"
-      ] ++
-      -- The "contract" functions are exported with "_" prepended.
-      [exportFun ('_':s) s | s <- exs]
+      ]
     , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
     , sect 11 $ encStrConsts <$> M.assocs strConsts  -- Data section.
     , sectCustom "dfndbg" [ord <$> show (sort $ swp <$> (M.assocs $ wasmFunMap))]
@@ -857,11 +829,11 @@ lenc xs = varlen xs ++ xs
 sp, hp, bp :: Int
 [sp, hp, bp] = [0, 1, 2]
 
-compile :: [String] -> [String] -> Ast -> ([Ins], CompilerState)
-compile storage ps d = runState (mk1 storage ps d) $ CompilerState [] [] []
+compile :: [String] -> Ast -> ([Ins], CompilerState)
+compile ps d = runState (mk1 ps d) $ CompilerState [] [] []
 
-mk1 :: [String] -> [String] -> Ast -> State CompilerState [Ins]
-mk1 storage pglobals (Ast ast) = case ast of
+mk1 :: [String] -> Ast -> State CompilerState [Ins]
+mk1 pglobals (Ast ast) = case ast of
   -- Thanks to lambda lifting, `Lam` can only occur at the top level.
   Lam as b -> do
     putBindings $ zip as [0..]
@@ -887,8 +859,6 @@ mk1 storage pglobals (Ast ast) = case ast of
     m <- getBindings
     pure $ case lookup v m of
       Just k -> [Push k]
-      -- Storage maps become PushString instructions.
-      _ | v `elem` storage -> [PushString $ sbs v]
       -- Global stores become PushRef instructions.
       _ | Just i <- elemIndex v pglobals -> [PushRef $ fromIntegral i]
       _ -> [PushGlobal v]
@@ -927,7 +897,7 @@ mk1 storage pglobals (Ast ast) = case ast of
     putBindings b = do
       st <- get
       put st { bindings = b }
-    rec = mk1 storage pglobals
+    rec = mk1 pglobals
 
 fromApList :: Ast -> [Ast]
 fromApList (Ast (a :@ b)) = fromApList a ++ [b]
