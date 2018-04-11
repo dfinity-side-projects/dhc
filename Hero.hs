@@ -1,12 +1,18 @@
 {-# LANGUAGE NamedFieldPuns #-}
 
-module Hero (Wasm(dfnExports, haskell), HeroVM, parseWasm,
-  runWasm, mkHeroVM, setArgsVM,
-  setTable,
-  globalVM, setGlobalVM,
-  getNumVM, putNumVM,
-  stateVM, putStateVM,
-  CustomWasmOp(I32_const, I64_const), WasmOp) where
+module Hero
+  ( Wasm(dfnExports, haskell)
+  , CustomWasmOp(I32_const, I64_const), WasmOp
+  , HeroVM
+  , parseWasm
+  , runWasm
+  , mkHeroVM
+  , setArgsVM
+  , setTable
+  , globalVM, setGlobalVM
+  , getNumVM, putNumVM
+  , stateVM, putStateVM
+  ) where
 
 import Data.Bits
 import Data.Char (ord)
@@ -21,6 +27,8 @@ import Network.DFINITY.Parse
 
 import WasmOp
 
+type VMFun a = HeroVM a -> [WasmOp] -> IO (HeroVM a)
+
 data HeroVM a = HeroVM
   { globs :: IntMap WasmOp
   , locs  :: [IntMap WasmOp]
@@ -28,7 +36,7 @@ data HeroVM a = HeroVM
   , insts :: [[WasmOp]]
   , mem   :: IntMap Int
   , sigs  :: IntMap ([WasmType], [WasmType])
-  , table :: IntMap (HeroVM a -> [WasmOp] -> IO (HeroVM a))
+  , table :: IntMap (VMFun a)
   , wasm  :: Wasm
   , state :: a
   }
@@ -39,17 +47,21 @@ stateVM vm = state vm
 putStateVM :: a -> HeroVM a -> HeroVM a
 putStateVM a vm = vm {state = a}
 
+-- | Reads an integer of a given width from linear memory.
 getNumVM :: Integral n => Int -> Int32 -> HeroVM a -> n
 getNumVM w addr vm = getNum w addr $ mem vm
 
+-- | Writes an integer of a given width to linear memory.
+putNumVM :: Integral n => Int -> Int32 -> n -> HeroVM a -> HeroVM a
+putNumVM w addr n vm@(HeroVM {mem}) = vm { mem = putNum w addr n mem }
+
+-- | Reads global variables.
 globalVM :: HeroVM a -> IntMap WasmOp
 globalVM vm = globs vm
 
+-- | Writes global variables.
 setGlobalVM :: [(Int, WasmOp)] -> HeroVM a -> HeroVM a
 setGlobalVM m vm = vm { globs = IM.fromList m `IM.union` globs vm }
-
-putNumVM :: Integral n => Int -> Int32 -> n -> HeroVM a -> HeroVM a
-putNumVM w addr n vm@(HeroVM {mem}) = vm { mem = putNum w addr n mem }
 
 getNum :: Integral n => Int -> Int32 -> IntMap Int -> n
 --getNum w addr mem = sum $ zipWith (*) (fromIntegral <$> bs) ((256^) <$> [(0 :: Int)..]) where bs = fmap (mem IM.!) ((fromIntegral addr +) <$> [0..w-1])
@@ -86,11 +98,16 @@ take' :: Int -> [a] -> [a]
 take' n as | n > length as = error "BAD TAKE"
            | otherwise = take n as
 
--- The `End` opcode is reintroduced at the ends of function calls, so we
--- know when to pop locals, and when to stop popping instructions for `Return`.
-runWasm :: ((String, String) -> HeroVM a -> [WasmOp] -> IO (HeroVM a))
-  -> [Char] -> HeroVM a -> IO ([WasmOp], HeroVM a)
-runWasm fns s herovm = let
+-- | Runs an export with arguments in a HeroVM.
+-- First argument is a function returning functions corresponding to module
+-- imports.
+runWasm
+  :: ((String, String) -> VMFun a)
+  -> [Char]  -- Function.
+  -> [WasmOp]  -- Arguments.
+  -> HeroVM a
+  -> IO ([WasmOp], HeroVM a)
+runWasm fns fun args herovm = let
   Wasm {imports, exports, decls, code} = wasm herovm
   fCount = length imports
   run vm@HeroVM {insts, stack} | null insts = pure (stack, vm)
@@ -102,8 +119,8 @@ runWasm fns s herovm = let
       let
         -- TODO: Dynamic type-check.
         inCount = length $ fst $ sigs vm IM.! k
-        (I32_const i:args) = take' (inCount + 1) stack
-      run =<< (table vm IM.! fromIntegral i) (step $ drop' (inCount + 1) stack) (reverse args)
+        (I32_const i:params) = take' (inCount + 1) stack
+      run =<< (table vm IM.! fromIntegral i) (step $ drop' (inCount + 1) stack) (reverse params)
     Call i -> if i < fCount then do
         let
           (importName, (ins, _)) = imports!!i
@@ -113,6 +130,9 @@ runWasm fns s herovm = let
         let
           (locals, body) = code!!(i - fCount)
           k = length $ fst $ decls !! (i - fCount)
+        -- The `End` opcode is reintroduced at the ends of function calls, so
+        -- we know when to pop locals, and when to stop popping instructions
+        -- for `Return`.
         run vm { stack = drop' k stack, locs = IM.fromList (zip [0..] $ reverse (take' k stack) ++ locals):locs, insts = body:(End:head i1):tail i1 }
     Return -> run vm { insts = dropWhile ((End /=) . head) insts }
     End -> run vm { locs = tail locs, insts = i1 }
@@ -219,8 +239,8 @@ runWasm fns s herovm = let
       boolBinOp64 f = run $ step (c:drop 2 stack) where
         (I64_const b:I64_const a:_) = stack
         c = I32_const $ fromIntegral $ fromEnum $ f a b
-  fI = fromMaybe (error $ "no such export: " ++ s) $ lookup s exports
-  in run herovm { insts = [[Call fI]] }
+  fI = fromMaybe (error $ "no such export: " ++ fun) $ lookup fun exports
+  in run (setArgsVM args herovm) { insts = [[Call fI]] }
 
 -- | Builds a HeroVM for given Wasm binary and persistent globals.
 mkHeroVM :: a -> Wasm -> [(Int, WasmOp)] -> HeroVM a
@@ -239,5 +259,5 @@ mkHeroVM st w gs = HeroVM initGlobals [] [] [] (IM.fromList $
 setArgsVM :: [WasmOp] -> HeroVM a -> HeroVM a
 setArgsVM ls vm = vm { stack = reverse ls ++ stack vm }
 
-setTable :: Int32 -> (HeroVM a -> [WasmOp] -> IO (HeroVM a)) -> HeroVM a -> HeroVM a
+setTable :: Int32 -> VMFun a -> HeroVM a -> HeroVM a
 setTable slot fun vm = vm { table = IM.insert (fromIntegral slot) fun $ table vm }
