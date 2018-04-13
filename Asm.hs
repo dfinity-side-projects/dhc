@@ -187,7 +187,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs
     , sect 4 [[encType AnyFunc, 0] ++ leb128 256]  -- Table section (0 = no-maximum).
     , sect 5 [0 : leb128 nPages]  -- Memory section (0 = no-maximum).
     , sect 6 $  -- Global section (1 = mutable).
-      [ [encType I32, 1, 0x41] ++ sleb128 (65536*nPages - 4) ++ [0xb]  -- SP
+      [ [encType I32, 1, 0x41] ++ sleb128 memTop ++ [0xb]  -- SP
       , [encType I32, 1, 0x41] ++ sleb128 (initialHP wm) ++ [0xb]  -- HP
       , [encType I32, 1, 0x41, 0, 0xb]  -- BP
       ]
@@ -198,7 +198,6 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs
       [exportFun s ('@':s) | (s, _) <- exports] ++
       [ encStr "memory" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
       , encStr "table" ++ [1, 0]  -- 1 = external_kind Table, 0 = memory index.
-      , exportFun "main" "#main"
       ]
     , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
     , sect 11 $ encStrConsts <$> M.assocs strAddrs  -- Data section.
@@ -206,6 +205,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs
     , sectCustom "dfnhs" [ord <$> src]
     ]
   swp (a, b) = (b, a)
+  memTop = 65536*nPages - 4
   encStrConsts (s, offset) = concat
     [ [0, 0x41] ++ sleb128 offset ++ [0xb]
     , leb128 $ 16 + sbslen s
@@ -246,19 +246,6 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs
     , ("#nil42", (([], []), nil42Asm))
     , ("#setstore", (([I32, I32], []), setStoreAsm storeCount))
     , ("#getstore", (([I32], [I32]), getStoreAsm storeCount))
-    -- Outer "#main" function. It calls the internal "main" function.
-    , ("#main", (([], []),
-      -- The magic constant 42 represents the RealWorld.
-      [ Get_global sp  -- [sp] = 42
-      , I32_const 42
-      , I32_store 2 0
-      , Get_global sp  -- sp = sp - 4
-      , I32_const 4
-      , I32_sub
-      , Set_global sp
-      ]
-      ++ concatMap fromIns [PushGlobal "main", MkAp, Eval]
-      ++ [End]))
     ] ++ (second (second $ concatMap deQuasi) <$> boostFuns)
   wasmFuns =
     (second (first (\(ins, outs) -> (typeNo ins outs, 0))) <$> internalFuns)
@@ -395,75 +382,29 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs
   refToI32 (Ref _) = I32
   refToI32 t = t
   wrap (f, ins) = (,) ('@':f) $ (,) (typeNo ins [], 0) $
-    -- Given a function call represented as a tree t on the stack, the
-    -- G-machine ordinarily:
+    -- Wraps a DHC function.
+    -- When a wasm function f(arg0, arg1, ...) is called,
+    -- the arguments are placed in local variables.
+    -- This wrapper builds:
     --
-    --   1. Removes the spine, so the arguments lie on the stack. The node
-    --   t is preserved, and follows the arguments.
-    --   2. Calls the wasm top-level function. The result is pushed on the
-    --   stack.
-    --   3. The call in step 2 finishes by overwriting t with an indirection
-    --   node (lazy update).
+    --   f :@ arg0 :@ arg 1 :@ ... :@ #RealWorld
     --
-    -- Here, we simulate step 1, so we provide a destination for the
-    -- lazy update in step 3. (It's never used; we should optimize away
-    -- unnecessary updates one day.)
-    --
-    -- All functions that receive messages are IO (otherwise why bother
-    -- sending?) and the IO monad requires special treatment.
-    -- Top-level IO functions return functions that expect a #RealWorld
-    -- argument. (In contrast, the return and bind functions expect a
-    -- #RealWorld dummy argument,)
-    --
-    -- Thus the top of the stack must be an Ap node whose right child
-    -- is #RealWorld. (Morally, the left child should be the function call t
-    -- but our spine removal is indifferent. Our stack dumping routine can
-    -- get confused though.)
-
-    -- Start with a spined #RealWorld.
-    [ Get_global hp  -- [hp] = TagAp
-    , tag_const TagAp
-    , I32_store 2 0
-    , Get_global hp  -- [hp + 12] = 42
-    , I32_const 12
-    , I32_add
+    -- on the heap, places a pointer to his on the stack, then calls Eval.
+    [ I32_const $ fromIntegral memTop  -- sp = top of memory
+    , Set_global sp
+    , Get_global sp  -- [sp] = 42
     , I32_const 42
     , I32_store 2 0
-    , Get_global sp  -- [sp] = hp
-    , Get_global hp
-    , I32_store 2 0
     , Get_global sp  -- sp = sp - 4
     , I32_const 4
     , I32_sub
     , Set_global sp
-    , Get_global hp  -- hp = hp + 16
-    , I32_const 16
-    , I32_add
-    , Set_global hp
-    -- Anticipate UpdatePop.
-    , Get_global sp  -- [sp] = hp
-    , Get_global hp
-    , I32_store 2 0
-    , Get_global sp  -- sp = sp - 4
-    , I32_const 4
-    , I32_sub
-    , Set_global sp
-    , Get_global hp  -- hp = hp + 8
-    , I32_const 8
-    , I32_add
-    , Set_global hp
-    ]
     -- Input arguments are local variables.
     -- We move these to our stack in reverse order.
-    ++ concat (reverse $ zipWith wdeclIn (refToI32 <$> ins) [0..]) ++
-    [ Call $ wasmFunNo f
-    -- We restore the stack to its original state so that our synchronous
-    -- test variant of Primea works.
-    -- In the real Primea, calls are asynchronous and we could skip this.
-    , Get_global sp  -- sp = sp + 4
-    , I32_const 4
-    , I32_add
-    , Set_global sp
+    ] ++ concat (reverse $ zipWith wdeclIn (refToI32 <$> ins) [0..]) ++
+    -- Build the spine.
+    concatMap fromIns (PushGlobal f : replicate (length ins + 1) MkAp) ++
+    [ Call $ wasmFunNo "#eval"
     , End
     ]
   wdeclIn I64 i =
@@ -472,7 +413,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs
     ]
   wdeclIn I32 i =
     [ Get_local i
-    , Call $ wasmFunNo "#pushref"  -- Evaluate.
+    , Call $ wasmFunNo "#pushref"
     ]
   wdeclIn _ _ = error "TODO"
   sect t xs = t : lenc (varlen xs ++ concat xs)

@@ -447,13 +447,7 @@ parseDefs :: String -> Either ParseError HsProgram
 parseDefs = qParse program (AwaitBrace, []) ""
 
 parseModule :: String -> Either ParseError AstPlus
-parseModule = fmap maybeAddMain . qParse contract (Boilerplate, []) ""
-
-maybeAddMain :: AstPlus -> AstPlus
-maybeAddMain a = case lookup "main" $ supers $ defs a of
-  Nothing -> a { defs = addSuper ("main",
-    Ast $ Ast (Var "pure") :@ Ast (Pack 0 0)) $ defs a }
-  Just _  -> a
+parseModule = qParse contract (Boilerplate, []) ""
 
 -- The Constraints monad combines a State monad and an Either monad.
 -- The state consists of the set of constraints and next integer available
@@ -815,8 +809,8 @@ boostTypes b = M.fromList $ second (((,) Nothing) . fst) <$> boostHs b
 
 hsToAst :: Boost -> QQuoter -> String -> Either String AstPlus
 hsToAst boost qq prog = do
-  a@(AstPlus _ _ ds _) <- showErr $ fmap maybeAddMain $ evalState (runParserT contract (Boilerplate, []) "" prog) (qq, M.empty)
-  (preStorageInferred, storageCons) <- inferType (genTypes (datas ds) $ stores a) (supers ds ++ supers preludeDefs)
+  a@(AstPlus _ _ ds _) <- showErr $ evalState (runParserT contract (Boilerplate, []) "" prog) (qq, M.empty)
+  (preStorageInferred, storageCons) <- inferType (genTypes (datas ds) $ stores a) (wdecls a) (supers ds ++ supers preludeDefs)
   let
     inferred = constrainStorage storageCons preStorageInferred
     subbedDefs = (second expandCase <$>) . liftLambdas . (second snd <$>) $ inferred
@@ -850,27 +844,28 @@ constrainStorage cons ds = second (first (first rewriteType)) <$> ds where
 
 inferType
   :: Globals
-  -> [(String, Ast)]
+  -> [String]  -- wdecl functions.
+  -> [(String, Ast)]  -- Supercombinator definitions.
   -- Returns types of definitions and stores.
   -> Either String ([(String, (QualType, Ast))], Map String Type)
-inferType globs ds = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJust $ lookup k ds))) sortedDefs where
+inferType globs ws ds = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJust $ lookup k ds))) sortedDefs where
   -- Groups of definitions, sorted in the order we should infer their types.
   sortedDefs = reverse $ scc (callees ds) $ fst <$> ds
   inferMutual :: ([(String, (QualType, Ast))], Map String Type) -> [(String, Ast)] -> Either String ([(String, (QualType, Ast))], Map String Type)
   inferMutual (acc, accStorage) grp = do
-    (typedAsts, ConState _ cs m) <- buildConstraints $ do
-      let ids = fst <$> grp
-      ts <- mapM (gather globs env) $ snd <$> grp
-      when ("main" `elem` ids) $ do
-        r <- newTV
-        addConstraint (TV "*main", TApp (TC "IO") r)
-      mapM_ addConstraint $ zip tvs $ annOf <$> ts
-      pure $ zip ids ts
+    (typedAsts, ConState _ cs m) <- buildConstraints $ forM grp $ \(s, d) -> do
+      t <- gather globs env d
+      addConstraint (TV $ '*':s, annOf t)
+      when (s `elem` ws) $
+        addConstraint (retType $ annOf t, TApp (TC "IO") $ TC "()")
+      pure (s, t)
     (soln, ctx) <- unify cs m
     let storageCons = M.filterWithKey (\k _ -> head k == '@') soln
     -- TODO: Look for conflicting storage constraints.
     pure ((++ acc) $ generalize soln ctx <$> typedAsts, accStorage `M.union` storageCons)
     where
+      retType (_ :-> a) = retType a
+      retType r = r
       annOf (AAst a _) = a
       buildConstraints (Constraints f) = f $ ConState 0 [] M.empty
       tvs = TV . ('*':) . fst <$> grp
