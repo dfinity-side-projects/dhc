@@ -293,7 +293,7 @@ runDemo :: String -> IO String
 runDemo src = case hsToWasm demoBoost src of
   Left err -> error err
   Right ints -> let
-    Right wasm = parseWasm $ B.pack $ fromIntegral <$> ints
+    wasm = either error id $ parseWasm $ B.pack $ fromIntegral <$> ints
     in stateVM . snd <$> (runWasm syscall "main" [] $ mkHeroVM "" wasm [])
   where
   syscall ("system", "putStr") vm [I32_const ptr, I32_const len] = pure

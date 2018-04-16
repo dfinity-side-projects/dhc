@@ -192,7 +192,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs
       , [encType I32, 1, 0x41, 0, 0xb]  -- BP
       ]
       -- Global stores.
-      ++ replicate storeCount [encType I32, 1, 0x41, 0, 0xb]
+      -- Extra global records if `main` has been run yet.
+      ++ replicate (1 + storeCount) [encType I32, 1, 0x41, 0, 0xb]
     , sect 7 $  -- Export section.
       -- The "wdecl" functions are exported verbatim.
       [exportFun s ('@':s) | (s, _) <- exports] ++
@@ -254,11 +255,15 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs
     -- directly precede those defined in the program.
     ++ ((\(s, p) -> (s, ((typeNo [] [], localCount s), p))) <$> prims)
     -- Functions from the program.
-    ++ ((\(f, g) -> (f, ((typeNo [] [], 0), (++ [End]) $ concatMap fromIns g))) <$> gmachine)
+    ++ (fromGMachine <$> gmachine)
     -- Wrappers for call_indirect calls.
     ++ ciFuns
     -- Wrappers for functions in "wdecl" section.
     ++ (wrap <$> exports)
+
+  fromGMachine (f, g) = (f, ((typeNo [] [], 0), (if f == "main"
+    then ([I32_const 1, Set_global mainCalled] ++)
+    else id) $ (++ [End]) $ concatMap fromIns g))
 
   ciFuns = wrapCallIndirect <$> callTypes wm
   -- When sending a message with only one item, we have a bare argument
@@ -390,6 +395,29 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs
     --   f :@ arg0 :@ arg 1 :@ ... :@ #RealWorld
     --
     -- on the heap, places a pointer to his on the stack, then calls Eval.
+    --
+    -- Additionally, if a `main` function exists, then for each non-`main`
+    -- function, check a global flag and run `main` if it is false.
+    -- The `main` function should set this global flag to true.
+    (if f /= "main" && M.member "main" wasmFunMap then
+    [ Get_global mainCalled  -- if (!mainCalled) mainCalled = 1, main;
+    , I32_eqz
+    , If Nada (
+      [ I32_const $ fromIntegral memTop  -- sp = top of memory
+      , Set_global sp
+      , Get_global sp  -- [sp] = 42
+      , I32_const 42
+      , I32_store 2 0
+      , Get_global sp  -- sp = sp - 4
+      , I32_const 4
+      , I32_sub
+      , Set_global sp
+
+      --, Call $ wasmFunNo "main"
+      ] ++ concatMap fromIns [PushGlobal "main", MkAp, Eval])
+    ]
+    else []) ++
+
     [ I32_const $ fromIntegral memTop  -- sp = top of memory
     , Set_global sp
     , Get_global sp  -- [sp] = 42
@@ -399,9 +427,10 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs
     , I32_const 4
     , I32_sub
     , Set_global sp
+    ] ++
     -- Input arguments are local variables.
     -- We move these to our stack in reverse order.
-    ] ++ concat (reverse $ zipWith wdeclIn (refToI32 <$> ins) [0..]) ++
+    concat (reverse $ zipWith wdeclIn (refToI32 <$> ins) [0..]) ++
     -- Build the spine.
     concatMap fromIns (PushGlobal f : replicate (length ins + 1) MkAp) ++
     [ Call $ wasmFunNo "#eval"
@@ -526,12 +555,12 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs
           [ Get_local 0   -- branch on local0 (global store index)
           , Br_table [0..count - 1] (count - 1)
           ]
-        , Get_global 3
+        , Get_global storeOffset
         , Return
         ]
       nest j =
         [ Block Nada $ nest (j - 1)
-        , Get_global $ 2 + j
+        , Get_global $ storeOffset + j - 1
         , Return
         ]
   setStoreAsm :: Int -> [WasmOp]
@@ -545,12 +574,12 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs
           [ Get_local 0   -- branch on local0 (global store index)
           , Br_table [0..count - 1] (count - 1)
           ]
-        , Set_global 3
+        , Set_global $ storeOffset
         , Return
         ]
       nest j =
         [ Block Nada $ nest (j - 1)
-        , Set_global $ 2 + j
+        , Set_global $ storeOffset + j - 1
         , Return
         ]
 
@@ -767,8 +796,8 @@ varlen xs = leb128 $ length xs
 lenc :: [Int] -> [Int]
 lenc xs = varlen xs ++ xs
 
-sp, hp, bp :: Int
-[sp, hp, bp] = [0, 1, 2]
+sp, hp, bp, mainCalled, storeOffset :: Int
+[sp, hp, bp, mainCalled, storeOffset] = [0, 1, 2, 3, 4]
 
 compile :: [String] -> Ast -> ([Ins], CompilerState)
 compile ps d = runState (mk1 ps d) $ CompilerState [] [] []
