@@ -132,13 +132,13 @@ mkStrConsts ss = f (0, []) ss where
   f (p, ds) [] = (p, M.fromList ds)
   f (k, ds) (s:rest) = f (k + 16 + align4 (sbslen s), ((s, k):ds)) rest
 
-astToIns :: AstPlus -> (WasmMeta, [(String, [Ins])])
-astToIns (AstPlus ws ps ds ts) = (WasmMeta funs (wasmDecl <$> ws) ciTypes initHP addrs $ length ps, ins) where
-  compilerOut = second (compile ps) <$> supers ds
+astToIns :: Clay -> (WasmMeta, [(String, [Ins])])
+astToIns cl = (WasmMeta funs (wasmDecl <$> wdecls cl) ciTypes initHP addrs $ length $ stores cl, ins) where
+  compilerOut = second (compile $ stores cl) <$> supers cl
   ciTypes = foldl' union [] $ callIndirectTypes . snd . snd <$> compilerOut
   ins = second fst <$> compilerOut
   (initHP, addrs) = mkStrConsts $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
-  wasmDecl w = (w, wasmType [] $ fst $ fromJust $ lookup w ts)
+  wasmDecl w = (w, wasmType [] $ fst $ fromJust $ lookup w $ funTypes cl)
   wasmType acc t = case t of
     a :-> b -> wasmType (translateType a : acc) b
     TApp (TC "IO") (TC "()") -> reverse acc
@@ -150,7 +150,7 @@ astToIns (AstPlus ws ps ds ts) = (WasmMeta funs (wasmDecl <$> ws) ciTypes initHP
   translateType (TC "Databuf") = Ref "Databuf"
   translateType (TC "Actor") = Ref "Actor"
   translateType t = error $ "no corresponding wasm type: " ++ show t
-  funs = M.fromList $ ((\(name, Ast (Lam as _)) -> (name, length as)) <$> supers ds)
+  funs = M.fromList $ ((\(name, Ast (Lam as _)) -> (name, length as)) <$> supers cl)
 
 enc32 :: Int -> [Int]
 enc32 n = (`mod` 256) . (div n) . (256^) <$> [(0 :: Int)..3]

@@ -214,6 +214,11 @@ demoCases = second ("wdecl (main)\n" ++) <$>
   [ ("Hello, World!\n", "main = putStr \"Hello, World!\\n\"")
   , ("Hello, Quasi!\n", "main = putStr [here|Hello, Quasi!\n|]")
   , ("9876543210", "main = putInt 9876543210")
+  , ("42", unlines
+    [ "main = putInt (f 42)"
+    , "f :: Int -> Int"
+    , "f x = x"
+    ])
   , ("314", unlines
     [ "data List x = Nil | Cons x (List x)"
     , "main = f (Cons 3 (Cons 1 (Cons 4 Nil)))"

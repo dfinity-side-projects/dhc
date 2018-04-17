@@ -1,10 +1,9 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE PackageImports #-}
 module DHC
-  ( parseModule, AstF(..), Ast(..), AstPlus(..), Type(..)
+  ( parseModule, AstF(..), Ast(..), Clay(..), Type(..)
   , inferType, parseDefs, lexOffside
   , arityFromType, hsToAst, liftLambdas
-  , HsProgram(..)
   ) where
 import Control.Arrow
 import Control.Monad
@@ -45,7 +44,7 @@ type QQuoter = String -> String -> Either String String
 type QQMonad = State (QQuoter, QQCache)
 type Parser = ParsecT String (LayoutState, [Int]) QQMonad
 
-program :: Parser HsProgram
+program :: Parser Clay
 program = do
   filler
   r <- toplevels
@@ -79,27 +78,37 @@ standardFixities = M.fromList $ concatMap (f . words)
 fixity :: String -> (Associativity, Int)
 fixity o = fromMaybe (LAssoc, 9) $ M.lookup o standardFixities
 
-data HsProgram = HsProgram
-  { supers :: [(String, Ast)]
+data Clay = Clay
+  { wdecls :: [String]
+  , stores :: [String]
+  , funTypes :: [(String, QualType)]
+  , supers :: [(String, Ast)]
+  , genDecls :: [(String, Type)]
   , datas :: [(String, (Maybe (Int, Int), Type))]
   , classes :: [(String, (Type, [(String, String)]))]
   } deriving Show
 
-addSuper :: (String, Ast) -> HsProgram -> HsProgram
+addSuper :: (String, Ast) -> Clay -> Clay
 addSuper sc p = p { supers = sc:supers p }
 
-addData :: [(String, (Maybe (Int, Int), Type))] -> HsProgram -> HsProgram
+addData :: [(String, (Maybe (Int, Int), Type))] -> Clay -> Clay
 addData xs p = p { datas = xs ++ datas p }
 
-addClass :: [(String, (Type, [(String, String)]))] -> HsProgram -> HsProgram
+addClass :: [(String, (Type, [(String, String)]))] -> Clay -> Clay
 addClass xs p = p { classes = xs ++ classes p }
 
-toplevels :: Parser HsProgram
-toplevels = foldl' (flip ($)) (HsProgram [] [] []) <$> topDecls where
+addGenDecl :: [(String, Type)] -> Clay -> Clay
+addGenDecl xs p = p { genDecls = xs ++ genDecls p }
+
+toplevels :: Parser Clay
+toplevels = foldl' (flip ($)) (Clay [] [] [] [] [] [] []) <$> topDecls where
   topDecls = between (want "{") (want "}") (topDecl `sepBy` want ";")
-  topDecl = dataDecl <|> classDecl <|> sc
+  topDecl
+      = (want "data" >> simpleType)
+    <|> (want "class" >> classDecl)
+    <|> genDecl
+    <|> sc
   classDecl = do
-    void $ want "class"
     s <- con
     t <- tyVar
     void $ want "where"
@@ -110,8 +119,12 @@ toplevels = foldl' (flip ($)) (HsProgram [] [] []) <$> topDecls where
     void $ want "::"
     t <- typeExpr
     pure (v, t)
-  dataDecl = do
-    void $ want "data"
+  genDecl = try $ do
+    v <- var
+    void $ want "::"
+    t <- typeExpr
+    pure $ addGenDecl [(v, t)]
+  simpleType = do
     s <- con
     args <- many tyVar
     void $ want "="
@@ -121,17 +134,16 @@ toplevels = foldl' (flip ($)) (HsProgram [] [] []) <$> topDecls where
         c <- con
         ts <- many atype
         pure (c, foldr (:->) t ts)
-    typeCons <- typeCon `sepBy` want "|"
+    typeCons <- typeCon `sepBy1` want "|"
     pure $ addData [(c, (Just (i, arityFromType typ), typ))
       | (i, (c, typ)) <- zip [0..] typeCons]
-  typeExpr = foldr1 (:->) <$> btype `sepBy` want "->"
+  typeExpr = foldr1 (:->) <$> btype `sepBy1` want "->"
   btype = foldl1' TApp <$> many1 atype
   -- Unsupported: [] (->) (,{,}) constructors.
   atype = (TC <$> con)
     <|> (GV <$> tyVar)
     <|> (TApp (TC "[]") <$> between (want "[") (want "]") typeExpr)
     <|> (parenType <$> between (want "(") (want ")") (typeExpr `sepBy` want ","))
-  parenType []  = TC "()"
   parenType [x] = x
   parenType xs  = foldr1 TApp $ TC "()":xs
   sc = try (do
@@ -406,14 +418,7 @@ filler = void $ many $ void (char ' ') <|> nl <|> com
     (st, is) <- getState
     when (st == LineMiddle) $ putState (LineStart, is)
 
-data AstPlus = AstPlus
-  { wdecls :: [String]
-  , stores :: [String]
-  , defs :: HsProgram
-  , funTypes :: [(String, QualType)]
-  } deriving Show
-
-contract :: Parser AstPlus
+contract :: Parser Clay
 contract = do
   ws <- option [] $ try $ want "wdecl" >>
     (between (want "(") (want ")") $ var `sepBy` want ",")
@@ -422,7 +427,7 @@ contract = do
   putState (AwaitBrace, [])
   p <- toplevels
   when (isNothing $ mapM (`lookup` supers p) ws) $ fail "bad wdecls"
-  pure $ AstPlus ws ps p []
+  pure $ p { wdecls = ws, stores = ps }
 
 qParse :: Parser a
   -> (LayoutState, [Int])
@@ -443,10 +448,10 @@ lexOffside = fmap (fmap snd) <$> qParse tokUntilEOF (AwaitBrace, []) "" where
       LexEOF -> pure []
       _ -> (t:) <$> tokUntilEOF
 
-parseDefs :: String -> Either ParseError HsProgram
+parseDefs :: String -> Either ParseError Clay
 parseDefs = qParse program (AwaitBrace, []) ""
 
-parseModule :: String -> Either ParseError AstPlus
+parseModule :: String -> Either ParseError Clay
 parseModule = qParse contract (Boilerplate, []) ""
 
 -- The Constraints monad combines a State monad and an Either monad.
@@ -807,30 +812,16 @@ arityFromType = f 0 where
 boostTypes :: Boost -> Map String (Maybe (Int, Int), Type)
 boostTypes b = M.fromList $ second (((,) Nothing) . fst) <$> boostHs b
 
-hsToAst :: Boost -> QQuoter -> String -> Either String AstPlus
+hsToAst :: Boost -> QQuoter -> String -> Either String Clay
 hsToAst boost qq prog = do
-  a@(AstPlus _ _ ds _) <- showErr $ evalState (runParserT contract (Boilerplate, []) "" prog) (qq, M.empty)
-  (preStorageInferred, storageCons) <- inferType (genTypes (datas ds) $ stores a) (wdecls a) (supers ds ++ supers preludeDefs)
+  cl <- showErr $ evalState (runParserT contract (Boilerplate, []) "" prog) (qq, M.empty)
+  (preStorageInferred, storageCons) <- inferType boost cl
   let
     inferred = constrainStorage storageCons preStorageInferred
     subbedDefs = (second expandCase <$>) . liftLambdas . (second snd <$>) $ inferred
     types = second fst <$> inferred
-  pure a { defs = (defs a) { supers = subbedDefs }, funTypes = types }
-  where
-    -- List notation is a special case in Haskell.
-    -- This is "data [a] = [] | a : [a]" in spirit.
-    listPresets = M.fromList
-      [ ("[]", (Just (0, 0), TApp (TC "[]") a))
-      , (":",  (Just (1, 2), a :-> TApp (TC "[]") a :-> TApp (TC "[]") a))
-      ] where a = GV "a"
-    genTypes dataDecls ps = listPresets
-      `M.union` M.fromList (datas preludeDefs)
-      `M.union` M.fromList dataDecls
-      `M.union` boostTypes boost
-      `M.union` (M.fromList $ storeTypeConstraint <$> ps)
-    Right preludeDefs = parseDefs $ boostPrelude boost
-    showErr = either (Left . show) Right
-    storeTypeConstraint s = (s, (Nothing, TC "Storage" `TApp` TV ('@':s)))
+  pure cl { supers = subbedDefs, funTypes = types }
+  where showErr = either (Left . show) Right
 
 constrainStorage :: Map String Type -> [(String, (QualType, Ast))] -> [(String, (QualType, Ast))]
 constrainStorage cons ds = second (first (first rewriteType)) <$> ds where
@@ -843,21 +834,40 @@ constrainStorage cons ds = second (first (first rewriteType)) <$> ds where
   rec = rewriteType
 
 inferType
-  :: Globals
-  -> [String]  -- wdecl functions.
-  -> [(String, Ast)]  -- Supercombinator definitions.
+  :: Boost
+  -> Clay
   -- Returns types of definitions and stores.
   -> Either String ([(String, (QualType, Ast))], Map String Type)
-inferType globs ws ds = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJust $ lookup k ds))) sortedDefs where
+inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJust $ lookup k ds))) sortedDefs where
   -- Groups of definitions, sorted in the order we should infer their types.
   sortedDefs = reverse $ scc (callees ds) $ fst <$> ds
+  -- List notation is a special case in Haskell.
+  -- This is "data [a] = [] | a : [a]" in spirit.
+  listPresets = M.fromList
+    [ ("[]", (Just (0, 0), TApp (TC "[]") a))
+    , (":",  (Just (1, 2), a :-> TApp (TC "[]") a :-> TApp (TC "[]") a))
+    ] where a = GV "a"
+  genTypes dataDecls ps = listPresets
+    `M.union` M.fromList (datas preludeDefs)
+    `M.union` M.fromList dataDecls
+    `M.union` boostTypes boost
+    `M.union` (M.fromList $ storeTypeConstraint <$> ps)
+  Right preludeDefs = parseDefs $ boostPrelude boost
+  globs = genTypes (datas cl) $ stores cl
+  ds = supers cl ++ supers preludeDefs
+  storeTypeConstraint s = (s, (Nothing, TC "Storage" `TApp` TV ('@':s)))
   inferMutual :: ([(String, (QualType, Ast))], Map String Type) -> [(String, Ast)] -> Either String ([(String, (QualType, Ast))], Map String Type)
   inferMutual (acc, accStorage) grp = do
     (typedAsts, ConState _ cs m) <- buildConstraints $ forM grp $ \(s, d) -> do
       t <- gather globs env d
       addConstraint (TV $ '*':s, annOf t)
-      when (s `elem` ws) $
+      when (s `elem` wdecls cl) $
         addConstraint (retType $ annOf t, TApp (TC "IO") $ TC "()")
+      case (s `lookup` genDecls cl) of
+        Nothing -> pure ()
+        Just gt -> do
+          (ty, _) <- instantiate (gt, [])
+          addConstraint (TV $ '*':s, ty)
       pure (s, t)
     (soln, ctx) <- unify cs m
     let storageCons = M.filterWithKey (\k _ -> head k == '@') soln
