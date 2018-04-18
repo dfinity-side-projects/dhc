@@ -6,6 +6,7 @@ module Hero
   , HeroVM
   , parseWasm
   , runWasm
+  , runWasmIndex
   , mkHeroVM
   , setArgsVM
   , setTable
@@ -27,7 +28,7 @@ import Network.DFINITY.Parse
 
 import WasmOp
 
-type VMFun a = HeroVM a -> [WasmOp] -> IO (HeroVM a)
+type VMFun a = HeroVM a -> [WasmOp] -> IO ([WasmOp], HeroVM a)
 
 data HeroVM a = HeroVM
   { globs :: IntMap WasmOp
@@ -39,6 +40,8 @@ data HeroVM a = HeroVM
   , table :: IntMap (VMFun a)
   , wasm  :: Wasm
   , state :: a
+  -- Returns functions corresponding to module imports.
+  , sys :: ((String, String) -> VMFun a)
   }
 
 stateVM :: HeroVM a -> a
@@ -98,17 +101,11 @@ take' :: Int -> [a] -> [a]
 take' n as | n > length as = error "BAD TAKE"
            | otherwise = take n as
 
--- | Runs an export with arguments in a HeroVM.
--- First argument is a function returning functions corresponding to module
--- imports.
-runWasm
-  :: ((String, String) -> VMFun a)
-  -> [Char]  -- Function.
-  -> [WasmOp]  -- Arguments.
-  -> HeroVM a
-  -> IO ([WasmOp], HeroVM a)
-runWasm fns fun args herovm = let
-  Wasm {imports, exports, decls, code} = wasm herovm
+-- | Runs a function at a given index.
+runWasmIndex :: Int -> [WasmOp] -> HeroVM a -> IO ([WasmOp], HeroVM a)
+runWasmIndex funNo args herovm = run (setArgsVM args herovm) { insts = [[Call funNo]] }
+  where
+  Wasm {imports, decls, code} = wasm herovm
   fCount = length imports
   run vm@HeroVM {insts, stack} | null insts = pure (stack, vm)
   run vm@HeroVM {insts} | null $ head insts = case tail insts of
@@ -120,12 +117,14 @@ runWasm fns fun args herovm = let
         -- TODO: Dynamic type-check.
         inCount = length $ fst $ sigs vm IM.! k
         (I32_const i:params) = take' (inCount + 1) stack
-      run =<< (table vm IM.! fromIntegral i) (step $ drop' (inCount + 1) stack) (reverse params)
+      (results, vm1) <- (table vm IM.! fromIntegral i) (step $ drop' (inCount + 1) stack) (reverse params)
+      run $ setArgsVM results vm1
     Call i -> if i < fCount then do
         let
           (importName, (ins, _)) = imports!!i
           k = length ins
-        run =<< fns importName (step $ drop' k stack) (reverse $ take' k stack)
+        (results, vm1) <- sys herovm importName (step $ drop' k stack) (reverse $ take' k stack)
+        run $ setArgsVM results vm1
       else do
         let
           (locals, body) = code!!(i - fCount)
@@ -239,21 +238,31 @@ runWasm fns fun args herovm = let
       boolBinOp64 f = run $ step (c:drop 2 stack) where
         (I64_const b:I64_const a:_) = stack
         c = I32_const $ fromIntegral $ fromEnum $ f a b
-  fI = fromMaybe (error $ "no such export: " ++ fun) $ lookup fun exports
-  in run (setArgsVM args herovm) { insts = [[Call fI]] }
 
--- | Builds a HeroVM for given Wasm binary and persistent globals.
-mkHeroVM :: a -> Wasm -> [(Int, WasmOp)] -> HeroVM a
-mkHeroVM st w gs = HeroVM initGlobals [] [] [] (IM.fromList $
-    concatMap strToAssocs $ dataSection w)
-    (IM.fromList $ zip [0..] $ types w)
-    IM.empty
-    w
-    st
-  where
+-- | Runs an export with arguments in a HeroVM.
+runWasm :: [Char] -> [WasmOp] -> HeroVM a -> IO ([WasmOp], HeroVM a)
+runWasm f args vm = runWasmIndex n args vm where
+  n = fromMaybe (error $ "bad export: " ++ f) $ lookup f $ exports $ wasm vm
+
+-- | Builds a HeroVM for given Wasm binary, imports and persistent globals.
+mkHeroVM :: a -> ((String, String) -> VMFun a) -> Wasm -> [(Int, WasmOp)] -> HeroVM a
+mkHeroVM st imps w gs = HeroVM
+  { sys = imps
+  , globs = initGlobals
+  , locs = []
+  , stack = []
+  , insts = []
+  , mem = IM.fromList $ concatMap strToAssocs $ dataSection w
+  , sigs = IM.fromList $ zip [0..] $ types w
+  , table = IM.fromList $ concatMap mkElems $ elemSection w
+  , wasm = w
+  , state = st
+  } where
   initGlobals = IM.fromList $ (zip [0..] $ head . snd <$> globals w) ++ gs
   strToAssocs ([I32_const n], s) = zip [fromIntegral n..] $ ord <$> s
   strToAssocs _ = error "BUG!"
+  mkElems (offset, ns) = zip [offset..] $ wrapCall <$> ns
+  wrapCall n = \vm args -> runWasmIndex n args vm
 
 -- | Place arguments on WebAssembly stack.
 setArgsVM :: [WasmOp] -> HeroVM a -> HeroVM a

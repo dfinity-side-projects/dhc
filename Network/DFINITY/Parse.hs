@@ -25,6 +25,7 @@ data Wasm = Wasm
   , globals :: [((WasmType, Bool), [WasmOp])]
   , exports :: [(String, Int)]
   , start :: Maybe Int
+  , elemSection :: [(Int, [Int])]
   , code :: [Body]
   , dataSection :: [([WasmOp], String)]
   , dfnExports :: [(String, [WasmType])]
@@ -34,7 +35,7 @@ data Wasm = Wasm
   } deriving Show
 
 emptyWasm :: Wasm
-emptyWasm = Wasm [] [] [] 0 [] [] [] Nothing [] [] [] [] [] ""
+emptyWasm = Wasm [] [] [] 0 [] [] [] Nothing [] [] [] [] [] [] ""
 
 data ByteParser a = ByteParser (ByteString -> Either String (a, ByteString))
 
@@ -183,11 +184,6 @@ wasm = do
         pure $ types w !! t
       pure w { decls = sigs }
 
-    sectStart w = do
-      i <- varuint32
-      when (i > functionCount w) $ bad "function index out of range"
-      pure w { start = Just i }
-
     sectTable w = do
       n <- varuint32
       when (n > 1) $ bad "MVP allows at most one table"
@@ -220,6 +216,23 @@ wasm = do
         x <- codeBlock
         pure (gt, x)
       pure w { globals = gs }
+
+    sectStart w = do
+      i <- varuint32
+      when (i > functionCount w) $ bad "function index out of range"
+      pure w { start = Just i }
+
+    sectElement w = do
+      es <- rep varuint32 $ do
+        index <- varuint32
+        when (index /= 0) $ bad "MVP allows at most one table"
+        [I32_const offset] <- codeBlock
+        ns <- rep varuint32 $ do
+          i <- varuint32
+          when (i > functionCount w) $ bad "function index out of range"
+          pure $ fromIntegral i
+        pure (fromIntegral offset, ns)
+      pure w { elemSection = es }
 
     sectCode w = do
       bodies <- rep varuint32 $ do
@@ -337,7 +350,7 @@ wasm = do
           6 -> sectGlobal
           7 -> sectExport
           8 -> sectStart
-          9 -> error "TODO: element section"
+          9 -> sectElement
           10 -> sectCode
           11 -> sectData
           0 -> sectCustom
