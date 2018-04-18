@@ -299,13 +299,12 @@ runDemo src = case hsToWasm demoBoost src of
   Left err -> error err
   Right ints -> let
     wasm = either error id $ parseWasm $ B.pack $ fromIntegral <$> ints
-    in stateVM . snd <$> (runWasm syscall "main" [] $ mkHeroVM "" wasm [])
+    in stateVM . snd <$> (runWasm "main" [] $ mkHeroVM "" syscall wasm [])
   where
-  syscall ("system", "putStr") vm [I32_const ptr, I32_const len] = pure
-    $ putStateVM (stateVM vm ++
-      [chr $ getNumVM 1 (ptr + i) vm | i <- [0..len - 1]]) vm
-  syscall ("system", "putInt") vm [I64_const i] = pure
-    $ putStateVM (stateVM vm ++ show i) vm
+  syscall ("system", "putStr") vm [I32_const ptr, I32_const len] = pure ([],
+    putStateVM (stateVM vm ++ [chr $ getNumVM 1 (ptr + i) vm | i <- [0..len - 1]]) vm)
+  syscall ("system", "putInt") vm [I64_const i] = pure ([],
+    putStateVM (stateVM vm ++ show i) vm)
   syscall _ _ _ = error "BUG! bad syscall"
 
 altWebTests :: [Test]
@@ -327,9 +326,9 @@ runAltWeb src = case hsToWasm altWebBoost src of
   Left err -> error err
   Right ints -> let
     Right wasm = parseWasm $ B.pack $ fromIntegral <$> ints
-    in stateVM . snd <$> (runWasm altWebSys "main" [] $ mkHeroVM "" wasm [])
+    in stateVM . snd <$> (runWasm "main" [] $ mkHeroVM "" altWebSys wasm [])
 
-altWebSys :: (String, String) -> HeroVM String -> [WasmOp] -> IO (HeroVM String)
+altWebSys :: (String, String) -> HeroVM String -> [WasmOp] -> IO ([WasmOp], HeroVM String)
 altWebSys ("dhc", "system") vm [I32_const n, I32_const sp, I32_const hp]
   | n == 21 = do
     when (getTag /= 6) $ error "BUG! want String"
@@ -337,23 +336,21 @@ altWebSys ("dhc", "system") vm [I32_const n, I32_const sp, I32_const hp]
       ptr = getNumVM 4 (addr + 4) vm
       off = getNumVM 4 (addr + 8) vm
       slen = getNumVM 4 (addr + 12) vm
-    pure
-      $ putNumVM 4 hp (5 :: Int)
-      $ putNumVM 4 (hp + 4) (0 :: Int)
-      $ putNumVM 4 sp hp
-      $ putNumVM 4 (sp - 4) (hp + 8)
-      $ putStateVM (stateVM vm ++
-        [chr $ getNumVM 1 (ptr + off + i) vm | i <- [0..slen - 1]])
-      vm
+    pure ([], putNumVM 4 hp (5 :: Int)
+            $ putNumVM 4 (hp + 4) (0 :: Int)
+            $ putNumVM 4 sp hp
+            $ putNumVM 4 (sp - 4) (hp + 8)
+            $ putStateVM (stateVM vm ++
+              [chr $ getNumVM 1 (ptr + off + i) vm | i <- [0..slen - 1]])
+            vm)
   | n == 22 = do
     when (getTag /= 3) $ error "BUG! want Int"
-    pure
-      $ putNumVM 4 hp (5 :: Int)
-      $ putNumVM 4 (hp + 4) (0 :: Int)
-      $ putNumVM 4 sp hp
-      $ putNumVM 4 (sp - 4) (hp + 8)
-      $ putStateVM (stateVM vm ++ show (getNumVM 8 (addr + 8) vm :: Int))
-      vm
+    pure ([], putNumVM 4 hp (5 :: Int)
+            $ putNumVM 4 (hp + 4) (0 :: Int)
+            $ putNumVM 4 sp hp
+            $ putNumVM 4 (sp - 4) (hp + 8)
+            $ putStateVM (stateVM vm ++ show (getNumVM 8 (addr + 8) vm :: Int))
+            vm)
   | otherwise = error $ "BUG! bad syscall " ++ show n
   where
     addr = getNumVM 4 (sp + 4) vm :: Int32

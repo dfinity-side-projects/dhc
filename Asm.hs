@@ -46,6 +46,7 @@ sbslen = SBS.length
 
 -- | G-Machine instructions.
 data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal String
+  | PushSecret String
   | PushRef Int32
   | PushString ShortByteString
   | MkAp | Slide Int | Split Int | Eval
@@ -88,6 +89,7 @@ data WasmMeta = WasmMeta
   -- Eval uses this to remove the spine correctly.
   { arities :: Map String Int
   , exports :: [(String, [WasmType])]  -- List of wdecl functions.
+  , elements :: [(String, [WasmType])]
   , callTypes :: [[WasmType]]  -- Types needed by call_indirect ops.
   , initialHP :: Int  -- Initial HP.
   , strAddrs :: Map ShortByteString Int  -- String constant addresses.
@@ -133,7 +135,15 @@ mkStrConsts ss = f (0, []) ss where
   f (k, ds) (s:rest) = f (k + 16 + align4 (sbslen s), ((s, k):ds)) rest
 
 astToIns :: Clay -> (WasmMeta, [(String, [Ins])])
-astToIns cl = (WasmMeta funs (wasmDecl <$> wdecls cl) ciTypes initHP addrs $ length $ stores cl, ins) where
+astToIns cl = (WasmMeta
+  { arities = funs
+  , exports = wasmDecl <$> wdecls cl
+  , elements = wasmDecl <$> secrets cl
+  , callTypes = ciTypes
+  , initialHP = initHP
+  , strAddrs = addrs
+  , storeCount =  length $ stores cl
+  }, ins) where
   compilerOut = second (compile $ stores cl) <$> supers cl
   ciTypes = foldl' union [] $ callIndirectTypes . snd . snd <$> compilerOut
   ins = second fst <$> compilerOut
@@ -142,9 +152,7 @@ astToIns cl = (WasmMeta funs (wasmDecl <$> wdecls cl) ciTypes initHP addrs $ len
   wasmType acc t = case t of
     a :-> b -> wasmType (translateType a : acc) b
     TApp (TC "IO") (TC "()") -> reverse acc
-    -- TODO: Beef up type inference and make the following an error
-    -- because it will be unreachable.
-    _ -> reverse acc
+    _ -> error $ "exported functions must return IO ()"
   translateType (TC "Int") = I64
   translateType (TC "Port") = Ref "Port"
   translateType (TC "Databuf") = Ref "Databuf"
@@ -171,15 +179,15 @@ encMartinTypes ts = 0x60 : lenc (map f ts) ++ [0] where
   f _ = error "bad type"
 
 insToBin :: String -> Boost -> (WasmMeta, [(String, [Ins])]) -> [Int]
-insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs, storeCount}, gmachine) = wasm where
+insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements, strAddrs, storeCount}, gmachine) = wasm where
   encMartinTM :: String -> Int -> [Int]
   encMartinTM f t = leb128 (wasmFunNo ('@':f) - length imps) ++ leb128 t
   wasm = concat
     [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
 
     -- Custom sections for Martin's Primea.
-    , sectCustom "types" $ encMartinTypes . snd <$> exports
-    , sectCustom "typeMap" $ zipWith encMartinTM (fst <$> exports) [0..]
+    , sectCustom "types" $ encMartinTypes . snd <$> exports ++ elements
+    , sectCustom "typeMap" $ zipWith encMartinTM (fst <$> exports ++ elements) [0..]
 
     , sect 1 $ uncurry encSig . snd <$> BM.assocs typeMap  -- Type section.
     , sect 2 $ importFun <$> imps  -- Import section.
@@ -200,6 +208,11 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs
       [ encStr "memory" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
       , encStr "table" ++ [1, 0]  -- 1 = external_kind Table, 0 = memory index.
       ]
+    , if null elements then [] else sect 9 [  -- Element section.
+      [ 0  -- Table 0 (only one in MVP).
+      , 0x41, 32, 0xb]  -- Start at 32.
+      ++ leb128 (length elements)
+      ++ concatMap (leb128 . wasmFunNo . ('@':) . fst) elements]
     , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
     , sect 11 $ encStrConsts <$> M.assocs strAddrs  -- Data section.
     , sectCustom "dfndbg" [ord <$> show (sort $ swp <$> (M.assocs $ wasmFunMap))]
@@ -221,7 +234,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs
   typeNo ins outs = typeMap BM.!> (ins, outs)
   typeMap = BM.fromList $ zip [0..] $ nub $
     (snd <$> imps) ++  -- Types of imports
-    (flip (,) [] . snd <$> exports) ++  -- wdecl functions.
+    -- Types of wdecl and secret functions.
+    (flip (,) [] . snd <$> exports ++ elements) ++
     (flip (,) [] <$> callTypes wm) ++  -- call_indirect types.
     (fst . snd <$> internalFuns)  -- Types of internal functions.
   exportFun name internalName = encStr name ++ (0 : leb128 (wasmFunNo internalName))
@@ -258,8 +272,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs
     ++ (fromGMachine <$> gmachine)
     -- Wrappers for call_indirect calls.
     ++ ciFuns
-    -- Wrappers for functions in "wdecl" section.
-    ++ (wrap <$> exports)
+    -- Wrappers for functions in "wdecl" and "secret" section.
+    ++ (wrap <$> exports ++ elements)
 
   fromGMachine (f, g) = (f, ((typeNo [] [], 0), (if f == "main"
     then ([I32_const 1, Set_global mainCalled] ++)
@@ -655,6 +669,10 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, strAddrs
       , I32_const $ fromIntegral g
       , Call $ wasmFunNo "#pushglobal"
       ]
+    PushSecret s ->
+      [ I32_const $ 32 + maybe (error $ "bad secret: " ++ s) fromIntegral (elemIndex s $ fst <$> elements)
+      , Call $ wasmFunNo "#pushref"
+      ]
     PushString s ->
       [ Get_global sp  -- [sp] = address of string const
       , I32_const $ fromIntegral $ strAddrs M.! s
@@ -825,6 +843,7 @@ mk1 pglobals (Ast ast) = case ast of
     st <- get
     put $ st { callIndirectTypes = callIndirectTypes st `union` [ty] }
     pure [PushCallIndirect ty]
+  Qual "expose" v -> pure [PushSecret v]
   Var v -> do
     m <- getBindings
     pure $ case lookup v m of

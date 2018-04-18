@@ -80,6 +80,7 @@ fixity o = fromMaybe (LAssoc, 9) $ M.lookup o standardFixities
 
 data Clay = Clay
   { wdecls :: [String]
+  , secrets :: [String]
   , stores :: [String]
   , funTypes :: [(String, QualType)]
   , supers :: [(String, Ast)]
@@ -101,7 +102,7 @@ addGenDecl :: [(String, Type)] -> Clay -> Clay
 addGenDecl xs p = p { genDecls = xs ++ genDecls p }
 
 toplevels :: Parser Clay
-toplevels = foldl' (flip ($)) (Clay [] [] [] [] [] [] []) <$> topDecls where
+toplevels = foldl' (flip ($)) (Clay [] [] [] [] [] [] [] []) <$> topDecls where
   topDecls = between (want "{") (want "}") (topDecl `sepBy` want ";")
   topDecl
       = (want "data" >> simpleType)
@@ -422,12 +423,15 @@ contract :: Parser Clay
 contract = do
   ws <- option [] $ try $ want "wdecl" >>
     (between (want "(") (want ")") $ var `sepBy` want ",")
+  ss <- option [] $ try $ want "secret" >>
+    (between (want "(") (want ")") $ var `sepBy` want ",")
   ps <- option [] $ try $ want "store" >>
     (between (want "(") (want ")") $ var `sepBy` want ",")
   putState (AwaitBrace, [])
   p <- toplevels
   when (isNothing $ mapM (`lookup` supers p) ws) $ fail "bad wdecls"
-  pure $ p { wdecls = ws, stores = ps }
+  when (isNothing $ mapM (`lookup` supers p) ss) $ fail "bad secrets"
+  pure $ p { wdecls = ws, secrets = ss, stores = ps }
 
 qParse :: Parser a
   -> (LayoutState, [Int])
@@ -498,6 +502,13 @@ gather globs env (Ast ast) = case ast of
     xs <- replicateM n newTV
     let r = foldr1 TApp $ TC "()":xs
     pure $ AAst (foldr (:->) r xs) $ Pack m n
+  -- TODO: Check `f` has been declared `secret`.
+  -- TODO: Clunky. Better to get rid of `secret` declarations, and
+  -- exclusively use `expose` to determine which functions are private.
+  -- Even better would be an `expose` function that takes a wasm function
+  -- (something that takes wasm types and returns IO ()), and we lift lambdas
+  -- if needed to create a top-level wasm function.
+  Qual "expose" f -> pure $ AAst (TC "I32") $ Qual "expose" f
   Var "_" -> do
     x <- newTV
     pure $ AAst x $ Var "_"
@@ -600,6 +611,8 @@ generalize soln ctx (fun, a0@(AAst t0 _)) = (fun, (qt, a1)) where
       Var v | v == fun -> foldl' (\x d -> (Ast x :@ Ast (Var d))) a dvars
       _ -> h a
 
+-- Replaces e.g. `TV x` with `GV x` and adds its constraints
+-- (e.g. Eq x, Monad x) to the common pool.
 generalize' :: Map String [String] -> Type -> State [(String, String)] Type
 generalize' ctx ty = case ty of
   TV s -> do
@@ -861,7 +874,7 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJ
     (typedAsts, ConState _ cs m) <- buildConstraints $ forM grp $ \(s, d) -> do
       t <- gather globs env d
       addConstraint (TV $ '*':s, annOf t)
-      when (s `elem` wdecls cl) $
+      when (s `elem` wdecls cl || s `elem` secrets cl) $
         addConstraint (retType $ annOf t, TApp (TC "IO") $ TC "()")
       case (s `lookup` genDecls cl) of
         Nothing -> pure ()
