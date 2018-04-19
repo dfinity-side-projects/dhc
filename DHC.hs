@@ -79,7 +79,7 @@ fixity :: String -> (Associativity, Int)
 fixity o = fromMaybe (LAssoc, 9) $ M.lookup o standardFixities
 
 data Clay = Clay
-  { wdecls :: [String]
+  { publics :: [String]
   , secrets :: [String]
   , stores :: [String]
   , funTypes :: [(String, QualType)]
@@ -421,7 +421,7 @@ filler = void $ many $ void (char ' ') <|> nl <|> com
 
 contract :: Parser Clay
 contract = do
-  ws <- option [] $ try $ want "wdecl" >>
+  ws <- option [] $ try $ want "public" >>
     (between (want "(") (want ")") $ var `sepBy` want ",")
   ss <- option [] $ try $ want "secret" >>
     (between (want "(") (want ")") $ var `sepBy` want ",")
@@ -429,9 +429,9 @@ contract = do
     (between (want "(") (want ")") $ var `sepBy` want ",")
   putState (AwaitBrace, [])
   p <- toplevels
-  when (isNothing $ mapM (`lookup` supers p) ws) $ fail "bad wdecls"
+  when (isNothing $ mapM (`lookup` supers p) ws) $ fail "bad publics"
   when (isNothing $ mapM (`lookup` supers p) ss) $ fail "bad secrets"
-  pure $ p { wdecls = ws, secrets = ss, stores = ps }
+  pure $ p { publics = ws, secrets = ss, stores = ps }
 
 qParse :: Parser a
   -> (LayoutState, [Int])
@@ -874,7 +874,7 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJ
     (typedAsts, ConState _ cs m) <- buildConstraints $ forM grp $ \(s, d) -> do
       t <- gather globs env d
       addConstraint (TV $ '*':s, annOf t)
-      when (s `elem` wdecls cl || s `elem` secrets cl) $
+      when (s `elem` publics cl || s `elem` secrets cl) $
         addConstraint (retType $ annOf t, TApp (TC "IO") $ TC "()")
       case (s `lookup` genDecls cl) of
         Nothing -> pure ()

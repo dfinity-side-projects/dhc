@@ -210,7 +210,7 @@ lexOffsideTests = (\(result, source) -> TestCase $
     ]
 
 demoCases :: [(String, String)]
-demoCases = second ("wdecl (main)\n" ++) <$>
+demoCases = second ("public (main)\n" ++) <$>
   [ ("Hello, World!\n", "main = putStr \"Hello, World!\\n\"")
   , ("Hello, Quasi!\n", "main = putStr [here|Hello, Quasi!\n|]")
   , ("9876543210", "main = putInt 9876543210")

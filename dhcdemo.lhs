@@ -93,7 +93,7 @@ main = withElems ["src", "asm", "go", "out"] $ \[src, asmEl, goB, outE] -> do
   export "sysPutInt" $ sysPutInt outE
   void $ goB `onEvent` Click $ const $ do
     setProp asmEl "value" ""
-    s <- ("wdecl (main)\n" ++) <$> getProp src "value"
+    s <- ("public (main)\n" ++) <$> getProp src "value"
     case hsToWasm jsDemoBoost s of
       Left err -> setProp asmEl "value" err
       Right asm -> do

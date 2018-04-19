@@ -88,7 +88,7 @@ data WasmMeta = WasmMeta
   -- Arity of each user-defined function, whether exported or not.
   -- Eval uses this to remove the spine correctly.
   { arities :: Map String Int
-  , exports :: [(String, [WasmType])]  -- List of wdecl functions.
+  , exports :: [(String, [WasmType])]  -- List of public functions.
   , elements :: [(String, [WasmType])]
   , callTypes :: [[WasmType]]  -- Types needed by call_indirect ops.
   , initialHP :: Int  -- Initial HP.
@@ -137,7 +137,7 @@ mkStrConsts ss = f (0, []) ss where
 astToIns :: Clay -> (WasmMeta, [(String, [Ins])])
 astToIns cl = (WasmMeta
   { arities = funs
-  , exports = wasmDecl <$> wdecls cl
+  , exports = wasmDecl <$> publics cl
   , elements = wasmDecl <$> secrets cl
   , callTypes = ciTypes
   , initialHP = initHP
@@ -203,7 +203,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       -- Extra global records if `main` has been run yet.
       ++ replicate (1 + storeCount) [encType I32, 1, 0x41, 0, 0xb]
     , sect 7 $  -- Export section.
-      -- The "wdecl" functions are exported verbatim.
+      -- The "public" functions are exported verbatim.
       [exportFun s ('@':s) | (s, _) <- exports] ++
       [ encStr "memory" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
       , encStr "table" ++ [1, 0]  -- 1 = external_kind Table, 0 = memory index.
@@ -234,7 +234,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
   typeNo ins outs = typeMap BM.!> (ins, outs)
   typeMap = BM.fromList $ zip [0..] $ nub $
     (snd <$> imps) ++  -- Types of imports
-    -- Types of wdecl and secret functions.
+    -- Types of public and secret functions.
     (flip (,) [] . snd <$> exports ++ elements) ++
     (flip (,) [] <$> callTypes wm) ++  -- call_indirect types.
     (fst . snd <$> internalFuns)  -- Types of internal functions.
@@ -272,7 +272,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     ++ (fromGMachine <$> gmachine)
     -- Wrappers for call_indirect calls.
     ++ ciFuns
-    -- Wrappers for functions in "wdecl" and "secret" section.
+    -- Wrappers for functions in "public" and "secret" section.
     ++ (wrap <$> exports ++ elements)
 
   fromGMachine (f, g) = (f, ((typeNo [] [], 0), (if f == "main"
@@ -444,21 +444,21 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     ] ++
     -- Input arguments are local variables.
     -- We move these to our stack in reverse order.
-    concat (reverse $ zipWith wdeclIn (refToI32 <$> ins) [0..]) ++
+    concat (reverse $ zipWith publicIn (refToI32 <$> ins) [0..]) ++
     -- Build the spine.
     concatMap fromIns (PushGlobal f : replicate (length ins + 1) MkAp) ++
     [ Call $ wasmFunNo "#eval"
     , End
     ]
-  wdeclIn I64 i =
+  publicIn I64 i =
     [ Get_local i
     , Call $ wasmFunNo "#pushint"
     ]
-  wdeclIn I32 i =
+  publicIn I32 i =
     [ Get_local i
     , Call $ wasmFunNo "#pushref"
     ]
-  wdeclIn _ _ = error "TODO"
+  publicIn _ _ = error "TODO"
   sect t xs = t : lenc (varlen xs ++ concat xs)
   sectCustom s xs = 0 : lenc (encStr s ++ varlen xs ++ concat xs)
   encStr s = lenc $ ord <$> s
