@@ -1,4 +1,5 @@
 {-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Network.DFINITY.Parse (parseWasm, Wasm(..)) where
@@ -366,10 +367,5 @@ wasm = do
 
 parseWasm :: B8.ByteString -> Either String Wasm
 parseWasm b = do
-  w <- byteParse wasm b
-  if not (null $ martinTypeMap w) then
-    pure w { dfnExports = (\(f, t) -> (fromJust $ lookup (f + length (imports w)) (swp <$> exports w), martinTypes w !! t)) <$> martinTypeMap w }
-  else pure w
-
-swp :: (a, b) -> (b, a)
-swp (a, b) = (b, a)
+  w@Wasm{imports, exports, martinTypeMap, martinTypes} <- byteParse wasm b
+  pure w { dfnExports = catMaybes $ (\(s, k) -> (,) s . (martinTypes!!) <$> lookup (k - length imports) martinTypeMap) <$> exports }
