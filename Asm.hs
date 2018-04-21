@@ -142,7 +142,7 @@ astToIns cl = (WasmMeta
   , callTypes = ciTypes
   , initialHP = initHP
   , strAddrs = addrs
-  , storeCount =  length $ stores cl
+  , storeCount = length $ stores cl
   }, ins) where
   compilerOut = second (compile $ stores cl) <$> supers cl
   ciTypes = foldl' union [] $ callIndirectTypes . snd . snd <$> compilerOut
@@ -159,6 +159,7 @@ astToIns cl = (WasmMeta
   translateType (TC "Actor") = Ref "Actor"
   translateType t = error $ "no corresponding wasm type: " ++ show t
   funs = M.fromList $ ((\(name, Ast (Lam as _)) -> (name, length as)) <$> supers cl)
+    ++ (concatMap (\n -> [("#set-" ++ show n, 1), ("#get-" ++ show n, 0)]) [0..length (stores cl) - 1])
 
 enc32 :: Int -> [Int]
 enc32 n = (`mod` 256) . (div n) . (256^) <$> [(0 :: Int)..3]
@@ -246,7 +247,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
   getGlobal s = case M.lookup s $ arities wm of
     Just arity -> (arity, wasmFunNo s - firstPrim)
     Nothing -> (arityFromType $ fromMaybe (error $ "BUG! bad global: " ++ s) $ M.lookup s primsType, wasmFunNo s - firstPrim)
-  firstPrim = wasmFunNo $ fst $ head prims
+  firstPrim = wasmFunNo $ fst $ head evalFuns
   internalFuns =
     [ ("#eval", (([], []), evalAsm))
     , ("#mkap", (([], []), mkApAsm))
@@ -259,21 +260,24 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     , ("#alloc", (([I32], []), allocAsm))
     , ("#pairwith42", (([I32], []), pairWith42Asm))
     , ("#nil42", (([], []), nil42Asm))
-    , ("#setstore", (([I32, I32], []), setStoreAsm storeCount))
-    , ("#getstore", (([I32], [I32]), getStoreAsm storeCount))
     ] ++ (second (second $ concatMap deQuasi) <$> boostFuns)
+  wasmFuns :: [(String, ((Int, Int), [WasmOp]))]
   wasmFuns =
     (second (first (\(ins, outs) -> (typeNo ins outs, 0))) <$> internalFuns)
+    ++ evalFuns
+    -- Wrappers for functions in "public" and "secret" section.
+    ++ (wrap <$> exports ++ elements)
+  evalFuns =  -- Functions that "#eval" can call.
     -- Primitive functions.
     -- The assembly for "#eval" requires that the primitive functions
     -- directly precede those defined in the program.
-    ++ ((\(s, p) -> (s, ((typeNo [] [], localCount s), p))) <$> prims)
+    ((\(s, p) -> (s, ((typeNo [] [], localCount s), p))) <$> prims)
+    -- Global get and set functions that interact with the DHC stack.
+    ++ concatMap mkStoreAsm [0..storeCount - 1]
     -- Functions from the program.
     ++ (fromGMachine <$> gmachine)
     -- Wrappers for call_indirect calls.
     ++ ciFuns
-    -- Wrappers for functions in "public" and "secret" section.
-    ++ (wrap <$> exports ++ elements)
 
   fromGMachine (f, g) = (f, ((typeNo [] [], 0), (if f == "main"
     then ([I32_const 1, Set_global mainCalled] ++)
@@ -547,9 +551,9 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     , Set_global bp
     ] ++ nest n ++ [End]
     where
-      -- Globals are resolved in a giant `br_table`. This is ugly, but avoids
-      -- run-time type-checking.
-      n = length prims + length gmachine + length ciFuns
+      -- Eval functions are resolved in a giant `br_table`. This is ugly, but
+      -- avoids run-time type-checking.
+      n = length evalFuns
       nest 0 =
         [ Get_global bp  -- case [bp + 4]
         , I32_const 4
@@ -559,44 +563,48 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
         ]
       nest k = [Block Nada $ nest $ k - 1, Call $ firstPrim + k - 1, Return]
 
-  getStoreAsm :: Int -> [WasmOp]
-  getStoreAsm 0 = [ I32_const 0, End ]
-  getStoreAsm count =
-    nest count ++ [End]
-    where
-      nest 1 =
-        [ Block Nada
-          [ Get_local 0   -- branch on local0 (global store index)
-          , Br_table [0..count - 1] (count - 1)
-          ]
-        , Get_global storeOffset
-        , Return
-        ]
-      nest j =
-        [ Block Nada $ nest (j - 1)
-        , Get_global $ storeOffset + j - 1
-        , Return
-        ]
-  setStoreAsm :: Int -> [WasmOp]
-  setStoreAsm 0 = [End]
-  setStoreAsm count =
-    [ Get_local 1   -- PUSH local1 (I32 to store)
-    ] ++ nest count ++ [End]
-    where
-      nest 1 =
-        [ Block Nada
-          [ Get_local 0   -- branch on local0 (global store index)
-          , Br_table [0..count - 1] (count - 1)
-          ]
-        , Set_global $ storeOffset
-        , Return
-        ]
-      nest j =
-        [ Block Nada $ nest (j - 1)
-        , Set_global $ storeOffset + j - 1
-        , Return
-        ]
-
+  mkStoreAsm n =
+    [ ("#set-" ++ show n, ((typeNo [] [], 0),
+      [ I32_const 4  -- Push 0, Eval.
+      , Call $ wasmFunNo "#push"
+      , Call $ wasmFunNo "#eval"
+      , Get_global sp  -- Set_global n [[sp + 4] + 4]
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , Set_global $ storeOffset + n
+      , Get_global sp  -- sp = sp + 12
+      , I32_const 12
+      , I32_add
+      , Set_global sp
+      , Call $ wasmFunNo "#nil42"
+      , End
+      ]))
+    , ("#get-" ++ show n, ((typeNo [] [], 0),
+      [ Get_global hp  -- [hp] = TagRef
+      , tag_const TagRef
+      , I32_store 2 0
+      , Get_global hp  -- [hp + 4] = Get_global n
+      , I32_const 4
+      , I32_add
+      , Get_global $ storeOffset + n
+      , I32_store 2 0
+      , Get_global hp  -- PUSH hp
+      , Get_global hp  -- hp = hp + 8
+      , I32_const 8
+      , I32_add
+      , Set_global hp
+      , Get_global sp  -- sp = sp + 4
+      , I32_const 4
+      , I32_add
+      , Set_global sp
+      , Call $ wasmFunNo "#pairwith42"
+      , End
+      ]))
+    ]
   pairWith42Asm :: [WasmOp]
   pairWith42Asm =  -- [sp + 4] = (local0, #RealWorld)
     [ Get_global hp  -- [hp] = TagSum | (2 << 8)
@@ -848,8 +856,12 @@ mk1 pglobals (Ast ast) = case ast of
     m <- getBindings
     pure $ case lookup v m of
       Just k -> [Push k]
-      -- Global stores become PushRef instructions.
-      _ | Just i <- elemIndex v pglobals -> [PushRef $ fromIntegral i]
+      _ | Just i <- elemIndex v pglobals ->
+        -- Stores become (set n, get n) tuples.
+        [ PushGlobal $ "#get-" ++ show i
+        , PushGlobal $ "#set-" ++ show i
+        , Copro 0 2
+        ]
       _ -> [PushGlobal v]
   Pack n m -> pure [Copro n m]
   Cas expr alts -> do

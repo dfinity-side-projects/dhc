@@ -665,10 +665,12 @@ dictSolve dsoln soln (Ast ast) = case ast of
   Placeholder "pure" t -> aVar "fst" @@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
   Placeholder "==" t -> rec $ Ast $ Placeholder "Eq" $ typeSolve soln t
   Placeholder "callSlot" t -> rec $ Ast $ Placeholder "Message" $ typeSolve soln t
-  --   set x y = #seti32 x (toAny y)
-  Placeholder "set" t -> Ast $ Lam ["x", "y"] $ aVar "#seti32" @@ aVar "x" @@ (aVar "fst" @@ rec (Ast $ Placeholder "Store" $ typeSolve soln t) @@ aVar "y")
-  --   get x = #geti32 x >>= pure . fromAny
-  Placeholder "get" t -> Ast $ Lam ["x"] $ aVar "io_monad" @@ (aVar "#geti32" @@ aVar "x") @@ (aVar "." @@ aVar "io_pure" @@ (aVar "snd" @@ rec (Ast $ Placeholder "Store" $ typeSolve soln t)))
+  -- A storage variable x compiles to a pair (#set-n, #get-n) where n is the
+  -- global variable assigned to hold x.
+  --   set x y = fst x (toAny y)
+  Placeholder "set" t -> Ast $ Lam ["x", "y"] $ aVar "fst" @@ aVar "x" @@ (aVar "fst" @@ rec (Ast $ Placeholder "Store" $ typeSolve soln t) @@ aVar "y")
+  --   get x = snd x >>= pure . fromAny
+  Placeholder "get" t -> Ast $ Lam ["x"] $ aVar "io_monad" @@ (aVar "snd" @@ aVar "x") @@ (aVar "." @@ aVar "io_pure" @@ (aVar "snd" @@ rec (Ast $ Placeholder "Store" $ typeSolve soln t)))
   Placeholder d t -> case typeSolve soln t of
     TV v -> Ast $ Var $ fromMaybe (error $ "unsolvable: " ++ show (d, v)) $ lookup (d, v) dsoln
     u -> findInstance d u
