@@ -46,7 +46,6 @@ enumFromTo a b = case a > b of True  -> []
                                False -> a : enumFromTo (a + 1) b
 map f = foldr (\x xs -> f x:xs) []
 tenTimes x = 10 * x
-f $ x = f x
 f rec n = case n == 0 of True -> 0
                          False -> rec (n - 1) + 2*n - 1
 main = do

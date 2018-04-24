@@ -157,6 +157,7 @@ astToIns cl = (WasmMeta
   translateType (TC "Port") = Ref "Port"
   translateType (TC "Databuf") = Ref "Databuf"
   translateType (TC "Actor") = Ref "Actor"
+  translateType (TC "Module") = Ref "Module"
   translateType t = error $ "no corresponding wasm type: " ++ show t
   funs = M.fromList $ ((\(name, Ast (Lam as _)) -> (name, length as)) <$> supers cl)
     ++ (concatMap (\n -> [("#set-" ++ show n, 1), ("#get-" ++ show n, 0)]) [0..length (stores cl) - 1])
@@ -177,6 +178,7 @@ encMartinTypes ts = 0x60 : lenc (map f ts) ++ [0] where
   f (Ref "Elem") = 0x6c
   f (Ref "Link") = 0x6b
   f (Ref "Id") = 0x6a
+  f (Ref "Module") = 0x69  -- TODO: Check with Martin on this.
   f _ = error "bad type"
 
 insToBin :: String -> Boost -> (WasmMeta, [(String, [Ins])]) -> [Int]

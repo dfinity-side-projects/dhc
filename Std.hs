@@ -28,6 +28,9 @@ stdBoost = Boost
   , "io_monad f g rw = let {p = f rw} in case p of (a, rw1) -> g a rw1"
   , "f >> g = f >>= \\_ -> g"
   , "list_eq_instance d a b = case a of { [] -> case b of {[] -> True; w -> False}; (x:xs) -> case b of { [] -> False; (y:ys)-> (d x y) && list_eq_instance d xs ys } }"
+  , "bool f t b = case b of {False -> f; True ->t}"
+  , "when b t = bool (pure ()) t b"
+  , "f $ x = f x"
   ])
   -- Haskell functions defined in wasm.
   [ ("+", (TC "Int" :-> TC "Int" :-> TC "Int", intAsm I64_add))

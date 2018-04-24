@@ -148,9 +148,10 @@ toplevels = foldl' (flip ($)) (Clay [] [] [] [] [] [] [] []) <$> topDecls where
   parenType [x] = x
   parenType xs  = foldr1 TApp $ TC "()":xs
   sc = try (do
-    (fun:args) <- scOp <|> many1 var
+    (fun:args) <- funlhs
     void $ want "="
     addSuper . (,) fun . Ast . Lam args <$> expr) <|> pure id
+  funlhs = scOp <|> many1 var
   scOp = try $ do
     l <- var
     op <- varSym
@@ -177,10 +178,10 @@ toplevels = foldl' (flip ($)) (Clay [] [] [] [] [] [] [] []) <$> topDecls where
           pure $ Ast $ Ast (Ast (Var o) :@ m) :@ n
       ) <|> pure m
   letDefn = do
-    s <- var
+    (fun:args) <- funlhs
     void $ want "="
     ast <- expr
-    pure (s, ast)
+    pure (fun, Ast $ Lam args ast)
   doExpr = do
     void $ want "do"
     ss <- between (want "{") (want "}") $ stmt `sepBy` want ";"
@@ -642,6 +643,7 @@ methods = M.fromList
 getBasic :: String -> Maybe WasmType
 getBasic "Databuf" = Just I32
 getBasic "Actor" = Just I32
+getBasic "Module" = Just I32
 getBasic "Port" = Just I32
 getBasic "I32" = Just I32
 getBasic "Int" = Just I64
@@ -694,6 +696,7 @@ dictSolve dsoln soln (Ast ast) = case ast of
       TC "Databuf" -> Ast (Pack 0 2) @@ aVar "Databuf-toAny" @@ aVar "Databuf-fromAny"
       TC "Port" -> Ast (Pack 0 2) @@ aVar "Port-toAny" @@ aVar "Port-fromAny"
       TC "Actor" -> Ast (Pack 0 2) @@ aVar "Actor-toAny" @@ aVar "Actor-fromAny"
+      TC "Module" -> Ast (Pack 0 2) @@ aVar "Module-toAny" @@ aVar "Module-fromAny"
       TC "Int" -> Ast (Pack 0 2) @@ aVar "Int-toAny" @@ aVar "Int-fromAny"
       TApp (TC "[]") a -> let
         ltai = aVar "list_to_any_instance" @@ rec (Ast $ Placeholder "Store" a)
@@ -734,6 +737,7 @@ propagate cs t = concat <$> mapM propagateTyCon cs where
     TApp (TC "[]") a -> propagate ["Store"] a
     TC "Databuf" -> Right []
     TC "Actor" -> Right []
+    TC "Module" -> Right []
     TC "Port" -> Right []
     TC "Int" -> Right []
     _ -> Left $ "no Store instance: " ++ show t
