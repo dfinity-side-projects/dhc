@@ -32,11 +32,12 @@ data Wasm = Wasm
   , dfnExports :: [(String, [WasmType])]
   , martinTypes :: [[WasmType]]
   , martinTypeMap :: [(Int, Int)]
+  , persist :: [(Int, WasmType)]
   , haskell :: String
   } deriving Show
 
 emptyWasm :: Wasm
-emptyWasm = Wasm [] [] [] 0 [] [] [] Nothing [] [] [] [] [] [] ""
+emptyWasm = Wasm [] [] [] 0 [] [] [] Nothing [] [] [] [] [] [] [] ""
 
 data ByteParser a = ByteParser (ByteString -> Either String (a, ByteString))
 
@@ -276,6 +277,7 @@ wasm = do
         , (0x6c, Ref "Elem")
         , (0x6b, Ref "Link")
         , (0x6a, Ref "Id")
+        , (0x69, Ref "Module")
         ]
 
     sectCustom w = do

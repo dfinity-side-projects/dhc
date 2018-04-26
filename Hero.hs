@@ -219,7 +219,7 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
       n = fromIntegral n' where I32_const n' = head stack
       k = if n < 0 || n >= length as then d else as!!n
     run vm {stack = tail stack, insts = drop (k + 1) insts}
-  Unreachable -> pure ([], vm)
+  Unreachable -> putStrLn "IT'S A TRAP!" >> pure ([], vm)
   _ -> error $ "TODO: " ++ show (head $ head insts)
   where
     step newStack = vmNext { stack = newStack }
