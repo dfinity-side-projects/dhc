@@ -849,13 +849,12 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJ
     [ ("[]", (Just (0, 0), TApp (TC "[]") a))
     , (":",  (Just (1, 2), a :-> TApp (TC "[]") a :-> TApp (TC "[]") a))
     ] where a = GV "a"
-  genTypes dataDecls ps = listPresets
+  globs = listPresets
     `M.union` M.fromList (datas preludeDefs)
-    `M.union` M.fromList dataDecls
+    `M.union` M.fromList (datas cl)
     `M.union` boostTypes boost
-    `M.union` (M.fromList $ storeTypeConstraint <$> ps)
+    `M.union` (M.fromList $ storeTypeConstraint <$> stores cl)
   Right preludeDefs = parseDefs $ boostPrelude boost
-  globs = genTypes (datas cl) $ stores cl
   ds = supers cl ++ supers preludeDefs
   storeTypeConstraint s
     | Just ty <- lookup s $ genDecls cl = (s, (Nothing, ty))
@@ -865,6 +864,8 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJ
     (typedAsts, ConState _ cs m) <- buildConstraints $ forM grp $ \(s, d) -> do
       t <- gather globs env d
       addConstraint (TV $ '*':s, annOf t)
+      -- TODO: Breaks eta reduction. Better off without this?
+      -- We should probably require exported functions to be declared anyway.
       when (s `elem` publics cl || s `elem` secrets cl) $
         addConstraint (retType $ annOf t, TApp (TC "IO") $ TC "()")
       case (s `lookup` genDecls cl) of

@@ -88,8 +88,8 @@ data WasmMeta = WasmMeta
   -- Arity of each user-defined function, whether exported or not.
   -- Eval uses this to remove the spine correctly.
   { arities :: Map String Int
-  , exports :: [(String, [WasmType])]  -- List of public functions.
-  , elements :: [(String, [WasmType])]
+  , exports :: [(String, [Type])]  -- List of public functions.
+  , elements :: [(String, [Type])]
   , callTypes :: [[Type]]  -- Types needed by call_indirect ops.
   , initialHP :: Int  -- Initial HP.
   , strAddrs :: Map ShortByteString Int  -- String constant addresses.
@@ -137,8 +137,8 @@ mkStrConsts ss = f (0, []) ss where
 astToIns :: Clay -> (WasmMeta, [(String, [Ins])])
 astToIns cl = (WasmMeta
   { arities = funs
-  , exports = wasmDecl <$> publics cl
-  , elements = wasmDecl <$> secrets cl
+  , exports = listifyTypes <$> publics cl
+  , elements = listifyTypes <$> secrets cl
   , callTypes = ciTypes
   , initialHP = initHP
   , strAddrs = addrs
@@ -148,25 +148,30 @@ astToIns cl = (WasmMeta
   ciTypes = foldl' union [] $ callIndirectTypes . snd . snd <$> compilerOut
   ins = second fst <$> compilerOut
   (initHP, addrs) = mkStrConsts $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
-  wasmDecl w = (w, wasmType [] $ fst $ fromJust $ lookup w $ funTypes cl)
-  wasmType acc t = case t of
-    a :-> b -> wasmType (translateType a : acc) b
+  listifyTypes w = (w, inTypes [] $ fst $ fromJust $ lookup w $ funTypes cl)
+  inTypes acc t = case t of
+    a :-> b -> case toPrimeaType a of
+      Just _ -> inTypes (a : acc) b
+      _ -> error $ "unpublishable argument type: " ++ show t
     TApp (TC "IO") (TC "()") -> reverse acc
     _ -> error $ "exported functions must return IO ()"
-  translateType (TC "Int") = I64
-  translateType (TC "Port") = Ref "Port"
-  translateType (TC "Databuf") = Ref "Databuf"
-  translateType (TC "Actor") = Ref "Actor"
-  translateType (TC "Module") = Ref "Module"
-  translateType t = error $ "no corresponding wasm type: " ++ show t
   funs = M.fromList $ ((\(name, Ast (Lam as _)) -> (name, length as)) <$> supers cl)
     ++ (concatMap (\n -> [("#set-" ++ show n, 1), ("#get-" ++ show n, 0)]) [0..length (stores cl) - 1])
 
 enc32 :: Int -> [Int]
 enc32 n = (`mod` 256) . (div n) . (256^) <$> [(0 :: Int)..3]
 
-encMartinTypes :: [WasmType] -> [Int]
-encMartinTypes ts = 0x60 : lenc (map f ts) ++ [0] where
+toPrimeaType :: Type -> Maybe WasmType
+toPrimeaType t = case t of
+  TC "Int" -> Just I64
+  TC "I32" -> Just I32
+  TC "String" -> Just $ Ref "Databuf"
+  TC s -> if elem s ["Port", "Databuf", "Actor", "Module"]
+    then Just $ Ref s else Nothing
+  _ -> Nothing
+
+encMartinTypes :: [Type] -> [Int]
+encMartinTypes ts = 0x60 : lenc (f . fromJust . toPrimeaType <$> ts) ++ [0] where
   f I32 = 0x7f
   f I64 = 0x7e
   f F32 = 0x7d
@@ -238,9 +243,9 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
   typeMap = BM.fromList $ zip [0..] $ nub $
     (snd <$> imps) ++  -- Types of imports
     -- Types of public and secret functions.
-    (flip (,) [] . snd <$> exports ++ elements) ++
+    (flip (,) [] . map toWasmType . snd <$> exports ++ elements) ++
     -- call_indirect types.
-    (flip (,) [] <$> nub (map toWasmType <$> callTypes wm)) ++
+    (flip (,) [] <$> map toWasmType <$> callTypes wm) ++
     (fst . snd <$> internalFuns)  -- Types of internal functions.
   exportFun name internalName = encStr name ++ (0 : leb128 (wasmFunNo internalName))
   -- TODO: Remove "#nfsyscall".
@@ -366,9 +371,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
   wasmFunMap = M.fromList $ zip (((\(m, f) -> m ++ "." ++ f) . fst <$> imps) ++ (fst <$> wasmFuns)) [0..]
   wasmFunNo s = fromMaybe (error s) $ M.lookup s wasmFunMap
 
-  refToI32 (Ref _) = I32
-  refToI32 t = t
-  wrap (f, ins) = (,) ('@':f) $ (,) (typeNo ins [], 0) $
+  wrap (f, ins) = (,) ('@':f) $ (,) (typeNo (toWasmType <$> ins) [], 0) $
     -- Wraps a DHC function.
     -- When a wasm function f(arg0, arg1, ...) is called,
     -- the arguments are placed in local variables.
@@ -412,21 +415,73 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     ] ++
     -- Input arguments are local variables.
     -- We move these to our stack in reverse order.
-    concat (reverse $ zipWith publicIn (refToI32 <$> ins) [0..]) ++
+    concat (reverse $ zipWith publicIn ins [0..]) ++
     -- Build the spine.
     concatMap fromIns (PushGlobal f : replicate (length ins + 1) MkAp) ++
     [ Call $ wasmFunNo "#eval"
     , End
     ]
-  publicIn I64 i =
+  publicIn (TC "Int") i =
     [ Get_local i
     , Call $ wasmFunNo "#pushint"
     ]
-  publicIn I32 i =
+  publicIn (TC "String") i =
+    [ Get_global hp  -- [hp] = TagString
+    , tag_const TagString
+    , I32_store 2 0
+    , Get_global hp  -- [hp + 4] = hp + 16
+    , I32_const 4
+    , I32_add
+    , Get_global hp
+    , I32_const 16
+    , I32_add
+    , I32_store 2 0
+    , Get_global hp  -- [hp + 8] = 0
+    , I32_const 8
+    , I32_add
+    , I32_const 0
+    , I32_store 2 0
+    , Get_global hp  -- [hp + 12] = bp = memory.length local_i
+    , I32_const 12
+    , I32_add
+    , Get_local i
+    , Call $ wasmFunNo "memory.length"
+    , Set_global bp
+    , Get_global bp
+    , I32_store 2 0
+    , Get_global hp  -- PUSH hp + 16
+    , I32_const 16
+    , I32_add
+    , Get_global bp  -- PUSH bp
+    , Get_local i  -- PUSH local_i
+    , I32_const 0   -- PUSH 0
+    , Call $ wasmFunNo "memory.internalize"
+    , Get_global sp  -- [sp] = hp
+    , Get_global hp
+    , I32_store 2 0
+    , Get_global hp  -- hp = hp + bp + 16
+    , Get_global bp
+    , I32_add
+    , I32_const 16
+    , I32_add
+    , Set_global hp
+    , I32_const 0  -- Align hp.
+    , Get_global hp
+    , I32_sub
+    , I32_const 3
+    , I32_and
+    , Get_global hp
+    , I32_add
+    , Set_global hp
+    , Get_global sp  -- sp = sp - 4
+    , I32_const 4
+    , I32_sub
+    , Set_global sp
+    ]
+  publicIn _ i =
     [ Get_local i
     , Call $ wasmFunNo "#pushref"
     ]
-  publicIn _ _ = error "TODO"
   sect t xs = t : lenc (varlen xs ++ concat xs)
   sectCustom s xs = 0 : lenc (encStr s ++ varlen xs ++ concat xs)
   encStr s = lenc $ ord <$> s
