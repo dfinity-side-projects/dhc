@@ -109,6 +109,7 @@ toplevels = foldl' (flip ($)) (Clay [] [] [] [] [] [] [] []) <$> topDecls where
     <|> (want "class" >> classDecl)
     <|> genDecl
     <|> sc
+    <|> pure id
   classDecl = do
     s <- con
     t <- tyVar
@@ -150,7 +151,8 @@ toplevels = foldl' (flip ($)) (Clay [] [] [] [] [] [] [] []) <$> topDecls where
   sc = try (do
     (fun:args) <- funlhs
     void $ want "="
-    addSuper . (,) fun . Ast . Lam args <$> expr) <|> pure id
+    x <- expr
+    pure $ addSuper (fun, if null args then x else Ast $ Lam args x))
   funlhs = scOp <|> many1 var
   scOp = try $ do
     l <- var
@@ -181,7 +183,7 @@ toplevels = foldl' (flip ($)) (Clay [] [] [] [] [] [] [] []) <$> topDecls where
     (fun:args) <- funlhs
     void $ want "="
     ast <- expr
-    pure (fun, Ast $ Lam args ast)
+    pure (fun, if null args then ast else Ast $ Lam args ast)
   doExpr = do
     void $ want "do"
     ss <- between (want "{") (want "}") $ stmt `sepBy` want ";"
