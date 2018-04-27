@@ -696,6 +696,7 @@ dictSolve dsoln soln (Ast ast) = case ast of
       e -> error $ "BUG! no Monad for " ++ show e
     findInstance "Store" t = case t of
       TC "Databuf" -> Ast (Pack 0 2) @@ aVar "Databuf-toAny" @@ aVar "Databuf-fromAny"
+      TC "String" -> Ast (Pack 0 2) @@ (aVar "." @@ aVar "Databuf-toAny" @@ aVar "toD") @@ (aVar "." @@ aVar "Databuf-fromAny" @@ aVar "fromD")
       TC "Port" -> Ast (Pack 0 2) @@ aVar "Port-toAny" @@ aVar "Port-fromAny"
       TC "Actor" -> Ast (Pack 0 2) @@ aVar "Actor-toAny" @@ aVar "Actor-fromAny"
       TC "Module" -> Ast (Pack 0 2) @@ aVar "Module-toAny" @@ aVar "Module-fromAny"
@@ -738,6 +739,7 @@ propagate cs t = concat <$> mapM propagateTyCon cs where
     TApp (TC "()") (TApp a b) -> (++) <$> propagate ["Store"] a <*> propagate ["Store"] b
     TApp (TC "[]") a -> propagate ["Store"] a
     TC "Databuf" -> Right []
+    TC "String" -> Right []
     TC "Actor" -> Right []
     TC "Module" -> Right []
     TC "Port" -> Right []
@@ -876,7 +878,9 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJ
   Right preludeDefs = parseDefs $ boostPrelude boost
   globs = genTypes (datas cl) $ stores cl
   ds = supers cl ++ supers preludeDefs
-  storeTypeConstraint s = (s, (Nothing, TC "Storage" `TApp` TV ('@':s)))
+  storeTypeConstraint s
+    | Just ty <- lookup s $ genDecls cl = (s, (Nothing, ty))
+    | otherwise = (s, (Nothing, TC "Storage" `TApp` TV ('@':s)))
   inferMutual :: ([(String, (QualType, Ast))], Map String Type) -> [(String, Ast)] -> Either String ([(String, (QualType, Ast))], Map String Type)
   inferMutual (acc, accStorage) grp = do
     (typedAsts, ConState _ cs m) <- buildConstraints $ forM grp $ \(s, d) -> do
