@@ -17,8 +17,6 @@ import Data.ByteString.Short (ShortByteString)
 import Data.Int
 import GHC.Generics (Generic)
 
-import WasmOp (WasmType(..))
-
 #ifdef __HASTE__
 type ShortByteString = String
 #endif
@@ -27,7 +25,7 @@ instance Binary Type
 
 infixl 5 :@
 data AstF a = Qual String String
-  | CallSlot [WasmType]
+  | CallSlot [Type]
   | Pack Int Int | I Int64 | S ShortByteString | Var String
   | a :@ a | Cas a [(a, a)]
   | Lam [String] a | Let [(String, a)] a

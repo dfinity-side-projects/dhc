@@ -52,7 +52,7 @@ data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal String
   | MkAp | Slide Int | Split Int | Eval
   | UpdatePop Int | UpdateInd Int | Alloc Int
   | Casejump [(Maybe Int, [Ins])] | Trap
-  | PushCallIndirect [WasmType]
+  | PushCallIndirect [Type]
   deriving Show
 
 nPages :: Int
@@ -90,7 +90,7 @@ data WasmMeta = WasmMeta
   { arities :: Map String Int
   , exports :: [(String, [WasmType])]  -- List of public functions.
   , elements :: [(String, [WasmType])]
-  , callTypes :: [[WasmType]]  -- Types needed by call_indirect ops.
+  , callTypes :: [[Type]]  -- Types needed by call_indirect ops.
   , initialHP :: Int  -- Initial HP.
   , strAddrs :: Map ShortByteString Int  -- String constant addresses.
   , storeCount :: Int  -- Global store count.
@@ -122,7 +122,7 @@ data CompilerState = CompilerState
   -- up when generating assembly.
   -- TODO: It'd be better to fold over CompilerState during compile to
   -- incrementally update these fields.
-  , callIndirectTypes :: [[WasmType]]
+  , callIndirectTypes :: [[Type]]
   , stringConstants :: [ShortByteString]
   }
 
@@ -239,7 +239,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     (snd <$> imps) ++  -- Types of imports
     -- Types of public and secret functions.
     (flip (,) [] . snd <$> exports ++ elements) ++
-    (flip (,) [] <$> callTypes wm) ++  -- call_indirect types.
+    -- call_indirect types.
+    (flip (,) [] <$> nub (map toWasmType <$> callTypes wm)) ++
     (fst . snd <$> internalFuns)  -- Types of internal functions.
   exportFun name internalName = encStr name ++ (0 : leb128 (wasmFunNo internalName))
   -- TODO: Remove "#nfsyscall".
@@ -279,38 +280,18 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     -- Functions from the program.
     ++ (fromGMachine <$> gmachine)
     -- Wrappers for call_indirect calls.
-    ++ ciFuns
+    ++ (wrapCallIndirect <$> callTypes wm)
 
   fromGMachine (f, g) = (f, ((typeNo [] [], 0), (if f == "main"
     then ([I32_const 1, Set_global mainCalled] ++)
     else id) $ (++ [End]) $ concatMap fromIns g))
 
-  ciFuns = wrapCallIndirect <$> callTypes wm
   -- When sending a message with only one item, we have a bare argument
   -- instead of an argument tuple
   wrapCallIndirect [t] = (show [t], ((typeNo [] [], 0),
     -- Evaluate single argument.
     concatMap fromIns [ Push 1, Eval ] ++
-    (case t of
-      I64 ->
-        [ Get_global sp  -- PUSH [[sp + 4] + 8].64
-        , I32_const 4
-        , I32_add
-        , I32_load 2 0
-        , I32_const 8
-        , I32_add
-        , I64_load 3 0
-        ]
-      _ ->
-        [ Get_global sp  -- PUSH [[sp + 4] + 4]
-        , I32_const 4
-        , I32_add
-        , I32_load 2 0
-        , I32_const 4
-        , I32_add
-        , I32_load 2 0
-        ]
-    ) ++
+    concatMap deQuasi (pushCallIndirectArg t) ++
     [ Get_global sp  -- sp = sp + 4
     , I32_const 4
     , I32_add
@@ -325,7 +306,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     , I32_const 4
     , I32_add
     , I32_load 2 0
-    , Call_indirect $ typeNo [t] []
+    , Call_indirect $ typeNo [toWasmType t] []
     , Get_global sp  -- sp = sp + 16
     , I32_const 16
     , I32_add
@@ -353,26 +334,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       , I32_load 2 0
       , I32_store 2 0
       , Call $ wasmFunNo "#eval"  -- Evaluate.
-      ] ++ (case t of
-        I64 ->
-          [ Get_global sp  -- PUSH [[sp + 4] + 8].64
-          , I32_const 4
-          , I32_add
-          , I32_load 2 0
-          , I32_const 8
-          , I32_add
-          , I64_load 3 0
-          ]
-        _ ->
-          [ Get_global sp  -- PUSH [[sp + 4] + 4]
-          , I32_const 4
-          , I32_add
-          , I32_load 2 0
-          , I32_const 4
-          , I32_add
-          , I32_load 2 0
-          ]
-      ) ++
+      ] ++ concatMap deQuasi (pushCallIndirectArg t) ++
       [ Get_global sp  -- sp = sp + 4
       , I32_const 4
       , I32_add
@@ -392,7 +354,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     , I32_const 4
     , I32_add
     , I32_load 2 0
-    , Call_indirect $ typeNo ty []
+    , Call_indirect $ typeNo (toWasmType <$> ty) []
     , Get_global sp  -- sp = sp + 16
     , I32_const 16
     , I32_add
@@ -851,7 +813,7 @@ mk1 pglobals (Ast ast) = case ast of
       _ -> concat [mu, mt, [MkAp]]
   CallSlot ty -> do
     st <- get
-    put $ st { callIndirectTypes = callIndirectTypes st `union` [ty] }
+    put st { callIndirectTypes = callIndirectTypes st `union` [ty] }
     pure [PushCallIndirect ty]
   Qual "expose" v -> pure [PushSecret v]
   Var v -> do
@@ -1098,3 +1060,53 @@ updateIndAsm =
   , I32_store 2 0
   , End
   ]
+
+toWasmType :: Type -> WasmType
+toWasmType (TC "Int") = I64
+toWasmType _ = I32
+
+pushCallIndirectArg :: Type -> [QuasiWasm]
+pushCallIndirectArg t = case t of
+  TC "Int" ->
+    [ Get_global sp  -- PUSH [[sp + 4] + 8].64
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 8
+    , I32_add
+    , I64_load 3 0
+    ]
+  TC "String" ->
+    [ Get_global sp -- PUSH [[sp + 4] + 4] + [[sp + 4] + 8] (offset)
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , Get_global sp
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 8
+    , I32_add
+    , I32_load 2 0
+    , I32_add
+    , Get_global sp -- PUSH [[sp + 4] + 12] (length)
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 12
+    , I32_add
+    , I32_load 2 0
+    , Custom $ CallSym "memory.externalize"
+    ]
+  _ ->
+    [ Get_global sp  -- PUSH [[sp + 4] + 4]
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    ]

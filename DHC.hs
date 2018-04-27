@@ -24,7 +24,6 @@ import Text.Parsec hiding (State)
 
 import Ast
 import Boost
-import WasmOp (WasmType(..))
 
 sbs :: String -> ShortByteString
 #ifdef __HASTE__
@@ -642,24 +641,6 @@ methods = M.fromList
     m = GV "m"
     io = TApp (TC "IO")
 
-getBasic :: String -> Maybe WasmType
-getBasic "Databuf" = Just I32
-getBasic "Actor" = Just I32
-getBasic "Module" = Just I32
-getBasic "Port" = Just I32
-getBasic "I32" = Just I32
-getBasic "Int" = Just I64
-getBasic _ = Nothing
-
-basicsFromTuple :: Type -> [WasmType]
-basicsFromTuple (TC "()") = []
-basicsFromTuple (TC s) = [fromMaybe (error $ "bad basic: " ++ s) $ getBasic s]
-basicsFromTuple (TApp (TC "()") t) = f t where
-  f (TC s `TApp` rest) = fromJust (getBasic s):f rest
-  f (TC s) = [fromJust $ getBasic s]
-  f _ = error $ "expected Message: " ++ show t
-basicsFromTuple t = error $ "expected Message: " ++ show t
-
 dictSolve :: [((String, String), String)] -> Map String Type -> Ast -> Ast
 dictSolve dsoln soln (Ast ast) = case ast of
   u :@ v  -> Ast $ rec u :@ rec v
@@ -684,7 +665,7 @@ dictSolve dsoln soln (Ast ast) = case ast of
     infixl 5 @@
     x @@ y = Ast $ x :@ y
     rec = dictSolve dsoln soln
-    findInstance "Message" t = Ast $ CallSlot $ basicsFromTuple t
+    findInstance "Message" t = either (error "want tuple") (Ast . CallSlot) $ listFromTupleType t
     findInstance "Eq" t = case t of
       TC "String"        -> aVar "String-=="
       TC "Int"           -> aVar "Int-=="
@@ -738,35 +719,33 @@ propagate cs t = concat <$> mapM propagateTyCon cs where
   propagateTyCon "Store" = case t of
     TApp (TC "()") (TApp a b) -> (++) <$> propagate ["Store"] a <*> propagate ["Store"] b
     TApp (TC "[]") a -> propagate ["Store"] a
-    TC "Databuf" -> Right []
-    TC "String" -> Right []
-    TC "Actor" -> Right []
-    TC "Module" -> Right []
-    TC "Port" -> Right []
-    TC "Int" -> Right []
+    TC s | elem s messageTypes -> Right []
     _ -> Left $ "no Store instance: " ++ show t
   propagateTyCon "Message" =
     concat <$> (mapM (propagate ["MessageItem"]) =<< listFromTupleType t)
   propagateTyCon "MessageItem" = case t of
-    TC s -> case getBasic s of
-      Nothing -> Left $ "no Message instance: " ++ s
-      Just _ -> Right []
+    TC s | elem s messageTypes -> Right []
     _ -> Left $ "no Message instance: " ++ show t
   propagateTyCon c = error $ "TODO: " ++ c
-  listFromTupleType ty = case ty of
-    TC "()" -> Right []
-    TC _ -> Right [ty]
-    TV _ -> Right [ty]
-    TApp (TC "()") rest -> weirdList rest
-    _ -> Left $ "want tuple: " ++ show ty
-    where
-    -- Tuples are represented oddly in our Type data structure.
-    weirdList tup = case tup of
-      TC _ -> Right [tup]
-      TV _ -> Right [tup]
-      TApp h@(TC _) rest -> (h:) <$> weirdList rest
-      TApp h@(TV _) rest -> (h:) <$> weirdList rest
-      _ -> Left $ "want tuple: " ++ show tup
+
+-- | Returns list of types from a tuple.
+-- e.g. (String, Int) becomes [String, Int]
+-- This should be trivial, but we represent tuples in a weird way!
+listFromTupleType :: Type -> Either String [Type]
+listFromTupleType ty = case ty of
+  TC "()" -> Right []
+  TC _ -> Right [ty]
+  TV _ -> Right [ty]
+  TApp (TC "()") rest -> weirdList rest
+  _ -> Left $ "want tuple: " ++ show ty
+  where
+  -- Tuples are represented oddly in our Type data structure.
+  weirdList tup = case tup of
+    TC _ -> Right [tup]
+    TV _ -> Right [tup]
+    TApp h@(TC _) rest -> (h:) <$> weirdList rest
+    TApp h@(TV _) rest -> (h:) <$> weirdList rest
+    _ -> Left $ "want tuple: " ++ show tup
 
 unify :: [(Type, Type)] -> Map String [String] -> Either String (Map String Type, Map String [String])
 unify constraints ctx = execStateT (uni constraints) (M.empty, ctx)
@@ -1063,3 +1042,6 @@ expandCase = ffix $ \h (Ast ast) -> Ast $ case ast of
     fromApList :: Ast -> [Ast]
     fromApList (Ast (a :@ b)) = fromApList a ++ [b]
     fromApList a = [a]
+
+messageTypes :: [String]
+messageTypes = ["Databuf", "String", "Actor", "Module", "Port", "I32", "Int"]
