@@ -91,7 +91,7 @@ data WasmMeta = WasmMeta
   , exports :: [(String, [Type])]  -- List of public functions.
   , elements :: [(String, [Type])]
   , callTypes :: [[Type]]  -- Types needed by call_indirect ops.
-  , initialHP :: Int  -- Initial HP.
+  , strEndHP :: Int  -- Heap address immediately past the string constants.
   , strAddrs :: Map ShortByteString Int  -- String constant addresses.
   , storeCount :: Int  -- Global store count.
   }
@@ -140,7 +140,7 @@ astToIns cl = (WasmMeta
   , exports = listifyTypes <$> publics cl
   , elements = listifyTypes <$> secrets cl
   , callTypes = ciTypes
-  , initialHP = initHP
+  , strEndHP = initHP
   , strAddrs = addrs
   , storeCount = length $ stores cl
   }, ins) where
@@ -186,10 +186,14 @@ encMartinTypes ts = 0x60 : lenc (f . fromJust . toPrimeaType <$> ts) ++ [0] wher
   f (Ref "Module") = 0x69  -- TODO: Check with Martin on this.
   f _ = error "bad type"
 
+badMagic :: Num a => a
+badMagic = 32
+
 insToBin :: String -> Boost -> (WasmMeta, [(String, [Ins])]) -> [Int]
 insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements, strAddrs, storeCount}, gmachine) = wasm where
   encMartinTM :: String -> Int -> [Int]
   encMartinTM f t = leb128 (wasmFunNo ('@':f) - length imps) ++ leb128 t
+  initialHP = strEndHP wm + 4 * length elements
   wasm = concat
     [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
 
@@ -204,7 +208,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     , sect 5 [0 : leb128 nPages]  -- Memory section (0 = no-maximum).
     , sect 6 $  -- Global section (1 = mutable).
       [ [encType I32, 1, 0x41] ++ sleb128 memTop ++ [0xb]  -- SP
-      , [encType I32, 1, 0x41] ++ sleb128 (initialHP wm) ++ [0xb]  -- HP
+      , [encType I32, 1, 0x41] ++ sleb128 initialHP ++ [0xb]  -- HP
       , [encType I32, 1, 0x41, 0, 0xb]  -- BP
       ]
       -- Global stores.
@@ -218,7 +222,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       ]
     , if null elements then [] else sect 9 [  -- Element section.
       [ 0  -- Table 0 (only one in MVP).
-      , 0x41, 32, 0xb]  -- Start at 32.
+      , 0x41, badMagic, 0xb]  -- Start at badMagic.
       ++ leb128 (length elements)
       ++ concatMap (leb128 . wasmFunNo . ('@':) . fst) elements]
     , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
@@ -252,7 +256,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
   localCount "#nfsyscall" = 2
   localCount _ = 0
   -- Returns arity and 0-indexed number of given global function.
-  getGlobal s = case M.lookup s $ arities wm of
+  getGlobal s = case M.lookup s $ M.insert "main" 0 $ arities wm of
     Just arity -> (arity, wasmFunNo s - firstPrim)
     Nothing -> (arityFromType $ fromMaybe (error $ "BUG! bad global: " ++ s) $ M.lookup s primsType, wasmFunNo s - firstPrim)
   firstPrim = wasmFunNo $ fst $ head evalFuns
@@ -268,6 +272,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     , ("#alloc", (([I32], []), allocAsm))
     , ("#pairwith42", (([I32], []), pairWith42Asm))
     , ("#nil42", (([], []), nil42Asm))
+    , ("#pushsecret", (([I32], []), pushSecretAsm))
     ] ++ (second (second $ concatMap deQuasi) <$> boostFuns)
   wasmFuns :: [(String, ((Int, Int), [WasmOp]))]
   wasmFuns =
@@ -282,14 +287,41 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     ((\(s, p) -> (s, ((typeNo [] [], localCount s), p))) <$> prims)
     -- Global get and set functions that interact with the DHC stack.
     ++ concatMap mkStoreAsm [0..storeCount - 1]
-    -- Functions from the program.
-    ++ (fromGMachine <$> gmachine)
+    -- Functions from the program, except `main`.
+    ++ (fromGMachine <$> filter (("main" /=) . fst) gmachine)
+    -- The `main` function. Any supplied `main` function is appended to
+    -- some standard setup code.
+    ++ [("main", ((typeNo [] [], 0), preMainAsm ++ concatMap fromIns (fromMaybe [] $ lookup "main" gmachine) ++ [End]))]
     -- Wrappers for call_indirect calls.
     ++ (wrapCallIndirect <$> callTypes wm)
 
-  fromGMachine (f, g) = (f, ((typeNo [] [], 0), (if f == "main"
-    then ([I32_const 1, Set_global mainCalled] ++)
-    else id) $ (++ [End]) $ concatMap fromIns g))
+  fromGMachine (f, g) = (f, ((typeNo [] [], 0), (++ [End]) $ concatMap fromIns g))
+
+  preMainAsm =
+    [ I32_const 1
+    , Set_global mainCalled
+    , I32_const badMagic
+    , Set_global bp
+    ] ++ concat [
+      -- [strEndHP + 4*i] = func.externalize bp | i <- [0..length elements - 1]
+      [ I32_const $ fromIntegral $ strEndHP wm + 4*i
+      , Get_global bp
+      , Call $ wasmFunNo "func.externalize"
+      , I32_store 2 0
+      , Get_global bp  -- bp = bp + 1
+      , I32_const 1
+      , I32_add
+      , Set_global bp
+      ] | i <- [0..length elements - 1]]
+
+  pushSecretAsm =
+    [ I32_const $ fromIntegral $ strEndHP wm
+    , Get_local 0
+    , I32_add
+    , I32_load 2 0
+    , Call $ wasmFunNo "#pushref"
+    , End
+    ]
 
   -- When sending a message with only one item, we have a bare argument
   -- instead of an argument tuple
@@ -381,10 +413,10 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     --
     -- on the heap, places a pointer to his on the stack, then calls Eval.
     --
-    -- Additionally, if a `main` function exists, then for each non-`main`
-    -- function, check a global flag and run `main` if it is false.
-    -- The `main` function should set this global flag to true.
-    (if f /= "main" && M.member "main" wasmFunMap then
+    -- Additionally, for each non-`main` function, first call `main`
+    -- if a certain global flag is false.
+    -- The `main` function always exists and sets this global flag.
+    (if f /= "main" then
     [ Get_global mainCalled  -- if (!mainCalled) mainCalled = 1, main;
     , I32_eqz
     , If Nada (
@@ -397,8 +429,6 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       , I32_const 4
       , I32_sub
       , Set_global sp
-
-      --, Call $ wasmFunNo "main"
       ] ++ concatMap fromIns [PushGlobal "main", MkAp, Eval])
     ]
     else []) ++
@@ -697,8 +727,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       , Call $ wasmFunNo "#pushglobal"
       ]
     PushSecret s ->
-      [ I32_const $ 32 + maybe (error $ "bad secret: " ++ s) fromIntegral (elemIndex s $ fst <$> elements)
-      , Call $ wasmFunNo "#pushref"
+      [ I32_const $ 4 * maybe (error $ "bad secret: " ++ s) fromIntegral (elemIndex s $ fst <$> elements)
+      , Call $ wasmFunNo "#pushsecret"
       ]
     PushString s ->
       [ Get_global sp  -- [sp] = address of string const

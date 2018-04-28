@@ -510,7 +510,7 @@ gather globs env (Ast ast) = case ast of
   -- Even better would be an `expose` function that takes a wasm function
   -- (something that takes wasm types and returns IO ()), and we lift lambdas
   -- if needed to create a top-level wasm function.
-  Qual "expose" f -> pure $ AAst (TC "I32") $ Qual "expose" f
+  Qual "expose" f -> pure $ AAst (TC "Port") $ Qual "expose" f
   Var "_" -> do
     x <- newTV
     pure $ AAst x $ Var "_"
@@ -866,7 +866,7 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJ
       addConstraint (TV $ '*':s, annOf t)
       -- TODO: Breaks eta reduction. Better off without this?
       -- We should probably require exported functions to be declared anyway.
-      when (s `elem` publics cl || s `elem` secrets cl) $
+      when (s == "main" || s `elem` publics cl || s `elem` secrets cl) $
         addConstraint (retType $ annOf t, TApp (TC "IO") $ TC "()")
       case (s `lookup` genDecls cl) of
         Nothing -> pure ()
