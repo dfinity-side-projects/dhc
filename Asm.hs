@@ -46,7 +46,6 @@ sbslen = SBS.length
 
 -- | G-Machine instructions.
 data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal String
-  | PushSecret String
   | PushRef Int32
   | PushString ShortByteString
   | MkAp | Slide Int | Split Int | Eval
@@ -140,14 +139,14 @@ astToIns cl = (WasmMeta
   , exports = listifyTypes <$> publics cl
   , elements = listifyTypes <$> secrets cl
   , callTypes = ciTypes
-  , strEndHP = initHP
+  , strEndHP = hp1
   , strAddrs = addrs
   , storeCount = length $ stores cl
   }, ins) where
   compilerOut = second (compile $ stores cl) <$> supers cl
   ciTypes = foldl' union [] $ callIndirectTypes . snd . snd <$> compilerOut
   ins = second fst <$> compilerOut
-  (initHP, addrs) = mkStrConsts $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
+  (hp1, addrs) = mkStrConsts $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
   listifyTypes w = (w, inTypes [] $ fst $ fromJust $ lookup w $ funTypes cl)
   inTypes acc t = case t of
     a :-> b -> case toPrimeaType a of
@@ -186,20 +185,17 @@ encMartinTypes ts = 0x60 : lenc (f . fromJust . toPrimeaType <$> ts) ++ [0] wher
   f (Ref "Module") = 0x69  -- TODO: Check with Martin on this.
   f _ = error "bad type"
 
-badMagic :: Num a => a
-badMagic = 32
-
 insToBin :: String -> Boost -> (WasmMeta, [(String, [Ins])]) -> [Int]
 insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements, strAddrs, storeCount}, gmachine) = wasm where
+  ees = exports ++ elements
   encMartinTM :: String -> Int -> [Int]
   encMartinTM f t = leb128 (wasmFunNo ('@':f) - length imps) ++ leb128 t
-  initialHP = strEndHP wm + 4 * length elements
   wasm = concat
     [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
 
     -- Custom sections for Martin's Primea.
-    , sectCustom "types" $ encMartinTypes . snd <$> exports ++ elements
-    , sectCustom "typeMap" $ zipWith encMartinTM (fst <$> exports ++ elements) [0..]
+    , sectCustom "types" $ encMartinTypes . snd <$> ees
+    , sectCustom "typeMap" $ zipWith encMartinTM (fst <$> ees) [0..]
 
     , sect 1 $ uncurry encSig . snd <$> BM.assocs typeMap  -- Type section.
     , sect 2 $ importFun <$> imps  -- Import section.
@@ -208,7 +204,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     , sect 5 [0 : leb128 nPages]  -- Memory section (0 = no-maximum).
     , sect 6 $  -- Global section (1 = mutable).
       [ [encType I32, 1, 0x41] ++ sleb128 memTop ++ [0xb]  -- SP
-      , [encType I32, 1, 0x41] ++ sleb128 initialHP ++ [0xb]  -- HP
+      , [encType I32, 1, 0x41] ++ sleb128 (strEndHP wm) ++ [0xb]  -- HP
       , [encType I32, 1, 0x41, 0, 0xb]  -- BP
       ]
       -- Global stores.
@@ -220,11 +216,13 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       [ encStr "memory" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
       , encStr "table" ++ [1, 0]  -- 1 = external_kind Table, 0 = memory index.
       ]
-    , if null elements then [] else sect 9 [  -- Element section.
+    , if null ees then [] else sect 9 [  -- Element section.
       [ 0  -- Table 0 (only one in MVP).
-      , 0x41, badMagic, 0xb]  -- Start at badMagic.
-      ++ leb128 (length elements)
-      ++ concatMap (leb128 . wasmFunNo . ('@':) . fst) elements]
+      -- Put public and secret functions at `slotMagic`.
+      -- We assume these will never be overwritten!
+      , 0x41, slotMagic, 0xb]
+      ++ leb128 (length ees)
+      ++ concatMap (leb128 . wasmFunNo . ('@':) . fst) ees]
     , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
     , sect 11 $ encStrConsts <$> M.assocs strAddrs  -- Data section.
     , sectCustom "dfndbg" [ord <$> show (sort $ swp <$> (M.assocs $ wasmFunMap))]
@@ -247,7 +245,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
   typeMap = BM.fromList $ zip [0..] $ nub $
     (snd <$> imps) ++  -- Types of imports
     -- Types of public and secret functions.
-    (flip (,) [] . map toWasmType . snd <$> exports ++ elements) ++
+    (flip (,) [] . map toWasmType . snd <$> ees) ++
     -- call_indirect types.
     (flip (,) [] <$> map toWasmType <$> callTypes wm) ++
     (fst . snd <$> internalFuns)  -- Types of internal functions.
@@ -272,14 +270,13 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     , ("#alloc", (([I32], []), allocAsm))
     , ("#pairwith42", (([I32], []), pairWith42Asm))
     , ("#nil42", (([], []), nil42Asm))
-    , ("#pushsecret", (([I32], []), pushSecretAsm))
     ] ++ (second (second $ concatMap deQuasi) <$> boostFuns)
   wasmFuns :: [(String, ((Int, Int), [WasmOp]))]
   wasmFuns =
     (second (first (\(ins, outs) -> (typeNo ins outs, 0))) <$> internalFuns)
     ++ evalFuns
     -- Wrappers for functions in "public" and "secret" section.
-    ++ (wrap <$> exports ++ elements)
+    ++ (wrap <$> ees)
   evalFuns =  -- Functions that "#eval" can call.
     -- Primitive functions.
     -- The assembly for "#eval" requires that the primitive functions
@@ -296,33 +293,10 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     ++ (wrapCallIndirect <$> callTypes wm)
 
   fromGMachine (f, g) = (f, ((typeNo [] [], 0), (++ [End]) $ concatMap fromIns g))
-
   preMainAsm =
-    [ I32_const 1
+    [ I32_const 1  -- mainCalled = 1
     , Set_global mainCalled
-    , I32_const badMagic
-    , Set_global bp
-    ] ++ concat [
-      -- [strEndHP + 4*i] = func.externalize bp | i <- [0..length elements - 1]
-      [ I32_const $ fromIntegral $ strEndHP wm + 4*i
-      , Get_global bp
-      , Call $ wasmFunNo "func.externalize"
-      , I32_store 2 0
-      , Get_global bp  -- bp = bp + 1
-      , I32_const 1
-      , I32_add
-      , Set_global bp
-      ] | i <- [0..length elements - 1]]
-
-  pushSecretAsm =
-    [ I32_const $ fromIntegral $ strEndHP wm
-    , Get_local 0
-    , I32_add
-    , I32_load 2 0
-    , Call $ wasmFunNo "#pushref"
-    , End
     ]
-
   -- When sending a message with only one item, we have a bare argument
   -- instead of an argument tuple
   wrapCallIndirect [t] = (show [t], ((typeNo [] [], 0),
@@ -726,10 +700,6 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       , I32_const $ fromIntegral g
       , Call $ wasmFunNo "#pushglobal"
       ]
-    PushSecret s ->
-      [ I32_const $ 4 * maybe (error $ "bad secret: " ++ s) fromIntegral (elemIndex s $ fst <$> elements)
-      , Call $ wasmFunNo "#pushsecret"
-      ]
     PushString s ->
       [ Get_global sp  -- [sp] = address of string const
       , I32_const $ fromIntegral $ strAddrs M.! s
@@ -900,7 +870,6 @@ mk1 pglobals (Ast ast) = case ast of
     st <- get
     put st { callIndirectTypes = callIndirectTypes st `union` [ty] }
     pure [PushCallIndirect ty]
-  Qual "expose" v -> pure [PushSecret v]
   Var v -> do
     m <- getBindings
     pure $ case lookup v m of

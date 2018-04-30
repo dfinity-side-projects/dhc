@@ -4,6 +4,7 @@ module DHC
   ( parseModule, AstF(..), Ast(..), Clay(..), Type(..)
   , inferType, parseDefs, lexOffside
   , arityFromType, hsToAst, liftLambdas
+  , slotMagic
   ) where
 import Control.Arrow
 import Control.Monad
@@ -32,6 +33,9 @@ type ShortByteString = String
 #else
 sbs = toShort . B.pack
 #endif
+
+slotMagic :: Num a => a
+slotMagic = 32
 
 data LayoutState = IndentAgain Int | LineStart | LineMiddle | AwaitBrace | Boilerplate deriving (Eq, Show)
 
@@ -492,25 +496,24 @@ type QualType = (Type, [(String, String)])
 -- | Gathers constraints.
 -- Replaces overloaded methods with Placeholder.
 -- Replaces data constructors with Pack.
+-- For Primea, replaces `my.f` with `#preslot n` where n is the slot number
+-- preloaded with the secret or public function `f`.
 gather
-  :: Globals
+  :: Clay
+  -> Globals
   -> [(String, QualType)]
   -> Ast
   -> Constraints (AAst Type)
-gather globs env (Ast ast) = case ast of
+gather cl globs env (Ast ast) = case ast of
   I i -> pure $ AAst (TC "Int") $ I i
   S s -> pure $ AAst (TC "String") $ S s
   Pack m n -> do  -- Only tuples are pre`Pack`ed.
     xs <- replicateM n newTV
     let r = foldr1 TApp $ TC "()":xs
     pure $ AAst (foldr (:->) r xs) $ Pack m n
-  -- TODO: Check `f` has been declared `secret`.
-  -- TODO: Clunky. Better to get rid of `secret` declarations, and
-  -- exclusively use `expose` to determine which functions are private.
-  -- Even better would be an `expose` function that takes a wasm function
-  -- (something that takes wasm types and returns IO ()), and we lift lambdas
-  -- if needed to create a top-level wasm function.
-  Qual "expose" f -> pure $ AAst (TC "Port") $ Qual "expose" f
+  Qual "my" f
+    | Just n <- elemIndex f (publics cl ++ secrets cl) -> rec env $ Ast (Ast (Var "#preslot") :@ Ast (I $ fromIntegral $ n + slotMagic))
+    | otherwise -> bad $ "must be secret or public: " ++ f
   Var "_" -> do
     x <- newTV
     pure $ AAst x $ Var "_"
@@ -561,7 +564,7 @@ gather globs env (Ast ast) = case ast of
     pure $ AAst t $ Let (zip (fst <$> ds) ts) body1
   _ -> fail $ "BUG! unhandled: " ++ show ast
   where
-    rec = gather globs
+    rec = gather cl globs
     bad = Constraints . const . Left
     afst (AAst t _) = t
 
@@ -862,7 +865,7 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJ
   inferMutual :: ([(String, (QualType, Ast))], Map String Type) -> [(String, Ast)] -> Either String ([(String, (QualType, Ast))], Map String Type)
   inferMutual (acc, accStorage) grp = do
     (typedAsts, ConState _ cs m) <- buildConstraints $ forM grp $ \(s, d) -> do
-      t <- gather globs env d
+      t <- gather cl globs env d
       addConstraint (TV $ '*':s, annOf t)
       -- TODO: Breaks eta reduction. Better off without this?
       -- We should probably require exported functions to be declared anyway.
