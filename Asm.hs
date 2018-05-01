@@ -445,11 +445,11 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     , I32_add
     , I32_const 0
     , I32_store 2 0
-    , Get_global hp  -- [hp + 12] = bp = memory.length local_i
+    , Get_global hp  -- [hp + 12] = bp = data.length local_i
     , I32_const 12
     , I32_add
     , Get_local i
-    , Call $ wasmFunNo "memory.length"
+    , Call $ wasmFunNo "data.length"
     , Set_global bp
     , Get_global bp
     , I32_store 2 0
@@ -459,7 +459,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     , Get_global bp  -- PUSH bp
     , Get_local i  -- PUSH local_i
     , I32_const 0   -- PUSH 0
-    , Call $ wasmFunNo "memory.internalize"
+    , Call $ wasmFunNo "data.internalize"
     , Get_global sp  -- [sp] = hp
     , Get_global hp
     , I32_store 2 0
@@ -1153,7 +1153,7 @@ pushCallIndirectArg t = case t of
     , I32_const 12
     , I32_add
     , I32_load 2 0
-    , Custom $ CallSym "memory.externalize"
+    , Custom $ CallSym "data.externalize"
     ]
   _ ->
     [ Get_global sp  -- PUSH [[sp + 4] + 4]
