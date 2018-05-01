@@ -92,7 +92,7 @@ data WasmMeta = WasmMeta
   , callTypes :: [[Type]]  -- Types needed by call_indirect ops.
   , strEndHP :: Int  -- Heap address immediately past the string constants.
   , strAddrs :: Map ShortByteString Int  -- String constant addresses.
-  , storeCount :: Int  -- Global store count.
+  , storeTypes :: [Type]  -- Global store types.
   }
 
 hsToGMachine :: Boost -> String -> Either String (Map String Int, [(String, [Ins])])
@@ -141,9 +141,9 @@ astToIns cl = (WasmMeta
   , callTypes = ciTypes
   , strEndHP = hp1
   , strAddrs = addrs
-  , storeCount = length $ stores cl
+  , storeTypes = snd <$> stores cl
   }, ins) where
-  compilerOut = second (compile $ stores cl) <$> supers cl
+  compilerOut = second (compile $ fst <$> stores cl) <$> supers cl
   ciTypes = foldl' union [] $ callIndirectTypes . snd . snd <$> compilerOut
   ins = second fst <$> compilerOut
   (hp1, addrs) = mkStrConsts $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
@@ -169,33 +169,43 @@ toPrimeaType t = case t of
     then Just $ Ref s else Nothing
   _ -> Nothing
 
-encMartinTypes :: [Type] -> [Int]
-encMartinTypes ts = 0x60 : lenc (f . fromJust . toPrimeaType <$> ts) ++ [0] where
-  f I32 = 0x7f
-  f I64 = 0x7e
-  f F32 = 0x7d
-  f F64 = 0x7c
-  f AnyFunc = 0x70
-  f (Ref "Actor") = 0x6f
-  f (Ref "Port") = 0x6e
-  f (Ref "Databuf") = 0x6d
-  f (Ref "Elem") = 0x6c
-  f (Ref "Link") = 0x6b
-  f (Ref "Id") = 0x6a
-  f (Ref "Module") = 0x69  -- TODO: Check with Martin on this.
-  f _ = error "bad type"
+encMartinType :: WasmType -> Int
+encMartinType t = case t of
+  I32 -> 0x7f
+  I64 -> 0x7e
+  F32 -> 0x7d
+  F64 -> 0x7c
+  Ref "Actor" -> 0x6f
+  Ref "Module" -> 0x6e
+  Ref "Port" -> 0x6d
+  Ref "Databuf" -> 0x6c
+  Ref "Elem" -> 0x6b
+  _ -> error "bad type"
+
+fromStoreType :: Type -> WasmType
+fromStoreType (TApp (TC "Store") t) = case t of
+  -- TODO: Store Int as I64 (and fix mkStoreAsm accordingly).
+  TC "Int" -> Ref "Databuf"
+  TApp (TC "()") _ -> Ref "Elem"
+  TApp (TC "[]") _ -> Ref "Elem"
+  _ -> fromMaybe (error "bad persist") $ toPrimeaType t
+fromStoreType _ = error "expect Store"
 
 insToBin :: String -> Boost -> (WasmMeta, [(String, [Ins])]) -> [Int]
-insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements, strAddrs, storeCount}, gmachine) = wasm where
+insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements, strAddrs, storeTypes}, gmachine) = wasm where
   ees = exports ++ elements
+  encMartinTypes :: [Type] -> [Int]
+  encMartinTypes ts = 0x60 : lenc (encMartinType . fromJust . toPrimeaType <$> ts) ++ [0]
   encMartinTM :: String -> Int -> [Int]
   encMartinTM f t = leb128 (wasmFunNo ('@':f) - length imps) ++ leb128 t
+  encMartinGlobal t i = [3] ++ leb128 (mainCalled + i) ++ leb128 t
   wasm = concat
     [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
 
     -- Custom sections for Martin's Primea.
     , sectCustom "types" $ encMartinTypes . snd <$> ees
     , sectCustom "typeMap" $ zipWith encMartinTM (fst <$> ees) [0..]
+    , sectCustom "persist" $ zipWith encMartinGlobal (encMartinType . fromStoreType <$> TApp (TC "Store") (TC "I32"):storeTypes) [0..]
 
     , sect 1 $ uncurry encSig . snd <$> BM.assocs typeMap  -- Type section.
     , sect 2 $ importFun <$> imps  -- Import section.
@@ -208,8 +218,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       , [encType I32, 1, 0x41, 0, 0xb]  -- BP
       ]
       -- Global stores.
-      -- Extra global records if `main` has been run yet.
-      ++ replicate (1 + storeCount) [encType I32, 1, 0x41, 0, 0xb]
+      -- First one records if `main` has been run yet.
+      ++ map declareGlobal (TC "I32":storeTypes)
     , sect 7 $  -- Export section.
       -- The "public" functions are exported verbatim.
       [exportFun s ('@':s) | (s, _) <- exports] ++
@@ -228,6 +238,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     , sectCustom "dfndbg" [ord <$> show (sort $ swp <$> (M.assocs $ wasmFunMap))]
     , sectCustom "dfnhs" [ord <$> src]
     ]
+  declareGlobal (TC "Int") = [encType I64, 1, 0x42, 0, 0xb]
+  declareGlobal _ = [encType I32, 1, 0x41, 0, 0xb]
   swp (a, b) = (b, a)
   memTop = 65536*nPages - 4
   encStrConsts (s, offset) = concat
@@ -283,7 +295,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     -- directly precede those defined in the program.
     ((\(s, p) -> (s, ((typeNo [] [], localCount s), p))) <$> prims)
     -- Global get and set functions that interact with the DHC stack.
-    ++ concatMap mkStoreAsm [0..storeCount - 1]
+    -- TODO: Support I64.
+    ++ concatMap mkStoreAsm [0..length storeTypes - 1]
     -- Functions from the program, except `main`.
     ++ (fromGMachine <$> filter (("main" /=) . fst) gmachine)
     -- The `main` function. Any supplied `main` function is appended to

@@ -84,7 +84,7 @@ fixity o = fromMaybe (LAssoc, 9) $ M.lookup o standardFixities
 data Clay = Clay
   { publics :: [String]
   , secrets :: [String]
-  , stores :: [String]
+  , stores :: [(String, Type)]
   , funTypes :: [(String, QualType)]
   , supers :: [(String, Ast)]
   , genDecls :: [(String, Type)]
@@ -437,7 +437,11 @@ contract = do
   p <- toplevels
   when (isNothing $ mapM (`lookup` supers p) ws) $ fail "bad publics"
   when (isNothing $ mapM (`lookup` supers p) ss) $ fail "bad secrets"
-  pure $ p { publics = ws, secrets = ss, stores = ps }
+  let
+    storeCons s
+      | Just ty <- lookup s $ genDecls p = (s, ty)
+      | otherwise = (s, TC "Store" `TApp` TV ('@':s))
+  pure $ p { publics = ws, secrets = ss, stores = storeCons <$> ps }
 
 qParse :: Parser a
   -> (LayoutState, [Int])
@@ -820,23 +824,12 @@ boostTypes b = M.fromList $ second (((,) Nothing) . fst) <$> boostHs b
 hsToAst :: Boost -> QQuoter -> String -> Either String Clay
 hsToAst boost qq prog = do
   cl <- showErr $ evalState (runParserT contract (Boilerplate, []) "" prog) (qq, M.empty)
-  (preStorageInferred, storageCons) <- inferType boost cl
+  (inferred, storageCons) <- inferType boost cl
   let
-    inferred = constrainStorage storageCons preStorageInferred
     subbedDefs = (second expandCase <$>) . liftLambdas . (second snd <$>) $ inferred
     types = second fst <$> inferred
-  pure cl { supers = subbedDefs, funTypes = types }
+  pure cl { supers = subbedDefs, funTypes = types, stores = second (typeSolve storageCons) <$> stores cl }
   where showErr = either (Left . show) Right
-
-constrainStorage :: Map String Type -> [(String, (QualType, Ast))] -> [(String, (QualType, Ast))]
-constrainStorage cons ds = second (first (first rewriteType)) <$> ds where
-  rewriteType (GV ('@':x)) = case typeSolve cons $ TV ('@':x) of
-    TC t -> TC t
-    _    -> TC "String"
-  rewriteType (t :-> u) = rec t :-> rec u
-  rewriteType (TApp t u) = TApp (rec t) (rec u)
-  rewriteType t = t
-  rec = rewriteType
 
 inferType
   :: Boost
@@ -856,12 +849,9 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJ
     `M.union` M.fromList (datas preludeDefs)
     `M.union` M.fromList (datas cl)
     `M.union` boostTypes boost
-    `M.union` (M.fromList $ storeTypeConstraint <$> stores cl)
+    `M.union` M.fromList (second ((,) Nothing) <$> stores cl)
   Right preludeDefs = parseDefs $ boostPrelude boost
   ds = supers cl ++ supers preludeDefs
-  storeTypeConstraint s
-    | Just ty <- lookup s $ genDecls cl = (s, (Nothing, ty))
-    | otherwise = (s, (Nothing, TC "Store" `TApp` TV ('@':s)))
   inferMutual :: ([(String, (QualType, Ast))], Map String Type) -> [(String, Ast)] -> Either String ([(String, (QualType, Ast))], Map String Type)
   inferMutual (acc, accStorage) grp = do
     (typedAsts, ConState _ cs m) <- buildConstraints $ forM grp $ \(s, d) -> do
