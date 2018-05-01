@@ -12,6 +12,7 @@ module Hero
   , setTable
   , tableInputs
   , globalVM, setGlobalVM
+  , permaGlobalVM
   , getNumVM, putNumVM
   , stateVM, putStateVM
   ) where
@@ -67,6 +68,11 @@ globalVM vm = globs vm
 -- | Writes global variables.
 setGlobalVM :: [(Int, WasmOp)] -> HeroVM a -> HeroVM a
 setGlobalVM m vm = vm { globs = IM.fromList m `IM.union` globs vm }
+
+-- | Reads persistent global variables.
+permaGlobalVM :: HeroVM a -> IntMap (WasmOp, WasmType)
+permaGlobalVM vm = IM.fromList $ map f $ martinGlobals $ wasm vm where
+  f (i, t) = (i, (globs vm IM.! i, t))
 
 getNum :: Integral n => Int -> Int32 -> IntMap Int -> n
 --getNum w addr mem = sum $ zipWith (*) (fromIntegral <$> bs) ((256^) <$> [(0 :: Int)..]) where bs = fmap (mem IM.!) ((fromIntegral addr +) <$> [0..w-1])

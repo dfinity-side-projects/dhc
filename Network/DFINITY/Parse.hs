@@ -32,12 +32,13 @@ data Wasm = Wasm
   , dfnExports :: [(String, [WasmType])]
   , martinTypes :: [[WasmType]]
   , martinTypeMap :: [(Int, Int)]
+  , martinGlobals :: [(Int, WasmType)]
   , persist :: [(Int, WasmType)]
   , haskell :: String
   } deriving Show
 
 emptyWasm :: Wasm
-emptyWasm = Wasm [] [] [] 0 [] [] [] Nothing [] [] [] [] [] [] [] ""
+emptyWasm = Wasm [] [] [] 0 [] [] [] Nothing [] [] [] [] [] [] [] [] ""
 
 data ByteParser a = ByteParser (ByteString -> Either String (a, ByteString))
 
@@ -100,6 +101,7 @@ wasm = do
     varint7 :: ByteParser Int
     varint7 = do
       c <- ord <$> next
+      when (c >= 128) $ error "bad varint7"
       pure $ if c >= 64 then c - 128 else c
 
     varint32 :: ByteParser Int32
@@ -265,19 +267,17 @@ wasm = do
 
     martinValueType = do
       t <- varuint7
-      maybe (bad "bad value Type") pure $ lookup t
+      maybe (bad $ "bad type: " ++ show t) pure $ lookup t
         [ (0x7f, I32)
         , (0x7e, I64)
         , (0x7d, F32)
         , (0x7c, F64)
         , (0x70, AnyFunc)
         , (0x6f, Ref "Actor")
-        , (0x6e, Ref "Port")
-        , (0x6d, Ref "Databuf")
-        , (0x6c, Ref "Elem")
-        , (0x6b, Ref "Link")
-        , (0x6a, Ref "Id")
-        , (0x69, Ref "Module")
+        , (0x6e, Ref "Module")
+        , (0x6d, Ref "Port")
+        , (0x6c, Ref "Databuf")
+        , (0x6b, Ref "Elem")
         ]
 
     sectCustom w = do
@@ -289,6 +289,12 @@ wasm = do
         "typeMap" -> do
           tm <- rep varuint32 $ (,) <$> varuint32 <*> varuint32
           pure w { martinTypeMap = tm }
+        "persist" -> do
+          g <- rep varuint32 $ do
+            tmp <- varuint7
+            when (tmp /= 3) $ bad "expect 3"
+            (,) <$> varuint32 <*> martinValueType
+          pure w { martinGlobals = g }
         "dfndbg" -> remainder >> pure w
         "dfnhs" -> do
           void $ varuint32  -- Should be 1.
