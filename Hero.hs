@@ -145,16 +145,21 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
   c@(I64_const _) -> run $ step $ c:stack
   I32_xor -> binOp32 xor
   I32_and -> binOp32 (.&.)
+  I32_or -> binOp32 (.|.)
   I32_add -> binOp32 (+)
   I32_sub -> binOp32 (-)
   I32_mul -> binOp32 (*)
+  I32_div_s -> binOp32 div  -- TODO: Is this right for negative inputs?
   I32_rem_u -> binOp32 rem32U
   I32_shl -> binOp32U shiftL32
   I32_rotl -> binOp32U rotateL32
   I32_rotr -> binOp32U rotateR32
   I32_shr_u -> binOp32U shiftR32U
   I32_lt_u -> binOp32U $ ((fromIntegral . fromEnum) .) . (<)
+  I32_ge_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (>=)
+  I32_gt_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (>)
   I32_le_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (<=)
+  I32_lt_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (<)
   I32_ne -> binOp32 $ ((fromIntegral . fromEnum) .) . (/=)
   I32_eq -> binOp32 $ ((fromIntegral . fromEnum) .) . (==)
   I32_eqz -> let
@@ -177,34 +182,23 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
     I64_const a = head stack
     c = I32_const $ fromIntegral a
     in run $ step (c:tail stack)
-  I32_load8_u _ _ -> do
-    let I32_const addr = head stack
-        c = I32_const $ getNum 1 addr mem
-    run $ step (c:tail stack)
-  I32_load16_u _ _ -> do
-    let I32_const addr = head stack
-        c = I32_const $ getNum 2 addr mem
-    run $ step (c:tail stack)
-  I32_load _ _ -> do
-    let I32_const addr = head stack
-        c = I32_const $ getNum 4 addr mem
-    run $ step (c:tail stack)
-  I32_store _ _ -> let (I32_const n:I32_const addr:_) = stack in do
-    let mem' = putNum 4 addr n mem
-    run (step $ drop 2 stack) { mem = mem'}
-  I32_store8 _ _ -> let (I32_const n:I32_const addr:_) = stack in do
-    let mem' = putNum 1 addr n mem
-    run (step $ drop 2 stack) { mem = mem'}
-  I64_store _ _ -> do
+  I32_load8_u  _ o -> load32 1 o
+  I32_load16_u _ o -> load32 2 o
+  I32_load     _ o -> load32 4 o
+  I32_store8   _ o -> store32 1 o
+  I32_store16  _ o -> store32 2 o
+  I32_store    _ o -> store32 4 o
+  I64_store _ o -> do
     let
       I32_const addr = stack!!1
       I64_const n = head stack
-    let mem' = putNum 8 addr n mem
+    let mem' = putNum 8 (addr + fromIntegral o) n mem
     run (step $ drop 2 stack) { mem = mem'}
-  I64_load _ _ -> do
+  I64_load _ o -> do
     let I32_const addr = head stack
-        c = I64_const $ getNum 8 addr mem
+        c = I64_const $ getNum 8 (addr + fromIntegral o) mem
     run $ step (c:tail stack)
+
   If _ bl -> let I32_const n = head stack in if n /= 0
     then run vm {stack = tail stack, insts = bl:i1}
     else run vm {stack = tail stack, insts = i1}
@@ -220,6 +214,12 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
       k = if n < 0 || n >= length as then d else as!!n
     run vm {stack = tail stack, insts = drop (k + 1) insts}
   Unreachable -> putStrLn "IT'S A TRAP!" >> pure ([], vm)
+  Drop -> run $ step $ tail stack
+  Select -> do
+    let
+      [I32_const c, f, t] = take' 3 stack
+      r = if c /= 0 then t else f
+    run $ step $ r:drop 3 stack
   _ -> error $ "TODO: " ++ show (head $ head insts)
   where
     step newStack = vmNext { stack = newStack }
@@ -238,6 +238,12 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
     boolBinOp64 f = run $ step (c:drop 2 stack) where
       (I64_const b:I64_const a:_) = stack
       c = I32_const $ fromIntegral $ fromEnum $ f a b
+    load32 sz off = run $ step (I32_const (getNum sz (addr + fromIntegral off) mem):tail stack)
+      where I32_const addr = head stack
+    store32 sz off = do
+      let (I32_const n:I32_const addr:_) = stack
+          mem' = putNum sz (addr + fromIntegral off) n mem
+      run (step $ drop 2 stack) { mem = mem'}
 
 runWasmIndex :: Int -> [WasmOp] -> HeroVM a -> IO ([WasmOp], HeroVM a)
 runWasmIndex n args vm = run (setArgsVM args vm) { insts = [[Call n]] }
