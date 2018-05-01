@@ -660,9 +660,9 @@ dictSolve dsoln soln (Ast ast) = case ast of
   -- A storage variable x compiles to a pair (#set-n, #get-n) where n is the
   -- global variable assigned to hold x.
   --   set x y = fst x (toAny y)
-  Placeholder "set" t -> Ast $ Lam ["x", "y"] $ aVar "fst" @@ aVar "x" @@ (aVar "fst" @@ rec (Ast $ Placeholder "Storage" $ typeSolve soln t) @@ aVar "y")
+  Placeholder "set" t -> Ast $ Lam ["x", "y"] $ aVar "fst" @@ aVar "x" @@ (aVar "p3of4" @@ rec (Ast $ Placeholder "Storage" $ typeSolve soln t) @@ aVar "y")
   --   get x = snd x >>= pure . fromAny
-  Placeholder "get" t -> Ast $ Lam ["x"] $ aVar "io_monad" @@ (aVar "snd" @@ aVar "x") @@ (aVar "." @@ aVar "io_pure" @@ (aVar "snd" @@ rec (Ast $ Placeholder "Storage" $ typeSolve soln t)))
+  Placeholder "get" t -> Ast $ Lam ["x"] $ aVar "io_monad" @@ (aVar "snd" @@ aVar "x") @@ (aVar "." @@ aVar "io_pure" @@ (aVar "p4of4" @@ rec (Ast $ Placeholder "Storage" $ typeSolve soln t)))
   Placeholder d t -> case typeSolve soln t of
     TV v -> Ast $ Var $ fromMaybe (error $ "unsolvable: " ++ show (d, v)) $ lookup (d, v) dsoln
     u -> findInstance d u
@@ -682,22 +682,31 @@ dictSolve dsoln soln (Ast ast) = case ast of
       TC "Maybe" -> Ast (Pack 0 2) @@ aVar "maybe_pure" @@ aVar "maybe_monad"
       TC "IO" -> Ast (Pack 0 2) @@ aVar "io_pure" @@ aVar "io_monad"
       e -> error $ "BUG! no Monad for " ++ show e
+    -- The "Storage" typeclass has four methods:
+    --  1. toAnyRef
+    --  2. fromAnyRef
+    --  3. toUnboxed
+    --  4. fromUnboxed
+    -- For boxed types such as databufs, 1 and 2 are the same as 3 and 4.
+    -- For unboxed types, such as integers, 1 encodes to a databuf, 2 decodes
+    -- from a databuf, and 3 and 4 leave the input unchanged.
     findInstance "Storage" t = case t of
-      TC "Databuf" -> Ast (Pack 0 2) @@ aVar "Databuf-toAny" @@ aVar "Databuf-fromAny"
-      TC "String" -> Ast (Pack 0 2) @@ (aVar "." @@ aVar "Databuf-toAny" @@ aVar "toD") @@ (aVar "." @@ aVar "Databuf-fromAny" @@ aVar "fromD")
-      TC "Port" -> Ast (Pack 0 2) @@ aVar "Port-toAny" @@ aVar "Port-fromAny"
-      TC "Actor" -> Ast (Pack 0 2) @@ aVar "Actor-toAny" @@ aVar "Actor-fromAny"
-      TC "Module" -> Ast (Pack 0 2) @@ aVar "Module-toAny" @@ aVar "Module-fromAny"
-      TC "Int" -> Ast (Pack 0 2) @@ aVar "Int-toAny" @@ aVar "Int-fromAny"
+      TC "Databuf" -> boxy (aVar "Databuf-toAny") (aVar "Databuf-fromAny")
+      TC "String" -> boxy (aVar "." @@ aVar "Databuf-toAny" @@ aVar "toD") (aVar "." @@ aVar "Databuf-fromAny" @@ aVar "fromD")
+      TC "Port" -> boxy (aVar "Port-toAny") (aVar "Port-fromAny")
+      TC "Actor" -> boxy (aVar "Actor-toAny") (aVar "Actor-fromAny")
+      TC "Module" -> boxy (aVar "Module-toAny") (aVar "Module-fromAny")
+      TC "Int" -> Ast (Pack 0 4) @@ aVar "Int-toAny" @@ aVar "Int-fromAny" @@ aVar "id" @@ aVar "id"
       TApp (TC "[]") a -> let
         ltai = aVar "list_to_any_instance" @@ rec (Ast $ Placeholder "Storage" a)
         lfai = aVar "list_from_any_instance" @@ rec (Ast $ Placeholder "Storage" a)
-        in Ast (Pack 0 2) @@ ltai @@ lfai
+        in boxy ltai lfai
       TApp (TC "()") (TApp a b) -> let
         ptai = aVar "pair_to_any_instance" @@ rec (Ast $ Placeholder "Storage" a) @@ rec (Ast $ Placeholder "Storage" b)
         pfai = aVar "pair_from_any_instance" @@ rec (Ast $ Placeholder "Storage" a) @@ rec (Ast $ Placeholder "Storage" b)
-        in Ast (Pack 0 2) @@ ptai @@ pfai
+        in boxy ptai pfai
       e -> error $ "BUG! no Storage for " ++ show e
+      where boxy to from = Ast (Pack 0 4) @@ to @@ from @@ to @@ from
     findInstance d t = error $ "BUG! bad class: " ++ show (d, t)
 
 typeSolve :: Map String Type -> Type -> Type
@@ -729,10 +738,7 @@ propagate cs t = concat <$> mapM propagateTyCon cs where
     TC s | elem s messageTypes -> Right []
     _ -> Left $ "no Storage instance: " ++ show t
   propagateTyCon "Message" =
-    concat <$> (mapM (propagate ["MessageItem"]) =<< listFromTupleType t)
-  propagateTyCon "MessageItem" = case t of
-    TC s | elem s messageTypes -> Right []
-    _ -> Left $ "no Message instance: " ++ show t
+    concat <$> (mapM (propagate ["Storage"]) =<< listFromTupleType t)
   propagateTyCon c = error $ "TODO: " ++ c
 
 -- | Returns list of types from a tuple.
@@ -828,7 +834,9 @@ hsToAst boost qq prog = do
   let
     subbedDefs = (second expandCase <$>) . liftLambdas . (second snd <$>) $ inferred
     types = second fst <$> inferred
-  pure cl { supers = subbedDefs, funTypes = types, stores = second (typeSolve storageCons) <$> stores cl }
+    stripStore (TApp (TC "Store") t) = t
+    stripStore _ = error "expect Store"
+  pure cl { supers = subbedDefs, funTypes = types, stores = second (stripStore . typeSolve storageCons) <$> stores cl }
   where showErr = either (Left . show) Right
 
 inferType

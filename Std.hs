@@ -31,6 +31,7 @@ stdBoost = Boost
   , "bool f t b = case b of {False -> f; True ->t}"
   , "when b t = bool (pure ()) t b"
   , "f $ x = f x"
+  , "id x = x"
   ])
   -- Haskell functions defined in wasm.
   [ ("+", (TC "Int" :-> TC "Int" :-> TC "Int", intAsm I64_add))

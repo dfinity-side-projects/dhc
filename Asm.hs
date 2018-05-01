@@ -183,13 +183,10 @@ encMartinType t = case t of
   _ -> error "bad type"
 
 fromStoreType :: Type -> WasmType
-fromStoreType (TApp (TC "Store") t) = case t of
-  -- TODO: Store Int as I64 (and fix mkStoreAsm accordingly).
-  TC "Int" -> Ref "Databuf"
+fromStoreType t = case t of
   TApp (TC "()") _ -> Ref "Elem"
   TApp (TC "[]") _ -> Ref "Elem"
-  _ -> fromMaybe (error "bad persist") $ toPrimeaType t
-fromStoreType _ = error "expect Store"
+  _ -> fromMaybe (error $ "bad persist: " ++ show t) $ toPrimeaType t
 
 insToBin :: String -> Boost -> (WasmMeta, [(String, [Ins])]) -> [Int]
 insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements, strAddrs, storeTypes}, gmachine) = wasm where
@@ -205,7 +202,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     -- Custom sections for Martin's Primea.
     , sectCustom "types" $ encMartinTypes . snd <$> ees
     , sectCustom "typeMap" $ zipWith encMartinTM (fst <$> ees) [0..]
-    , sectCustom "persist" $ zipWith encMartinGlobal (encMartinType . fromStoreType <$> TApp (TC "Store") (TC "I32"):storeTypes) [0..]
+    , sectCustom "persist" $ zipWith encMartinGlobal (encMartinType . fromStoreType <$> TC "I32":storeTypes) [0..]
 
     , sect 1 $ uncurry encSig . snd <$> BM.assocs typeMap  -- Type section.
     , sect 2 $ importFun <$> imps  -- Import section.
@@ -262,9 +259,6 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     (flip (,) [] <$> map toWasmType <$> callTypes wm) ++
     (fst . snd <$> internalFuns)  -- Types of internal functions.
   exportFun name internalName = encStr name ++ (0 : leb128 (wasmFunNo internalName))
-  -- TODO: Remove "#nfsyscall".
-  localCount "#nfsyscall" = 2
-  localCount _ = 0
   -- Returns arity and 0-indexed number of given global function.
   getGlobal s = case M.lookup s $ M.insert "main" 0 $ arities wm of
     Just arity -> (arity, wasmFunNo s - firstPrim)
@@ -293,10 +287,9 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     -- Primitive functions.
     -- The assembly for "#eval" requires that the primitive functions
     -- directly precede those defined in the program.
-    ((\(s, p) -> (s, ((typeNo [] [], localCount s), p))) <$> prims)
+    ((\(s, p) -> (s, ((typeNo [] [], 0), p))) <$> prims)
     -- Global get and set functions that interact with the DHC stack.
-    -- TODO: Support I64.
-    ++ concatMap mkStoreAsm [0..length storeTypes - 1]
+    ++ concat (zipWith mkStoreAsm storeTypes [0..])
     -- Functions from the program, except `main`.
     ++ (fromGMachine <$> filter (("main" /=) . fst) gmachine)
     -- The `main` function. Any supplied `main` function is appended to
@@ -599,20 +592,34 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
         ]
       nest k = [Block Nada $ nest $ k - 1, Call $ firstPrim + k - 1, Return]
 
-  mkStoreAsm n =
+  mkStoreAsm t n =
     [ ("#set-" ++ show n, ((typeNo [] [], 0),
       [ I32_const 4  -- Push 0, Eval.
       , Call $ wasmFunNo "#push"
       , Call $ wasmFunNo "#eval"
-      , Get_global sp  -- Set_global n [[sp + 4] + 4]
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
-      , Set_global $ storeOffset + n
-      , Get_global sp  -- sp = sp + 12
+      ] ++ (case t of
+        TC "Int" ->
+          [ Get_global sp  -- Set_global n [[sp + 4] + 8].64
+          , I32_const 4
+          , I32_add
+          , I32_load 2 0
+          , I32_const 8
+          , I32_add
+          , I64_load 3 0
+          , Set_global $ storeOffset + n
+          ]
+        _ ->
+          [ Get_global sp  -- Set_global n [[sp + 4] + 4]
+          , I32_const 4
+          , I32_add
+          , I32_load 2 0
+          , I32_const 4
+          , I32_add
+          , I32_load 2 0
+          , Set_global $ storeOffset + n
+          ]
+      ) ++
+      [ Get_global sp  -- sp = sp + 12
       , I32_const 12
       , I32_add
       , Set_global sp
@@ -620,20 +627,38 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       , End
       ]))
     , ("#get-" ++ show n, ((typeNo [] [], 0),
-      [ Get_global hp  -- [hp] = TagRef
-      , tag_const TagRef
-      , I32_store 2 0
-      , Get_global hp  -- [hp + 4] = Get_global n
-      , I32_const 4
-      , I32_add
-      , Get_global $ storeOffset + n
-      , I32_store 2 0
-      , Get_global hp  -- PUSH hp
-      , Get_global hp  -- hp = hp + 8
-      , I32_const 8
-      , I32_add
-      , Set_global hp
-      , Get_global sp  -- sp = sp + 4
+      [ Get_global hp  -- PUSH hp
+      ] ++ (case t of
+        TC "Int" ->
+          [ Get_global hp  -- [hp] = TagInt
+          , tag_const TagInt
+          , I32_store 2 0
+          , Get_global hp  -- [hp + 8] = Get_global n
+          , I32_const 8
+          , I32_add
+          , Get_global $ storeOffset + n
+          , I64_store 3 0
+          , Get_global hp  -- hp = hp + 16
+          , I32_const 16
+          , I32_add
+          , Set_global hp
+          ]
+        _ ->
+          [ Get_global hp  -- [hp] = TagRef
+          , tag_const TagRef
+          , I32_store 2 0
+          , Get_global hp  -- [hp + 4] = Get_global n
+          , I32_const 4
+          , I32_add
+          , Get_global $ storeOffset + n
+          , I32_store 2 0
+          , Get_global hp  -- hp = hp + 8
+          , I32_const 8
+          , I32_add
+          , Set_global hp
+          ]
+      ) ++
+      [ Get_global sp  -- sp = sp + 4
       , I32_const 4
       , I32_add
       , Set_global sp
