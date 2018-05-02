@@ -26,9 +26,11 @@ import Data.Bits
 import Data.Char
 import Data.Int
 import Data.List
-import Data.Map (Map)
-import qualified Data.Map as M
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as M
 import Data.Maybe
+import Data.Set (Set)
+import qualified Data.Set as S
 
 import Boost
 import DHC
@@ -202,6 +204,47 @@ fromStoreType t = case t of
   TApp (TC "[]") _ -> Ref "Elem"
   _ -> fromMaybe (error $ "bad persist: " ++ show t) $ toPrimeaType t
 
+traceCalls :: [Int] -> Map Int [WasmOp] -> Set Int
+traceCalls ns m = execState (go ns) $ S.fromList ns where
+  go (n:rest) = do
+    maybe (pure ()) tr $ M.lookup n m
+    go rest
+  go [] = pure ()
+  tr (w:rest) = do
+    case w of
+      Call i -> do
+        s <- get
+        when (S.notMember i s) $ do
+          put $ S.insert i s
+          go [i]
+      Loop _ b -> tr b
+      Block _ b -> tr b
+      If _ t f -> do
+        tr t
+        tr f
+      _ -> pure ()
+    tr rest
+  tr [] = pure ()
+
+renumberCalls :: Map Int Int -> [WasmOp] -> [WasmOp]
+renumberCalls m ws = case ws of
+  [] -> []
+  (w:rest) -> ren w:rec rest
+  where
+  rec = renumberCalls m
+  ren w = case w of
+    Call i -> Call $ m M.! i
+    Loop t b -> Loop t $ rec b
+    Block t b -> Block t $ rec b
+    If t a b -> If t (rec a) (rec b)
+    x -> x
+
+data WasmFun = WasmFun
+  { typeSig :: Int
+  , localCount :: Int
+  , funBody :: [WasmOp]
+  } deriving Show
+
 insToBin :: String -> Boost -> (WasmMeta, [(String, [Ins])]) -> [Int]
 insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements, strAddrs, storeTypes}, gmachine) = wasm where
   ees = exports ++ elements
@@ -219,8 +262,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     , sectCustom "persist" $ zipWith encMartinGlobal (encMartinType . fromStoreType <$> TC "I32":storeTypes) [0..]
 
     , sect 1 $ uncurry encSig . snd <$> BM.assocs typeMap  -- Type section.
-    , sect 2 $ importFun <$> imps  -- Import section.
-    , sect 3 $ pure . fst . fst . snd <$> wasmFuns  -- Function section.
+    , sect 2 $ importFun <$> liveImps  -- Import section.
+    , sect 3 $ pure . typeSig <$> M.elems liveFuns  -- Function section.
     , sect 4 [[encType AnyFunc, 0] ++ leb128 256]  -- Table section (0 = no-maximum).
     , sect 5 [0 : leb128 nPages]  -- Memory section (0 = no-maximum).
     , sect 6 $  -- Global section (1 = mutable).
@@ -233,8 +276,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       -- First one records if `main` has been run yet.
       ++ map declareGlobal (TC "I32":storeTypes)
     , sect 7 $  -- Export section.
-      -- The "public" functions are exported verbatim.
-      [exportFun s ('@':s) | (s, _) <- exports] ++
+      -- The "public" functions.
+      [encStr s ++ (0 : leb128 (liveRenames M.! wasmFunNo ('@':s))) | (s, _) <- exports] ++
       [ encStr "memory" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
       , encStr "table" ++ [1, 0]  -- 1 = external_kind Table, 0 = memory index.
       ]
@@ -244,8 +287,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       -- Assumes these are never overwritten.
       , 0x41, 0, 0xb]
       ++ leb128 (length ees)
-      ++ concatMap (leb128 . wasmFunNo . ('@':) . fst) ees]
-    , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
+      ++ concatMap (leb128 . (liveRenames M.!) . wasmFunNo . ('@':) . fst) ees]
+    , sect 10 $ encProcedure <$> M.elems liveFuns  -- Code section.
     , sect 11 $ encStrConsts <$> M.assocs strAddrs  -- Data section.
     , sectCustom "dfndbg" [ord <$> show (sort $ swp <$> (M.assocs $ wasmFunMap))]
     , sectCustom "dfnhs" [ord <$> src]
@@ -273,7 +316,18 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     -- call_indirect types.
     (flip (,) [] <$> map toWasmType <$> callTypes wm) ++
     (fst . snd <$> internalFuns)  -- Types of internal functions.
-  exportFun name internalName = encStr name ++ (0 : leb128 (wasmFunNo internalName))
+
+  -- Preserve live wasm code only.
+  nonImports = M.fromList $ zip [length imps..] $ snd <$> wasmFuns
+  liveCalls = traceCalls (wasmFunNo . ('@':) . fst <$> ees) $ funBody <$> nonImports
+  liveRenames = M.fromList $ zip (S.elems liveCalls) [0..]
+  liveImps = map snd $ filter ((`M.member` liveRenames) . fst) $ zip [0..] imps
+#ifndef __HASTE__
+  liveFuns = (\wf -> wf { funBody = renumberCalls liveRenames $ funBody wf }) <$> M.restrictKeys nonImports (M.keysSet liveRenames)
+#else
+  liveFuns = (\wf -> wf { funBody = renumberCalls liveRenames $ funBody wf }) <$> M.filterWithKey (\k _ -> M.member k liveRenames) nonImports
+#endif
+
   -- Returns arity and 0-indexed number of given global function.
   getGlobal s = case M.lookup s $ M.insert "main" 0 $ arities wm of
     Just arity -> (arity, wasmFunNo s - firstPrim)
@@ -292,9 +346,9 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     , ("#pairwith42", (([I32], []), pairWith42Asm))
     , ("#nil42", (([], []), nil42Asm))
     ] ++ (second (second $ concatMap deQuasi) <$> boostFuns)
-  wasmFuns :: [(String, ((Int, Int), [WasmOp]))]
+  wasmFuns :: [(String, WasmFun)]
   wasmFuns =
-    (second (first (\(ins, outs) -> (typeNo ins outs, 0))) <$> internalFuns)
+    (second (\((ins, outs), a) -> WasmFun (typeNo ins outs) 0 a) <$> internalFuns)
     ++ evalFuns
     -- Wrappers for functions in "public" and "secret" section.
     ++ (wrap <$> ees)
@@ -302,18 +356,18 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     -- Primitive functions.
     -- The assembly for "#eval" requires that the primitive functions
     -- directly precede those defined in the program.
-    ((\(s, p) -> (s, ((typeNo [] [], 0), p))) <$> prims)
+    ((\(s, p) -> (s, WasmFun (typeNo [] []) 0 p)) <$> prims)
     -- Global get and set functions that interact with the DHC stack.
     ++ concat (zipWith mkStoreAsm storeTypes [0..])
     -- Functions from the program, except `main`.
     ++ (fromGMachine <$> filter (("main" /=) . fst) gmachine)
     -- The `main` function. Any supplied `main` function is appended to
     -- some standard setup code.
-    ++ [("main", ((typeNo [] [], 0), preMainAsm ++ concatMap fromIns (fromMaybe [] $ lookup "main" gmachine) ++ [End]))]
+    ++ [("main", WasmFun (typeNo [] []) 0 $ preMainAsm ++ concatMap fromIns (fromMaybe [] $ lookup "main" gmachine) ++ [End])]
     -- Wrappers for call_indirect calls.
-    ++ (second (\f -> ((typeNo [] [], 0), f fromIns deQuasi)) <$> callEncoders wm)
+    ++ (second (\f -> WasmFun (typeNo [] []) 0 $ f fromIns deQuasi) <$> callEncoders wm)
 
-  fromGMachine (f, g) = (f, ((typeNo [] [], 0), (++ [End]) $ concatMap fromIns g))
+  fromGMachine (f, g) = (f, WasmFun (typeNo [] []) 0 $ (++ [End]) $ concatMap fromIns g)
   preMainAsm =
     [ I32_const 1  -- mainCalled = 1
     , Set_global mainCalled
@@ -321,7 +375,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
   wasmFunMap = M.fromList $ zip (((\(m, f) -> m ++ "." ++ f) . fst <$> imps) ++ (fst <$> wasmFuns)) [0..]
   wasmFunNo s = fromMaybe (error s) $ M.lookup s wasmFunMap
 
-  wrap (f, ins) = (,) ('@':f) $ (,) (typeNo (toWasmType <$> ins) [], 0) $
+  wrap (f, ins) = (,) ('@':f) $ WasmFun (typeNo (toWasmType <$> ins) []) 0 $
     -- Wraps a DHC function.
     -- When a wasm function f(arg0, arg1, ...) is called,
     -- the arguments are placed in local variables.
@@ -433,8 +487,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
   sect t xs = t : lenc (varlen xs ++ concat xs)
   sectCustom s xs = 0 : lenc (encStr s ++ varlen xs ++ concat xs)
   encStr s = lenc $ ord <$> s
-  encProcedure ((_, 0), body) = lenc $ 0:concatMap encWasmOp body
-  encProcedure ((_, locCount), body) = lenc $ ([1, locCount, encType I32] ++) $ concatMap encWasmOp body
+  encProcedure (WasmFun _ 0 body) = lenc $ 0:concatMap encWasmOp body
+  encProcedure (WasmFun {localCount, funBody}) = lenc $ ([1, localCount, encType I32] ++) $ concatMap encWasmOp funBody
   encType I32 = 0x7f
   encType I64 = 0x7e
   encType (Ref _) = encType I32
@@ -516,8 +570,9 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
         ]
       nest k = [Block Nada $ nest $ k - 1, Call $ firstPrim + k - 1, Return]
 
+  mkStoreAsm :: Type -> Int -> [(String, WasmFun)]
   mkStoreAsm t n =
-    [ ("#set-" ++ show n, ((typeNo [] [], 0),
+    [ ("#set-" ++ show n, WasmFun (typeNo [] []) 0 $
       [ I32_const 4  -- Push 0, Eval.
       , Call $ wasmFunNo "#push"
       , Call $ wasmFunNo "#eval"
@@ -541,8 +596,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       , Set_global sp
       , Call $ wasmFunNo "#nil42"
       , End
-      ]))
-    , ("#get-" ++ show n, ((typeNo [] [], 0),
+      ])
+    , ("#get-" ++ show n, WasmFun (typeNo [] []) 0 $
       [ Get_global hp  -- PUSH hp
       ] ++ (case t of
         TC "Int" ->
@@ -576,7 +631,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       , Set_global sp
       , Call $ wasmFunNo "#pairwith42"
       , End
-      ]))
+      ])
     ]
   pairWith42Asm :: [WasmOp]
   pairWith42Asm =  -- [sp + 4] = (local0, #RealWorld)
