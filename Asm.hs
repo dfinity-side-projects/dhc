@@ -21,6 +21,7 @@ import qualified Data.ByteString.Short as SBS
 import Data.Semigroup
 #endif
 import qualified Data.Bimap as BM
+import Data.Bits
 import Data.Char
 import Data.Int
 import Data.List
@@ -275,7 +276,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     , ("#pushint", (([I64], []), pushIntAsm))
     , ("#pushref", (([I32], []), pushRefAsm))
     , ("#push", (([I32], []), pushAsm))
-    , ("#pushglobal", (([I32, I32], []), pushGlobalAsm))
+    , ("#pushglobal", (([I64], []), pushGlobalAsm))
     , ("#updatepop", (([I32], []), updatePopAsm))
     , ("#updateind", (([I32], []), updateIndAsm))
     , ("#alloc", (([I32], []), allocAsm))
@@ -570,12 +571,9 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     ]
   pairWith42Asm :: [WasmOp]
   pairWith42Asm =  -- [sp + 4] = (local0, #RealWorld)
-    [ Get_global hp  -- [hp] = TagSum | (2 << 8)
-    , I32_const $ fromIntegral $ fromEnum TagSum + 256 * 2
-    , I32_store 2 0
-    , Get_global hp  -- [hp + 4] = 0
-    , I32_const 0
-    , I32_store 2 4
+    [ Get_global hp  -- [hp] = (TagSum | (2 << 8)).64
+    , I64_const $ fromIntegral $ fromEnum TagSum + 256 * 2
+    , I64_store 3 0
     , Get_global hp  -- [hp + 8] = local0
     , Get_local 0
     , I32_store 2 8
@@ -629,8 +627,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     Push n -> [ I32_const $ fromIntegral $ 4*(n + 1), Call $ wasmFunNo "#push" ]
     MkAp -> [ Call $ wasmFunNo "#mkap" ]
     PushGlobal fun | (n, g) <- getGlobal fun ->
-      [ I32_const $ fromIntegral $ fromEnum TagGlobal + 256*n
-      , I32_const $ fromIntegral g
+      [ I64_const $ fromIntegral $ fromEnum TagGlobal + shift n 8 + shift g 32
       , Call $ wasmFunNo "#pushglobal"
       ]
     PushString s ->
@@ -644,8 +641,9 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       ]
     PushCallIndirect ty ->
       -- 3 arguments: slot, argument tuple, #RealWorld.
-      [ I32_const $ fromIntegral $ fromEnum TagGlobal + 256*3
-      , I32_const $ fromIntegral $ wasmFunNo ('2':show ty) - firstPrim
+      [ I64_const $ fromIntegral $
+        fromEnum TagGlobal + (shift 3 8) +
+        (shift (wasmFunNo (show ty) - firstPrim) 32)
       , Call $ wasmFunNo "#pushglobal"
       ]
     Slide 0 -> []
@@ -667,12 +665,9 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       , Call $ wasmFunNo "#updatepop"
       ]
     Copro m n ->
-      [ Get_global hp  -- [hp] = TagSum | (n << 8)
-      , I32_const $ fromIntegral $ fromEnum TagSum + 256 * n
-      , I32_store 2 0
-      , Get_global hp  -- [hp + 4] = m
-      , I32_const $ fromIntegral m
-      , I32_store 2 4
+      [ Get_global hp  -- [hp] = (TagSum | (n << 8) | (m << 32)).64
+      , I64_const $ fromIntegral $ fromEnum TagSum + shift n 8 + shift m 32
+      , I64_store 3 0
       ] ++ concat [
         [ Get_global hp  -- [hp + 4 + 4*i] = [sp + 4*i]
         , Get_global sp
@@ -680,16 +675,12 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
         , I32_store 2 $ fromIntegral $ 4 + 4*i
         ] | i <- [1..n]] ++
       [ Get_global sp  -- sp = sp + 4*n
-      , I32_const $ fromIntegral $ 4*n
+      , I32_const $ fromIntegral $ 4*n - 4
       , I32_add
       , Set_global sp
-      , Get_global sp  -- [sp] = hp
+      , Get_global sp  -- [sp + 4] = hp
       , Get_global hp
-      , I32_store 2 0
-      , Get_global sp  -- sp = sp - 4
-      , I32_const 4
-      , I32_sub
-      , Set_global sp
+      , I32_store 2 4
       , Get_global hp  -- hp = hp + 8 + ceil(n / 2) * 8
       , I32_const $ fromIntegral $ 8 + 8 * ((n + 1) `div` 2)
       , I32_add
@@ -745,11 +736,15 @@ leb128 :: Int -> [Int]
 leb128 n | n < 128   = [n]
          | otherwise = 128 + (n `mod` 128) : leb128 (n `div` 128)
 
--- TODO: FIX!
-sleb128 :: Integral a => a -> [Int]
-sleb128 n | n < 64    = [fromIntegral n]
+sleb128 :: (Bits a, Integral a) => a -> [Int]
+sleb128 n | n < 0     = fromIntegral <$> (f (n .&. 127) $ shiftR n 7)
+          | n < 64    = [fromIntegral n]
           | n < 128   = [128 + fromIntegral n, 0]
           | otherwise = 128 + (fromIntegral n `mod` 128) : sleb128 (n `div` 128)
+          where
+          f x (-1) | x < 64    = [x .|. 128, 127]
+                   | otherwise = [x]
+          f x y    = (x .|. 128):f (y .&. 127) (shiftR y 7)
 
 varlen :: [a] -> [Int]
 varlen xs = leb128 $ length xs
@@ -927,12 +922,9 @@ pushGlobalAsm =
   [ Get_global sp  -- [sp] = hp
   , Get_global hp
   , I32_store 2 0
-  , Get_global hp  -- [hp] = local_0 (should be TagGlobal | (n << 8))
+  , Get_global hp  -- [hp] = local_0.64  -- TagGlobal | (n << 8) | (funNo << 32)
   , Get_local 0
-  , I32_store 2 0
-  , Get_global hp  -- [hp + 4] = local_1 (should be local function index)
-  , Get_local 1
-  , I32_store 2 4
+  , I64_store 3 0
   , Get_global hp  -- hp = hp + 8
   , I32_const 8
   , I32_add
@@ -1014,7 +1006,7 @@ toWasmType _ = I32
 addHelper :: [Type] -> [[Ins]] -> State CompilerState ()
 addHelper ty ms = do
   st <- get
-  put st { helpers = ('2':show ty, f):helpers st }
+  put st { helpers = (show ty, f):helpers st }
   where
   f fromIns deQuasi = case (ty, ms) of
     ([t], [encoder]) ->
@@ -1032,12 +1024,8 @@ addHelper ty ms = do
       concatMap fromIns [ Push 0, Eval ] ++  -- Get slot.
       concatMap deQuasi
       [ Get_global sp  -- PUSH [[sp + 4] + 4]
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
+      , I32_load 2 4
+      , I32_load 2 4
       , Custom $ FarCall [t]
       , Get_global sp  -- sp = sp + 16
       , I32_const 16
@@ -1055,16 +1043,10 @@ addHelper ty ms = do
         , I32_sub
         , Set_global sp
         , Get_global sp  -- [sp + 4] = [[sp + 8] + 4*(i + 2)]
-        , I32_const 4
-        , I32_add
         , Get_global sp
-        , I32_const 8
-        , I32_add
-        , I32_load 2 0
-        , I32_const $ fromIntegral $ 4*(i + 2)
-        , I32_add
-        , I32_load 2 0
-        , I32_store 2 0
+        , I32_load 2 8
+        , I32_load 2 $ fromIntegral $ 4*(i + 2)
+        , I32_store 2 4
         ] ++
         concatMap fromIns ((ms!!i) ++ [MkAp, Eval]) ++
         pushCallIndirectArg t ++
@@ -1081,12 +1063,8 @@ addHelper ty ms = do
       concatMap fromIns [ Push 0, Eval ] ++  -- Get slot.
       concatMap deQuasi
       [ Get_global sp  -- PUSH [[sp + 4] + 4]
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
+      , I32_load 2 4
+      , I32_load 2 4
       , Custom $ FarCall ty
       , Get_global sp  -- sp = sp + 16
       , I32_const 16
