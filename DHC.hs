@@ -639,6 +639,7 @@ methods = M.fromList
   , (">>=", (TApp m a :-> (a :-> TApp m b)  :-> TApp m b, [("Monad", "m")]))
   , ("pure", (a :-> TApp m a, [("Monad", "m")]))
   -- Generates call_indirect ops.
+  , ("callSlot0", (TC "I32" :-> a :-> TApp (TC "IO") (TC "()"), [("Message0", "a")]))
   , ("callSlot", (TC "I32" :-> a :-> TApp (TC "IO") (TC "()"), [("Message", "a")]))
   , ("set", (TApp (TC "Store") a :-> a :-> io (TC "()"), [("Storage", "a")]))
   , ("get", (TApp (TC "Store") a :-> io a, [("Storage", "a")]))
@@ -656,6 +657,7 @@ dictSolve dsoln soln (Ast ast) = case ast of
   Placeholder ">>=" t -> aVar "snd" @@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
   Placeholder "pure" t -> aVar "fst" @@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
   Placeholder "==" t -> rec $ Ast $ Placeholder "Eq" $ typeSolve soln t
+  Placeholder "callSlot0" t -> rec $ Ast $ Placeholder "Message0" $ typeSolve soln t
   Placeholder "callSlot" t -> rec $ Ast $ Placeholder "Message" $ typeSolve soln t
   -- A storage variable x compiles to a pair (#set-n, #get-n) where n is the
   -- global variable assigned to hold x.
@@ -672,7 +674,9 @@ dictSolve dsoln soln (Ast ast) = case ast of
     infixl 5 @@
     x @@ y = Ast $ x :@ y
     rec = dictSolve dsoln soln
-    findInstance "Message" t = either (error "want tuple") (Ast . CallSlot) $ listFromTupleType t
+    findInstance "Message0" t = either (error "want tuple") (Ast . CallSlot0) $ listFromTupleType t
+    findInstance "Message" t = Ast . CallSlot tu $ (aVar "p3of4" @@) . findInstance "Storage" <$> tu
+      where tu = either (error "want tuple") id (listFromTupleType t)
     findInstance "Eq" t = case t of
       TC "String"        -> aVar "String-=="
       TC "Int"           -> aVar "Int-=="
@@ -691,12 +695,12 @@ dictSolve dsoln soln (Ast ast) = case ast of
     -- For unboxed types, such as integers, 1 encodes to a databuf, 2 decodes
     -- from a databuf, and 3 and 4 leave the input unchanged.
     findInstance "Storage" t = case t of
-      TC "Databuf" -> boxy (aVar "Databuf-toAny") (aVar "Databuf-fromAny")
-      TC "String" -> boxy (aVar "." @@ aVar "Databuf-toAny" @@ aVar "toD") (aVar "." @@ aVar "Databuf-fromAny" @@ aVar "fromD")
-      TC "Port" -> boxy (aVar "Port-toAny") (aVar "Port-fromAny")
-      TC "Actor" -> boxy (aVar "Actor-toAny") (aVar "Actor-fromAny")
-      TC "Module" -> boxy (aVar "Module-toAny") (aVar "Module-fromAny")
-      TC "Int" -> Ast (Pack 0 4) @@ aVar "Int-toAny" @@ aVar "Int-fromAny" @@ aVar "id" @@ aVar "id"
+      TC "Databuf" -> boxy (aVar "#reduce") (aVar "#reduce")
+      TC "String" -> boxy (aVar "." @@ aVar "#reduce" @@ aVar "toD") (aVar "." @@ aVar "#reduce" @@ aVar "fromD")
+      TC "Port" -> boxy (aVar "#reduce") (aVar "#reduce")
+      TC "Actor" -> boxy (aVar "#reduce") (aVar "#reduce")
+      TC "Module" -> boxy (aVar "#reduce") (aVar "#reduce")
+      TC "Int" -> Ast (Pack 0 4) @@ aVar "Int-toAny" @@ aVar "Int-fromAny" @@ aVar "#reduce" @@ aVar "#reduce"
       TApp (TC "[]") a -> let
         ltai = aVar "list_to_any_instance" @@ rec (Ast $ Placeholder "Storage" a)
         lfai = aVar "list_from_any_instance" @@ rec (Ast $ Placeholder "Storage" a)
@@ -737,6 +741,8 @@ propagate cs t = concat <$> mapM propagateTyCon cs where
     TApp (TC "[]") a -> propagate ["Storage"] a
     TC s | elem s messageTypes -> Right []
     _ -> Left $ "no Storage instance: " ++ show t
+  propagateTyCon "Message0" =
+    concat <$> (mapM (propagate ["Storage"]) =<< listFromTupleType t)
   propagateTyCon "Message" =
     concat <$> (mapM (propagate ["Storage"]) =<< listFromTupleType t)
   propagateTyCon c = error $ "TODO: " ++ c
@@ -747,10 +753,8 @@ propagate cs t = concat <$> mapM propagateTyCon cs where
 listFromTupleType :: Type -> Either String [Type]
 listFromTupleType ty = case ty of
   TC "()" -> Right []
-  TC _ -> Right [ty]
-  TV _ -> Right [ty]
   TApp (TC "()") rest -> weirdList rest
-  _ -> Left $ "want tuple: " ++ show ty
+  _ -> Right [ty]
   where
   -- Tuples are represented oddly in our Type data structure.
   weirdList tup = case tup of

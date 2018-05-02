@@ -25,7 +25,8 @@ instance Binary Type
 
 infixl 5 :@
 data AstF a = Qual String String
-  | CallSlot [Type]
+  | CallSlot0 [Type]
+  | CallSlot [Type] [a]
   | Pack Int Int | I Int64 | S ShortByteString | Var String
   | a :@ a | Cas a [(a, a)]
   | Lam [String] a | Let [(String, a)] a

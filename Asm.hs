@@ -51,6 +51,7 @@ data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal String
   | MkAp | Slide Int | Split Int | Eval
   | UpdatePop Int | UpdateInd Int | Alloc Int
   | Casejump [(Maybe Int, [Ins])] | Trap
+  | PushCallIndirect0 [Type]
   | PushCallIndirect [Type]
   deriving Show
 
@@ -93,6 +94,7 @@ data WasmMeta = WasmMeta
   , strEndHP :: Int  -- Heap address immediately past the string constants.
   , strAddrs :: Map ShortByteString Int  -- String constant addresses.
   , storeTypes :: [Type]  -- Global store types.
+  , callEncoders :: [(String, (Ins -> [WasmOp]) -> (QuasiWasm -> [WasmOp]) -> [WasmOp])]  -- Helpers for call_indirect that encode messages.
   }
 
 hsToGMachine :: Boost -> String -> Either String (Map String Int, [(String, [Ins])])
@@ -123,6 +125,8 @@ data CompilerState = CompilerState
   -- incrementally update these fields.
   , callIndirectTypes :: [[Type]]
   , stringConstants :: [ShortByteString]
+  -- Compilation may generate auxiliary helpers.
+  , helpers :: [(String, (Ins -> [WasmOp]) -> (QuasiWasm -> [WasmOp]) -> [WasmOp])]
   }
 
 align4 :: Int -> Int
@@ -142,9 +146,11 @@ astToIns cl = (WasmMeta
   , strEndHP = hp1
   , strAddrs = addrs
   , storeTypes = snd <$> stores cl
+  , callEncoders = helps
   }, ins) where
   compilerOut = second (compile $ fst <$> stores cl) <$> supers cl
   ciTypes = foldl' union [] $ callIndirectTypes . snd . snd <$> compilerOut
+  helps = concat $ helpers . snd . snd <$> compilerOut
   ins = second fst <$> compilerOut
   (hp1, addrs) = mkStrConsts $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
   listifyTypes w = (w, inTypes [] $ fst $ fromJust $ lookup w $ funTypes cl)
@@ -297,6 +303,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     ++ [("main", ((typeNo [] [], 0), preMainAsm ++ concatMap fromIns (fromMaybe [] $ lookup "main" gmachine) ++ [End]))]
     -- Wrappers for call_indirect calls.
     ++ (wrapCallIndirect <$> callTypes wm)
+    ++ (second (\f -> ((typeNo [] [], 0), f fromIns deQuasi)) <$> callEncoders wm)
 
   fromGMachine (f, g) = (f, ((typeNo [] [], 0), (++ [End]) $ concatMap fromIns g))
   preMainAsm =
@@ -308,7 +315,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
   wrapCallIndirect [t] = (show [t], ((typeNo [] [], 0),
     -- Evaluate single argument.
     concatMap fromIns [ Push 1, Eval ] ++
-    concatMap deQuasi (pushCallIndirectArg t) ++
+    concatMap deQuasi (pushCallIndirectArg0 t) ++
     [ Get_global sp  -- sp = sp + 4
     , I32_const 4
     , I32_add
@@ -351,7 +358,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       , I32_load 2 0
       , I32_store 2 0
       , Call $ wasmFunNo "#eval"  -- Evaluate.
-      ] ++ concatMap deQuasi (pushCallIndirectArg t) ++
+      ] ++ concatMap deQuasi (pushCallIndirectArg0 t) ++
       [ Get_global sp  -- sp = sp + 4
       , I32_const 4
       , I32_add
@@ -716,6 +723,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
   deQuasi (Custom x) = case x of
     CallSym s -> [Call $ wasmFunNo s]
     ReduceArgs n -> concat $ replicate n $ concatMap fromIns [Push (n - 1), Eval]
+    FarCall ts -> [Call_indirect $ typeNo (toWasmType <$> ts) []]
 
   deQuasi (Block t body) = [Block t $ concatMap deQuasi body]
   deQuasi (Loop  t body) = [Loop  t $ concatMap deQuasi body]
@@ -747,10 +755,16 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       , I32_sub
       , Set_global sp
       ]
-    PushCallIndirect ty ->
+    PushCallIndirect0 ty ->
       -- 3 arguments: slot, argument tuple, #RealWorld.
       [ I32_const $ fromIntegral $ fromEnum TagGlobal + 256*3
       , I32_const $ fromIntegral $ wasmFunNo (show ty) - firstPrim
+      , Call $ wasmFunNo "#pushglobal"
+      ]
+    PushCallIndirect ty ->
+      -- 3 arguments: slot, argument tuple, #RealWorld.
+      [ I32_const $ fromIntegral $ fromEnum TagGlobal + 256*3
+      , I32_const $ fromIntegral $ wasmFunNo ('2':show ty) - firstPrim
       , Call $ wasmFunNo "#pushglobal"
       ]
     Slide 0 -> []
@@ -883,7 +897,7 @@ sp, hp, bp, mainCalled, storeOffset :: Int
 [sp, hp, bp, mainCalled, storeOffset] = [0, 1, 2, 3, 4]
 
 compile :: [String] -> Ast -> ([Ins], CompilerState)
-compile ps d = runState (mk1 ps d) $ CompilerState [] [] []
+compile ps d = runState (mk1 ps d) $ CompilerState [] [] [] []
 
 mk1 :: [String] -> Ast -> State CompilerState [Ins]
 mk1 pglobals (Ast ast) = case ast of
@@ -904,9 +918,15 @@ mk1 pglobals (Ast ast) = case ast of
     pure $ case last mt of
       Copro _ _ -> mu ++ mt
       _ -> concat [mu, mt, [MkAp]]
-  CallSlot ty -> do
+  CallSlot0 ty -> do
     st <- get
     put st { callIndirectTypes = callIndirectTypes st `union` [ty] }
+    pure [PushCallIndirect0 ty]
+  CallSlot ty encoders -> do
+    st <- get
+    put st { callIndirectTypes = callIndirectTypes st `union` [ty] }
+    ms <- forM encoders rec
+    addHelper ty ms
     pure [PushCallIndirect ty]
   Var v -> do
     m <- getBindings
@@ -1157,8 +1177,8 @@ toWasmType :: Type -> WasmType
 toWasmType (TC "Int") = I64
 toWasmType _ = I32
 
-pushCallIndirectArg :: Type -> [QuasiWasm]
-pushCallIndirectArg t = case t of
+pushCallIndirectArg0 :: Type -> [QuasiWasm]
+pushCallIndirectArg0 t = case t of
   TC "Int" ->
     [ Get_global sp  -- PUSH [[sp + 4] + 8].64
     , I32_const 4
@@ -1192,6 +1212,112 @@ pushCallIndirectArg t = case t of
     , I32_add
     , I32_load 2 0
     , Custom $ CallSym "data.externalize"
+    ]
+  _ ->
+    [ Get_global sp  -- PUSH [[sp + 4] + 4]
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    ]
+
+addHelper :: [Type] -> [[Ins]] -> State CompilerState ()
+addHelper ty ms = do
+  st <- get
+  put st { helpers = ('2':show ty, f):helpers st }
+  where
+  f fromIns deQuasi = case (ty, ms) of
+    ([t], [encoder]) ->
+      -- 3 arguments: slot, argument tuple, #RealWorld.
+      -- When sending a message with only one item, we have a bare argument
+      -- instead of an argument tuple
+      -- Evaluate single argument.
+      concatMap fromIns (Push 1:encoder ++ [MkAp, Eval]) ++
+      pushCallIndirectArg t ++
+      [ Get_global sp  -- sp = sp + 4
+      , I32_const 4
+      , I32_add
+      , Set_global sp
+      ] ++
+      concatMap fromIns [ Push 0, Eval ] ++  -- Get slot.
+      concatMap deQuasi
+      [ Get_global sp  -- PUSH [[sp + 4] + 4]
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , Custom $ FarCall [t]
+      , Get_global sp  -- sp = sp + 16
+      , I32_const 16
+      , I32_add
+      , Set_global sp
+      , Custom $ CallSym "#nil42"
+      , End
+      ]
+    _ ->
+      -- Evaluate argument tuple.
+      concatMap fromIns [ Push 1, Eval ] ++
+      concat [
+        [ Get_global sp  -- sp = sp - 4
+        , I32_const 4
+        , I32_sub
+        , Set_global sp
+        , Get_global sp  -- [sp + 4] = [[sp + 8] + 4*(i + 2)]
+        , I32_const 4
+        , I32_add
+        , Get_global sp
+        , I32_const 8
+        , I32_add
+        , I32_load 2 0
+        , I32_const $ fromIntegral $ 4*(i + 2)
+        , I32_add
+        , I32_load 2 0
+        , I32_store 2 0
+        ] ++
+        concatMap fromIns ((ms!!i) ++ [MkAp, Eval]) ++
+        pushCallIndirectArg t ++
+        [ Get_global sp  -- sp = sp + 4
+        , I32_const 4
+        , I32_add
+        , Set_global sp
+        ] | (t, i) <- zip ty [0..]] ++
+      [ Get_global sp  -- sp = sp + 4
+      , I32_const 4
+      , I32_add
+      , Set_global sp
+      ] ++
+      concatMap fromIns [ Push 0, Eval ] ++  -- Get slot.
+      concatMap deQuasi
+      [ Get_global sp  -- PUSH [[sp + 4] + 4]
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , I32_const 4
+      , I32_add
+      , I32_load 2 0
+      , Custom $ FarCall ty
+      , Get_global sp  -- sp = sp + 16
+      , I32_const 16
+      , I32_add
+      , Set_global sp
+      , Custom $ CallSym "#nil42"
+      , End
+      ]
+
+pushCallIndirectArg :: Type -> [WasmOp]
+pushCallIndirectArg t = case t of
+  TC "Int" ->
+    [ Get_global sp  -- PUSH [[sp + 4] + 8].64
+    , I32_const 4
+    , I32_add
+    , I32_load 2 0
+    , I32_const 8
+    , I32_add
+    , I64_load 3 0
     ]
   _ ->
     [ Get_global sp  -- PUSH [[sp + 4] + 4]
