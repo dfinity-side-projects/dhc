@@ -9,6 +9,7 @@ module Asm
   , hsToIns
   , hsToGMachine
   , enc32
+  , tpGlobalIndex
   ) where
 
 import Control.Arrow
@@ -219,6 +220,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       [ [encType I32, 1, 0x41] ++ sleb128 memTop ++ [0xb]  -- SP
       , [encType I32, 1, 0x41] ++ sleb128 (strEndHP wm) ++ [0xb]  -- HP
       , [encType I32, 1, 0x41, 0, 0xb]  -- BP
+      , [encType I32, 1, 0x41] ++ sleb128 (length ees) ++ [0xb]  -- TP
       ]
       -- Global stores.
       -- First one records if `main` has been run yet.
@@ -231,9 +233,9 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       ]
     , if null ees then [] else sect 9 [  -- Element section.
       [ 0  -- Table 0 (only one in MVP).
-      -- Put public and secret functions at `slotMagic`.
-      -- We assume these will never be overwritten!
-      , 0x41, slotMagic, 0xb]
+      -- Fill with public and secret functions, starting from 0.
+      -- Assumes these are never overwritten.
+      , 0x41, 0, 0xb]
       ++ leb128 (length ees)
       ++ concatMap (leb128 . wasmFunNo . ('@':) . fst) ees]
     , sect 10 $ encProcedure . snd <$> wasmFuns  -- Code section.
@@ -752,8 +754,8 @@ varlen xs = leb128 $ length xs
 lenc :: [Int] -> [Int]
 lenc xs = varlen xs ++ xs
 
-sp, hp, bp, mainCalled, storeOffset :: Int
-[sp, hp, bp, mainCalled, storeOffset] = [0, 1, 2, 3, 4]
+sp, hp, bp, tpGlobalIndex, mainCalled, storeOffset :: Int
+[sp, hp, bp, tpGlobalIndex, mainCalled, storeOffset] = [0..5]
 
 compile :: [String] -> Ast -> ([Ins], CompilerState)
 compile ps d = runState (mk1 ps d) $ CompilerState [] [] [] []

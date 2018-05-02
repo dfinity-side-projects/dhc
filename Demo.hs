@@ -30,12 +30,8 @@ demoBoost = Boost
   , ("putInt", (TC "Int" :-> io (TC "()"),
     [ Custom $ ReduceArgs 1
     , Get_global sp  -- system.putInt [[sp + 4] + 8].64
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , I32_const 8
-    , I32_add
-    , I64_load 3 0
+    , I32_load 2 4
+    , I64_load 3 8
     , Custom $ CallSym "system.putInt"
     , Get_global sp  -- sp = sp + 12
     , I32_const 12
@@ -60,19 +56,11 @@ jsDemoBoost = Boost
   , ("putInt", (TC "Int" :-> io (TC "()"),
     [ Custom $ ReduceArgs 1
     , Get_global sp  -- system.putInt [[sp + 4] + 8] [[sp + 4] + 12]
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , I32_const 8
-    , I32_add
-    , I32_load 2 0
+    , I32_load 2 4
+    , I32_load 2 8
     , Get_global sp
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , I32_const 12
-    , I32_add
-    , I32_load 2 0
+    , I32_load 2 4
+    , I32_load 2 12
     , Custom $ CallSym "system.putInt"
     , Get_global sp  -- sp = sp + 12
     , I32_const 12
@@ -89,27 +77,15 @@ putStrAsm :: [QuasiWasm]
 putStrAsm =
   [ Custom $ ReduceArgs 1
   , Get_global sp  -- system.putStr ([[sp + 4] + 4] [[sp + 4] + 8]) [[sp + 4] + 12]
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
+  , I32_load 2 4
+  , I32_load 2 4
   , Get_global sp
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , I32_const 8
-  , I32_add
-  , I32_load 2 0
+  , I32_load 2 4
+  , I32_load 2 8
   , I32_add
   , Get_global sp
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , I32_const 12
-  , I32_add
-  , I32_load 2 0
+  , I32_load 2 4
+  , I32_load 2 12
   , Custom $ CallSym "system.putStr"
   , Get_global sp  -- sp = sp + 12
   , I32_const 12

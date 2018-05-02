@@ -4,7 +4,6 @@ module DHC
   ( parseModule, AstF(..), Ast(..), Clay(..), Type(..)
   , inferType, parseDefs, lexOffside
   , arityFromType, hsToAst, liftLambdas
-  , slotMagic
   ) where
 import Control.Arrow
 import Control.Monad
@@ -33,9 +32,6 @@ type ShortByteString = String
 #else
 sbs = toShort . B.pack
 #endif
-
-slotMagic :: Num a => a
-slotMagic = 32
 
 data LayoutState = IndentAgain Int | LineStart | LineMiddle | AwaitBrace | Boilerplate deriving (Eq, Show)
 
@@ -516,7 +512,7 @@ gather cl globs env (Ast ast) = case ast of
     let r = foldr1 TApp $ TC "()":xs
     pure $ AAst (foldr (:->) r xs) $ Pack m n
   Qual "my" f
-    | Just n <- elemIndex f (publics cl ++ secrets cl) -> rec env $ Ast (Ast (Var "#preslot") :@ Ast (I $ fromIntegral $ n + slotMagic))
+    | Just n <- elemIndex f (publics cl ++ secrets cl) -> rec env $ Ast (Ast (Var "#preslot") :@ Ast (I $ fromIntegral n))
     | otherwise -> bad $ "must be secret or public: " ++ f
   Var "_" -> do
     x <- newTV

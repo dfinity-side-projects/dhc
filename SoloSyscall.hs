@@ -48,26 +48,18 @@ genSyscall impure svc argCount =
       , I32_const $ fromIntegral $ fromEnum TagSum + 256 * 2
       , I32_store 2 0
       , Get_global hp  -- [hp + 4] = 0
-      , I32_const 4
-      , I32_add
       , I32_const 0
-      , I32_store 2 0
+      , I32_store 2 4
       , Get_global hp  -- [hp + 8] = [sp]
-      , I32_const 8
-      , I32_add
       , Get_global sp
       , I32_load 2 0
-      , I32_store 2 0
+      , I32_store 2 8
       , Get_global hp  -- [hp + 12] = 42
-      , I32_const 12
-      , I32_add
       , I32_const 42
-      , I32_store 2 0
+      , I32_store 2 12
       , Get_global sp  -- [sp + 8*argCount + 8] = hp
-      , I32_const $ 8*fromIntegral argCount + 8
-      , I32_add
       , Get_global hp
-      , I32_store 2 0
+      , I32_store 2 $ 8*fromIntegral argCount + 8
       , Get_global hp  -- hp = hp + 16
       , I32_const 16
       , I32_add
@@ -86,11 +78,9 @@ genSyscall impure svc argCount =
       , Set_global hp
       -- TODO: Make it lazy with an indirection.
       , Get_global sp  -- [sp + 8*argCount + 4] = [sp]
-      , I32_const $ 8*fromIntegral argCount + 4
-      , I32_add
       , Get_global sp
       , I32_load 2 0
-      , I32_store 2 0
+      , I32_store 2 $ 8*fromIntegral argCount + 4
       , Get_global sp  -- sp = sp + 8*argCount
       , I32_const $ 8*fromIntegral argCount
       , I32_add
