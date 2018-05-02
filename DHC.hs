@@ -639,7 +639,6 @@ methods = M.fromList
   , (">>=", (TApp m a :-> (a :-> TApp m b)  :-> TApp m b, [("Monad", "m")]))
   , ("pure", (a :-> TApp m a, [("Monad", "m")]))
   -- Generates call_indirect ops.
-  , ("callSlot0", (TC "I32" :-> a :-> TApp (TC "IO") (TC "()"), [("Message0", "a")]))
   , ("callSlot", (TC "I32" :-> a :-> TApp (TC "IO") (TC "()"), [("Message", "a")]))
   , ("set", (TApp (TC "Store") a :-> a :-> io (TC "()"), [("Storage", "a")]))
   , ("get", (TApp (TC "Store") a :-> io a, [("Storage", "a")]))
@@ -657,7 +656,6 @@ dictSolve dsoln soln (Ast ast) = case ast of
   Placeholder ">>=" t -> aVar "snd" @@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
   Placeholder "pure" t -> aVar "fst" @@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
   Placeholder "==" t -> rec $ Ast $ Placeholder "Eq" $ typeSolve soln t
-  Placeholder "callSlot0" t -> rec $ Ast $ Placeholder "Message0" $ typeSolve soln t
   Placeholder "callSlot" t -> rec $ Ast $ Placeholder "Message" $ typeSolve soln t
   -- A storage variable x compiles to a pair (#set-n, #get-n) where n is the
   -- global variable assigned to hold x.
@@ -674,7 +672,6 @@ dictSolve dsoln soln (Ast ast) = case ast of
     infixl 5 @@
     x @@ y = Ast $ x :@ y
     rec = dictSolve dsoln soln
-    findInstance "Message0" t = either (error "want tuple") (Ast . CallSlot0) $ listFromTupleType t
     findInstance "Message" t = Ast . CallSlot tu $ (aVar "p3of4" @@) . findInstance "Storage" <$> tu
       where tu = either (error "want tuple") id (listFromTupleType t)
     findInstance "Eq" t = case t of
@@ -741,8 +738,6 @@ propagate cs t = concat <$> mapM propagateTyCon cs where
     TApp (TC "[]") a -> propagate ["Storage"] a
     TC s | elem s messageTypes -> Right []
     _ -> Left $ "no Storage instance: " ++ show t
-  propagateTyCon "Message0" =
-    concat <$> (mapM (propagate ["Storage"]) =<< listFromTupleType t)
   propagateTyCon "Message" =
     concat <$> (mapM (propagate ["Storage"]) =<< listFromTupleType t)
   propagateTyCon c = error $ "TODO: " ++ c

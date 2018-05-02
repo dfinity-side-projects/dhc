@@ -51,7 +51,6 @@ data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal String
   | MkAp | Slide Int | Split Int | Eval
   | UpdatePop Int | UpdateInd Int | Alloc Int
   | Casejump [(Maybe Int, [Ins])] | Trap
-  | PushCallIndirect0 [Type]
   | PushCallIndirect [Type]
   deriving Show
 
@@ -302,7 +301,6 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     -- some standard setup code.
     ++ [("main", ((typeNo [] [], 0), preMainAsm ++ concatMap fromIns (fromMaybe [] $ lookup "main" gmachine) ++ [End]))]
     -- Wrappers for call_indirect calls.
-    ++ (wrapCallIndirect <$> callTypes wm)
     ++ (second (\f -> ((typeNo [] [], 0), f fromIns deQuasi)) <$> callEncoders wm)
 
   fromGMachine (f, g) = (f, ((typeNo [] [], 0), (++ [End]) $ concatMap fromIns g))
@@ -310,83 +308,6 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     [ I32_const 1  -- mainCalled = 1
     , Set_global mainCalled
     ]
-  -- When sending a message with only one item, we have a bare argument
-  -- instead of an argument tuple
-  wrapCallIndirect [t] = (show [t], ((typeNo [] [], 0),
-    -- Evaluate single argument.
-    concatMap fromIns [ Push 1, Eval ] ++
-    concatMap deQuasi (pushCallIndirectArg0 t) ++
-    [ Get_global sp  -- sp = sp + 4
-    , I32_const 4
-    , I32_add
-    , Set_global sp
-    ] ++
-    -- Get slot.
-    concatMap fromIns [ Push 0, Eval ] ++
-    [ Get_global sp  -- PUSH [[sp + 4] + 4]
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , Call_indirect $ typeNo [toWasmType t] []
-    , Get_global sp  -- sp = sp + 16
-    , I32_const 16
-    , I32_add
-    , Set_global sp
-    , Call $ wasmFunNo "#nil42"
-    , End
-    ]))
-  wrapCallIndirect ty = (show ty, ((typeNo [] [], 0),
-    -- Evaluate argument tuple.
-    concatMap fromIns [ Push 1, Eval ] ++
-    concat [
-      [ Get_global sp  -- sp = sp - 4
-      , I32_const 4
-      , I32_sub
-      , Set_global sp
-      , Get_global sp  -- [sp + 4] = [[sp + 8] + k]
-      , I32_const 4
-      , I32_add
-      , Get_global sp
-      , I32_const 8
-      , I32_add
-      , I32_load 2 0
-      , I32_const k
-      , I32_add
-      , I32_load 2 0
-      , I32_store 2 0
-      , Call $ wasmFunNo "#eval"  -- Evaluate.
-      ] ++ concatMap deQuasi (pushCallIndirectArg0 t) ++
-      [ Get_global sp  -- sp = sp + 4
-      , I32_const 4
-      , I32_add
-      , Set_global sp
-      ] | (t, k) <- zip ty [8, 12..]] ++
-    [ Get_global sp  -- sp = sp + 4
-    , I32_const 4
-    , I32_add
-    , Set_global sp
-    ] ++
-    -- Get slot.
-    concatMap fromIns [ Push 0, Eval ] ++
-    [ Get_global sp  -- PUSH [[sp + 4] + 4]
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , Call_indirect $ typeNo (toWasmType <$> ty) []
-    , Get_global sp  -- sp = sp + 16
-    , I32_const 16
-    , I32_add
-    , Set_global sp
-    , Call $ wasmFunNo "#nil42"
-    , End
-    ]))
-
   wasmFunMap = M.fromList $ zip (((\(m, f) -> m ++ "." ++ f) . fst <$> imps) ++ (fst <$> wasmFuns)) [0..]
   wasmFunNo s = fromMaybe (error s) $ M.lookup s wasmFunMap
 
@@ -721,12 +642,6 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       , I32_sub
       , Set_global sp
       ]
-    PushCallIndirect0 ty ->
-      -- 3 arguments: slot, argument tuple, #RealWorld.
-      [ I32_const $ fromIntegral $ fromEnum TagGlobal + 256*3
-      , I32_const $ fromIntegral $ wasmFunNo (show ty) - firstPrim
-      , Call $ wasmFunNo "#pushglobal"
-      ]
     PushCallIndirect ty ->
       -- 3 arguments: slot, argument tuple, #RealWorld.
       [ I32_const $ fromIntegral $ fromEnum TagGlobal + 256*3
@@ -867,10 +782,6 @@ mk1 pglobals (Ast ast) = case ast of
     pure $ case last mt of
       Copro _ _ -> mu ++ mt
       _ -> concat [mu, mt, [MkAp]]
-  CallSlot0 ty -> do
-    st <- get
-    put st { callIndirectTypes = callIndirectTypes st `union` [ty] }
-    pure [PushCallIndirect0 ty]
   CallSlot ty encoders -> do
     st <- get
     put st { callIndirectTypes = callIndirectTypes st `union` [ty] }
@@ -1099,52 +1010,6 @@ updateIndAsm =
 toWasmType :: Type -> WasmType
 toWasmType (TC "Int") = I64
 toWasmType _ = I32
-
-pushCallIndirectArg0 :: Type -> [QuasiWasm]
-pushCallIndirectArg0 t = case t of
-  TC "Int" ->
-    [ Get_global sp  -- PUSH [[sp + 4] + 8].64
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , I32_const 8
-    , I32_add
-    , I64_load 3 0
-    ]
-  TC "String" ->
-    [ Get_global sp -- PUSH [[sp + 4] + 4] + [[sp + 4] + 8] (offset)
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , Get_global sp
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , I32_const 8
-    , I32_add
-    , I32_load 2 0
-    , I32_add
-    , Get_global sp -- PUSH [[sp + 4] + 12] (length)
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , I32_const 12
-    , I32_add
-    , I32_load 2 0
-    , Custom $ CallSym "data.externalize"
-    ]
-  _ ->
-    [ Get_global sp  -- PUSH [[sp + 4] + 4]
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    ]
 
 addHelper :: [Type] -> [[Ins]] -> State CompilerState ()
 addHelper ty ms = do
