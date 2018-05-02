@@ -302,7 +302,7 @@ notmemcmpAsm =
   [ Loop Nada  -- while (local2 != 0) {
     [ Get_local 2
     , I32_eqz
-    , If Nada [ I32_const 1 , Return ]
+    , If Nada [ I32_const 1 , Return ] []
     , Get_local 2  -- local2 = local2 - 1
     , I32_const 1
     , I32_sub
@@ -312,7 +312,7 @@ notmemcmpAsm =
     , Get_local 1
     , I32_load8_u 0 0
     , I32_ne
-    , If Nada [ I32_const 0 , Return ]
+    , If Nada [ I32_const 0 , Return ] []
     , Get_local 0  -- local0 = local0 + 1
     , I32_const 1
     , I32_add

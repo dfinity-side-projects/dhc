@@ -891,7 +891,7 @@ callees ds s = snd $ execState (go s) ([], []) where
   go :: String -> State ([String], [String]) ()
   go f = do
     (env, acc) <- get
-    when (not $ elem f env || elem f acc || M.member f methods) $ case lookup f ds of
+    when (not $ elem f (env ++ acc) || M.member f methods) $ case lookup f ds of
       -- TODO: If we knew the primitives (functions implemented in wasm, such
       -- as `*`), then we could detect out-of-scope identifiers here.
       Nothing -> pure ()  -- error $ "not in scope: " ++ f

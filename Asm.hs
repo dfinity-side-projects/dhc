@@ -80,7 +80,14 @@ encWasmOp op = case op of
   Br n -> 0xc : leb128 n
   Br_if n -> 0xd : leb128 n
   Br_table bs a -> 0xe : leb128 (length bs) ++ concatMap leb128 (bs ++ [a])
-  If _ as -> [0x4, 0x40] ++ concatMap encWasmOp as ++ [0xb]
+  If _ as [] -> [0x4, 0x40] ++ concatMap encWasmOp as ++ [0xb]
+  If _ as bs -> concat
+    [ [0x4, 0x40]
+    , concatMap encWasmOp as
+    , [0x5]
+    , concatMap encWasmOp bs
+    , [0xb]
+    ]
   Block _ as -> [2, 0x40] ++ concatMap encWasmOp as ++ [0xb]
   Loop _ as -> [3, 0x40] ++ concatMap encWasmOp as ++ [0xb]
   _ -> maybe (error $ "unsupported: " ++ show op) pure $ lookup op rZeroOps
@@ -340,7 +347,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       , I32_const 4
       , I32_sub
       , Set_global sp
-      ] ++ concatMap fromIns [PushGlobal "main", MkAp, Eval])
+      ] ++ concatMap fromIns [PushGlobal "main", MkAp, Eval]) []
     ]
     else []) ++
 
@@ -493,7 +500,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
         , I32_load 2 12
         , I32_store 2 0
         , Br 1
-        ]  -- If
+        ] []  -- If
       ]  -- Loop
     , Set_global sp  -- restore bp, sp
     , Set_global bp
@@ -614,7 +621,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
 
   deQuasi (Block t body) = [Block t $ concatMap deQuasi body]
   deQuasi (Loop  t body) = [Loop  t $ concatMap deQuasi body]
-  deQuasi (If    t body) = [If    t $ concatMap deQuasi body]
+  deQuasi (If    t a b)  = [If    t (concatMap deQuasi a) $ concatMap deQuasi b]
   deQuasi (op) = [error "missing deQuasi case?" <$> op]
 
   prims = second (concatMap deQuasi . snd) <$> boostPrims
