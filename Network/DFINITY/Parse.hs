@@ -307,7 +307,7 @@ wasm = do
       opcode <- varuint7
       s <- if
         | Just s <- lookup opcode $ zeroOperandOps -> pure s
-        | Just s <- lookup opcode [(0x02, Block), (0x03, Loop), (0x04, If)] -> do
+        | Just s <- lookup opcode [(0x02, Block), (0x03, Loop)] -> do
           bt <- blockType
           bl <- codeBlock
           pure $ s bt bl
@@ -322,6 +322,15 @@ wasm = do
           v <- varuint32
           pure $ s v
         | otherwise -> case opcode of
+          0x04 -> do
+            bt <- blockType
+            bl <- codeBlock
+            case last bl of
+              Else -> do
+                bl2 <- codeBlock
+                pure $ If bt (init bl) bl2
+              _ -> pure $ If bt bl []
+          0x05 -> pure Else
           0x0e -> do
             n <- varuint32
             tgts <- replicateM n varuint32
@@ -342,6 +351,7 @@ wasm = do
             pure $ Call_indirect i
           _ -> bad ("bad opcode " ++ show opcode)
       if
+        | Else <- s -> pure [Else]
         | End <- s -> pure []
         | otherwise -> (s:) <$> codeBlock
 

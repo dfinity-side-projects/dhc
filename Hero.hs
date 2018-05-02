@@ -205,9 +205,9 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
         c = I64_const $ getNum 8 (addr + fromIntegral o) mem
     run $ step (c:tail stack)
 
-  If _ bl -> let I32_const n = head stack in if n /= 0
-    then run vm {stack = tail stack, insts = bl:i1}
-    else run vm {stack = tail stack, insts = i1}
+  If _ t f -> let I32_const n = head stack in if n /= 0
+    then run vm {stack = tail stack, insts = t:i1}
+    else run vm {stack = tail stack, insts = f:i1}
   Block _ bl -> run vm {insts = bl:i1}
   Loop _ bl -> run vm {insts = bl:insts}
   Br k -> run vm {insts = drop (k + 1) insts}
