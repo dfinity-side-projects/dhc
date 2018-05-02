@@ -515,9 +515,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     [ Block Nada
       [ Loop Nada
         [ Get_global sp  -- bp = [sp + 4]
-        , I32_const 4
-        , I32_add
-        , I32_load 2 0
+        , I32_load 2 4
         , Set_global bp
         , Block Nada
           [ Block Nada
@@ -527,9 +525,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
             ]  -- 0: Ap
           , Get_global sp  -- [sp] = [bp + 8]
           , Get_global bp
-          , I32_const 8
-          , I32_add
-          , I32_load 2 0
+          , I32_load 2 8
           , I32_store 2 0
           , Get_global sp  -- sp = sp - 4
           , I32_const 4
@@ -538,13 +534,9 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
           , Br 1
           ]  -- 1: Ind.
         , Get_global sp  -- [sp + 4] = [bp + 4]
-        , I32_const 4
-        , I32_add
         , Get_global bp
-        , I32_const 4
-        , I32_add
-        , I32_load 2 0
-        , I32_store 2 0
+        , I32_load 2 4
+        , I32_store 2 4
         , Br 0
         ]  -- 2: Eval loop.
       ]  -- 3: Global
@@ -573,12 +565,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       , If Nada
         [ Get_global sp  -- [sp] = [[sp + 4] + 12]
         , Get_global sp
-        , I32_const 4
-        , I32_add
-        , I32_load 2 0
-        , I32_const 12
-        , I32_add
-        , I32_load 2 0
+        , I32_load 2 4
+        , I32_load 2 12
         , I32_store 2 0
         , Br 1
         ]  -- If
@@ -592,9 +580,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       n = length evalFuns
       nest 0 =
         [ Get_global bp  -- case [bp + 4]
-        , I32_const 4
-        , I32_add
-        , I32_load 2 0
+        , I32_load 2 4
         , Br_table [0..n-1] n
         ]
       nest k = [Block Nada $ nest $ k - 1, Call $ firstPrim + k - 1, Return]
@@ -607,22 +593,14 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       ] ++ (case t of
         TC "Int" ->
           [ Get_global sp  -- Set_global n [[sp + 4] + 8].64
-          , I32_const 4
-          , I32_add
-          , I32_load 2 0
-          , I32_const 8
-          , I32_add
-          , I64_load 3 0
+          , I32_load 2 4
+          , I64_load 3 8
           , Set_global $ storeOffset + n
           ]
         _ ->
           [ Get_global sp  -- Set_global n [[sp + 4] + 4]
-          , I32_const 4
-          , I32_add
-          , I32_load 2 0
-          , I32_const 4
-          , I32_add
-          , I32_load 2 0
+          , I32_load 2 4
+          , I32_load 2 4
           , Set_global $ storeOffset + n
           ]
       ) ++
@@ -641,10 +619,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
           , tag_const TagInt
           , I32_store 2 0
           , Get_global hp  -- [hp + 8] = Get_global n
-          , I32_const 8
-          , I32_add
           , Get_global $ storeOffset + n
-          , I64_store 3 0
+          , I64_store 3 8
           , Get_global hp  -- hp = hp + 16
           , I32_const 16
           , I32_add
@@ -655,10 +631,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
           , tag_const TagRef
           , I32_store 2 0
           , Get_global hp  -- [hp + 4] = Get_global n
-          , I32_const 4
-          , I32_add
           , Get_global $ storeOffset + n
-          , I32_store 2 0
+          , I32_store 2 4
           , Get_global hp  -- hp = hp + 8
           , I32_const 8
           , I32_add
@@ -679,25 +653,17 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     , I32_const $ fromIntegral $ fromEnum TagSum + 256 * 2
     , I32_store 2 0
     , Get_global hp  -- [hp + 4] = 0
-    , I32_const 4
-    , I32_add
     , I32_const 0
-    , I32_store 2 0
-    , Get_global hp  -- [hp + 8] = bp
-    , I32_const 8
-    , I32_add
+    , I32_store 2 4
+    , Get_global hp  -- [hp + 8] = local0
     , Get_local 0
-    , I32_store 2 0
+    , I32_store 2 8
     , Get_global hp  -- [hp + 12] = 42
-    , I32_const 12
-    , I32_add
     , I32_const 42
-    , I32_store 2 0
+    , I32_store 2 12
     , Get_global sp  -- [sp + 4] = hp
-    , I32_const 4
-    , I32_add
     , Get_global hp
-    , I32_store 2 0
+    , I32_store 2 4
     , Get_global hp  -- hp = hp + 16
     , I32_const 16
     , I32_add
@@ -770,13 +736,9 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     Slide 0 -> []
     Slide n ->
       [ Get_global sp  -- [sp + 4*(n + 1)] = [sp + 4]
-      , I32_const $ 4*(fromIntegral n + 1)
-      , I32_add
       , Get_global sp
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
-      , I32_store 2 0
+      , I32_load 2 4
+      , I32_store 2 $ 4*(fromIntegral n + 1)
       , Get_global sp  -- sp = sp + 4*n
       , I32_const $ 4*fromIntegral n
       , I32_add
@@ -794,19 +756,14 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       , I32_const $ fromIntegral $ fromEnum TagSum + 256 * n
       , I32_store 2 0
       , Get_global hp  -- [hp + 4] = m
-      , I32_const 4
-      , I32_add
       , I32_const $ fromIntegral m
-      , I32_store 2 0
+      , I32_store 2 4
       ] ++ concat [
         [ Get_global hp  -- [hp + 4 + 4*i] = [sp + 4*i]
-        , I32_const $ fromIntegral $ 4 + 4*i
-        , I32_add
         , Get_global sp
-        , I32_const $ fromIntegral $ 4*i
-        , I32_add
-        , I32_load 2 0
-        , I32_store 2 0 ] | i <- [1..n]] ++
+        , I32_load 2 $ fromIntegral $ 4*i
+        , I32_store 2 $ fromIntegral $ 4 + 4*i
+        ] | i <- [1..n]] ++
       [ Get_global sp  -- sp = sp + 4*n
       , I32_const $ fromIntegral $ 4*n
       , I32_add
@@ -831,10 +788,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       m = maximum $ fromJust . fst <$> alts
       nest j (ins:rest) = pure $ Block Nada $ nest (j + 1) rest ++ concatMap fromIns ins ++ [Br j]
       nest _ [] = pure $ Block Nada
-        [ Get_global bp  -- [bp + 4]
-        , I32_const 4
-        , I32_add
-        , I32_load 2 0
+        [ Get_global bp  -- Br_table [bp + 4]
+        , I32_load 2 4
         , Br_table [fromIntegral $ fromMaybe (length alts) $ lookup i tab | i <- [0..m]] $ m + 1
         ]
       in if null alts then concatMap fromIns catchall else
@@ -843,9 +798,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       -- 4: "Enum"
       -- 8, 12, ...: fields
       [ Get_global sp  -- bp = [sp + 4]
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
+      , I32_load 2 4
       , Set_global bp
       , Block Nada $ nest 1 (reverse $ snd <$> alts) ++ concatMap fromIns catchall
       ]
@@ -853,9 +806,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     Split 0 -> [Get_global sp, I32_const 4, I32_add, Set_global sp]
     Split n ->
       [ Get_global sp  -- bp = [sp + 4]
-      , I32_const 4
-      , I32_add
-      , I32_load 2 0
+      , I32_load 2 4
       , Set_global bp
       , Get_global sp  -- sp = sp + 4
       , I32_const 4
@@ -866,9 +817,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
         , I32_const $ fromIntegral $ 4*(n - i)
         , I32_sub
         , Get_global bp
-        , I32_const $ fromIntegral $ 4 + 4*i
-        , I32_add
-        , I32_load 2 0
+        , I32_load 2 $ fromIntegral $ 4 + 4*i
         , I32_store 2 0
         ] | i <- [1..n]] ++
       [ Get_global sp  -- sp = sp - 4*n
@@ -986,26 +935,16 @@ mkApAsm =
   , tag_const TagAp
   , I32_store 2 0
   , Get_global hp  -- [hp + 8] = [sp + 4]
-  , I32_const 8
-  , I32_add
   , Get_global sp
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , I32_store 2 0
+  , I32_load 2 4
+  , I32_store 2 8
   , Get_global hp  -- [hp + 12] = [sp + 8]
-  , I32_const 12
-  , I32_add
   , Get_global sp
-  , I32_const 8
-  , I32_add
-  , I32_load 2 0
-  , I32_store 2 0
+  , I32_load 2 8
+  , I32_store 2 12
   , Get_global sp  -- [sp + 8] = hp
-  , I32_const 8
-  , I32_add
   , Get_global hp
-  , I32_store 2 0
+  , I32_store 2 8
   , Get_global sp  -- sp = sp + 4
   , I32_const 4
   , I32_add
@@ -1029,10 +968,8 @@ pushIntAsm =
   , tag_const TagInt
   , I32_store 2 0
   , Get_global hp  -- [hp + 8] = local_0
-  , I32_const 8
-  , I32_add
   , Get_local 0
-  , I64_store 3 0
+  , I64_store 3 8
   , Get_global hp  -- hp = hp + 16
   , I32_const 16
   , I32_add
@@ -1052,10 +989,8 @@ pushRefAsm =
   , tag_const TagRef
   , I32_store 2 0
   , Get_global hp  -- [hp + 4] = local_0
-  , I32_const 4
-  , I32_add
   , Get_local 0
-  , I32_store 2 0
+  , I32_store 2 4
   , Get_global hp  -- hp = hp + 8
   , I32_const 8
   , I32_add
@@ -1085,10 +1020,8 @@ pushGlobalAsm =
   , Get_local 0
   , I32_store 2 0
   , Get_global hp  -- [hp + 4] = local_1 (should be local function index)
-  , I32_const 4
-  , I32_add
   , Get_local 1
-  , I32_store 2 0
+  , I32_store 2 4
   , Get_global hp  -- hp = hp + 8
   , I32_const 8
   , I32_add
@@ -1102,28 +1035,20 @@ pushGlobalAsm =
 updatePopAsm :: [WasmOp]
 updatePopAsm =
   [ Get_global sp  -- bp = [sp + 4]
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
+  , I32_load 2 4
   , Set_global bp
   , Get_global sp  -- sp = sp + local_0
   , Get_local 0  -- Should be 4*(n + 1).
   , I32_add
   , Set_global sp
   , Get_global sp  -- [[sp + 4]] = Ind
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
+  , I32_load 2 4
   , tag_const TagInd
   , I32_store 2 0
   , Get_global sp  -- [[sp + 4] + 4] = bp
-  , I32_const 4
-  , I32_add
-  , I32_load 2 0
-  , I32_const 4
-  , I32_add
+  , I32_load 2 4
   , Get_global bp
-  , I32_store 2 0
+  , I32_store 2 4
   , End
   ]
 allocAsm :: [WasmOp]
@@ -1165,11 +1090,9 @@ updateIndAsm =
   , Get_local 0
   , I32_add
   , I32_load 2 0
-  , I32_const 4
-  , I32_add
   , Get_global sp
   , I32_load 2 0
-  , I32_store 2 0
+  , I32_store 2 4
   , End
   ]
 
@@ -1312,19 +1235,11 @@ pushCallIndirectArg :: Type -> [WasmOp]
 pushCallIndirectArg t = case t of
   TC "Int" ->
     [ Get_global sp  -- PUSH [[sp + 4] + 8].64
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , I32_const 8
-    , I32_add
-    , I64_load 3 0
+    , I32_load 2 4
+    , I64_load 3 8
     ]
   _ ->
     [ Get_global sp  -- PUSH [[sp + 4] + 4]
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
-    , I32_const 4
-    , I32_add
-    , I32_load 2 0
+    , I32_load 2 4
+    , I32_load 2 4
     ]
