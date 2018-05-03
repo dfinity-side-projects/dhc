@@ -272,6 +272,10 @@ data WasmFun = WasmFun
   , funBody :: [WasmOp]
   } deriving Show
 
+-- | Join two i32s into a single i64.
+mk64 :: Int -> Int -> Int64
+mk64 a b = fromIntegral a + shift (fromIntegral b) 32
+
 insToBin :: String -> Boost -> (WasmMeta, Map String [Ins]) -> [Int]
 insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, strAddrs, storeTypes}, gmachine) = wasm where
   ees = exports ++ elements
@@ -676,7 +680,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
       ]
     MkAp -> [ Call $ wasmFunNo "#mkap" ]
     PushGlobal fun | (n, g) <- getGlobal fun ->
-      [ I64_const $ fromIntegral $ fromEnum TagGlobal + shift n 8 + shift g 32
+      [ I64_const $ mk64 (fromEnum TagGlobal + shift n 8) g
       , Call $ wasmFunNo "#pushglobal"
       ]
     PushString s ->
@@ -686,9 +690,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
       ]
     PushCallIndirect ty ->
       -- 3 arguments: slot, argument tuple, #RealWorld.
-      [ I64_const $ fromIntegral $
-        fromEnum TagGlobal + (shift 3 8) +
-        (shift (wasmFunNo (show ty) - firstPrim) 32)
+      [ I64_const $ mk64 (fromEnum TagGlobal + shift 3 8) $ wasmFunNo (show ty) - firstPrim
       , Call $ wasmFunNo "#pushglobal"
       ]
     Slide 0 -> []
@@ -711,7 +713,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
       ]
     Copro m n ->
       [ Get_global hp  -- [hp] = (TagSum | (n << 8) | (m << 32)).64
-      , I64_const $ fromIntegral $ fromEnum TagSum + shift n 8 + shift m 32
+      , I64_const $ mk64 (fromEnum TagSum + shift n 8) m
       , I64_store 3 0
       ] ++ concat [
         [ Get_global hp  -- [hp + 4 + 4*i] = [sp + 4*i]
