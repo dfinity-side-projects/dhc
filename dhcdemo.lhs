@@ -29,6 +29,18 @@ dv = new DataView(expo.memory.buffer);
 document.getElementById('out').innerHTML ="";
 expo['main']()});
 }
+
+function downloadWasm(arr) {
+  var blob = new Blob([new Uint8Array(arr)], {type: "application/octet-stream"});
+  var a = document.createElement('a');
+  a.style.display = 'none';
+  document.body.append(a);
+  var url = URL.createObjectURL(blob);
+  a.href = url;
+  a.download = "a.wasm";
+  a.click();
+  URL.revokeObjectURL(url);
+}
 </script>
 <script src="dhcdemo.js">
 </script>
@@ -55,6 +67,7 @@ main = do
   putInt $ uncurry (+) (factorial 5, sum $ map tenTimes [1..5])
 </textarea></p>
 <button id="go">Compile & Run!</button>
+<button id="get">Download</button>
 <p><textarea id="asm" readonly rows="5" cols="80">
 </textarea></p>
 <pre id="out"></pre>
@@ -87,16 +100,20 @@ sysPutInt e y x = append e $ case x of
   where b = 2^(32 :: Int) :: Integer
 
 main :: IO ()
-main = withElems ["src", "asm", "go", "out"] $ \[src, asmEl, goB, outE] -> do
+main = withElems ["src", "asm", "go", "get", "out"] $ \[src, asmEl, goB, getB, outE] -> do
   export "sysPutStr" $ sysPutStr outE
   export "sysPutInt" $ sysPutInt outE
-  void $ goB `onEvent` Click $ const $ do
-    setProp asmEl "value" ""
-    s <- ("public (main)\n" ++) <$> getProp src "value"
-    case hsToWasm jsDemoBoost s of
-      Left err -> setProp asmEl "value" err
-      Right asm -> do
-        setProp asmEl "value" $ show asm
-        ffi "runWasmInts" asm :: IO ()
+  let
+    go f = do
+      setProp asmEl "value" ""
+      s <- ("public (main)\n" ++) <$> getProp src "value"
+      case hsToWasm jsDemoBoost s of
+        Left err -> setProp asmEl "value" err
+        Right asm -> do
+          setProp asmEl "value" $ show asm
+          f asm
+  void $ goB `onEvent` Click $ const $ go $ ffi "runWasmInts"
+  void $ getB `onEvent` Click $ const $ go $ ffi "downloadWasm"
+
 \end{code}
 //////////////////////////////////////////////////////////////////////////////
