@@ -358,19 +358,20 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
     Just arity -> (arity, wasmFunNo s - firstPrim)
     Nothing -> (arityFromType $ fromMaybe (error $ "BUG! bad global: " ++ s) $ M.lookup s primsType, wasmFunNo s - firstPrim)
   firstPrim = wasmFunNo $ fst $ head evalFuns
+  cdq = concatMap deQuasi
   internalFuns =
     [ ("#eval", (([], []), evalAsm))
     , ("#mkap", (([], []), mkApAsm))
-    , ("#pushint", (([I64], []), pushIntAsm))
-    , ("#pushref", (([I32], []), pushRefAsm))
-    , ("#push", (([I32], []), pushAsm))
-    , ("#pushglobal", (([I64], []), pushGlobalAsm))
+    , ("#push32", (([I32], []), push32Asm))  -- Low-level push.
+    , ("#pushint", (([I64], []), cdq pushIntAsm))
+    , ("#pushref", (([I32], []), cdq pushRefAsm))
+    , ("#pushglobal", (([I64], []), cdq pushGlobalAsm))
     , ("#updatepop", (([I32], []), updatePopAsm))
     , ("#updateind", (([I32], []), updateIndAsm))
-    , ("#alloc", (([I32], []), allocAsm))
+    , ("#alloc", (([I32], []), cdq allocAsm))
     , ("#pairwith42", (([I32], []), pairWith42Asm))
-    , ("#nil42", (([], []), nil42Asm))
-    ] ++ (second (second $ concatMap deQuasi) <$> boostFuns)
+    , ("#nil42", (([], []), cdq nil42Asm))
+    ] ++ (second (second cdq) <$> boostFuns)
   wasmFuns :: [(String, WasmFun)]
   wasmFuns =
     (second (\((ins, outs), a) -> WasmFun (typeNo ins outs) 0 a) <$> internalFuns)
@@ -381,7 +382,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
     -- Primitive functions.
     -- The assembly for "#eval" requires that the primitive functions
     -- directly precede those defined in the program.
-    [ M.assocs $ WasmFun (typeNo [] []) 0 . concatMap deQuasi . snd <$> livePrims
+    [ M.assocs $ WasmFun (typeNo [] []) 0 . cdq . snd <$> livePrims
     -- Global get and set functions that interact with the DHC stack.
     , concat (zipWith mkStoreAsm storeTypes [0..])
     -- Functions from the program, except `main`.
@@ -424,26 +425,16 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
     , If Nada (
       [ I32_const $ fromIntegral memTop  -- sp = top of memory
       , Set_global sp
-      , Get_global sp  -- [sp] = 42
-      , I32_const 42
-      , I32_store 2 0
-      , Get_global sp  -- sp = sp - 4
-      , I32_const 4
-      , I32_sub
-      , Set_global sp
+      , I32_const 42  -- #push32 42
+      , Call $ wasmFunNo "#push32"
       ] ++ concatMap fromIns [PushGlobal "main", MkAp, Eval]) []
     ]
     else []) ++
 
     [ I32_const $ fromIntegral memTop  -- sp = top of memory
     , Set_global sp
-    , Get_global sp  -- [sp] = 42
-    , I32_const 42
-    , I32_store 2 0
-    , Get_global sp  -- sp = sp - 4
-    , I32_const 4
-    , I32_sub
-    , Set_global sp
+    , I32_const 42  -- #push32 42
+    , Call $ wasmFunNo "#push32"
     ] ++
     -- Input arguments are local variables.
     -- We move these to our stack in reverse order.
@@ -538,14 +529,9 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
             , I32_load8_u 0 0
             , Br_table [0, 1, 3] 4  -- case [bp].8u; branch on Tag
             ]  -- 0: Ap
-          , Get_global sp  -- [sp] = [bp + 8]
-          , Get_global bp
+          , Get_global bp  -- #push32 [bp + 8]
           , I32_load 2 8
-          , I32_store 2 0
-          , Get_global sp  -- sp = sp - 4
-          , I32_const 4
-          , I32_sub
-          , Set_global sp
+          , Call $ wasmFunNo "#push32"
           , Br 1
           ]  -- 1: Ind.
         , Get_global sp  -- [sp + 4] = [bp + 4]
@@ -603,8 +589,9 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
   mkStoreAsm :: Type -> Int -> [(String, WasmFun)]
   mkStoreAsm t n =
     [ ("#set-" ++ show n, WasmFun (typeNo [] []) 0 $
-      [ I32_const 4  -- Push 0, Eval.
-      , Call $ wasmFunNo "#push"
+      [ Get_global sp  -- Push 0, Eval.
+      , I32_load 2 4
+      , Call $ wasmFunNo "#push32"
       , Call $ wasmFunNo "#eval"
       ] ++ (case t of
         TC "Int" ->
@@ -663,49 +650,14 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
       , End
       ])
     ]
-  pairWith42Asm :: [WasmOp]
-  pairWith42Asm =  -- [sp + 4] = (local0, #RealWorld)
-    [ Get_global hp  -- [hp] = (TagSum | (2 << 8)).64
-    , I64_const $ fromIntegral $ fromEnum TagSum + 256 * 2
-    , I64_store 3 0
-    , Get_global hp  -- [hp + 8] = local0
-    , Get_local 0
-    , I32_store 2 8
-    , Get_global hp  -- [hp + 12] = 42
-    , I32_const 42
-    , I32_store 2 12
-    , Get_global sp  -- [sp + 4] = hp
-    , Get_global hp
-    , I32_store 2 4
-    , Get_global hp  -- hp = hp + 16
-    , I32_const 16
-    , I32_add
-    , Set_global hp
-    , End
-    ]
-  -- | [sp + 4] = ((), #RealWorld)
-  -- TODO: Optimize by placing this special value at a known location in memory.
-  nil42Asm :: [WasmOp]
-  nil42Asm =
-    [ Get_global hp  -- [hp].64 = TagSum
-    , I64_const $ fromIntegral $ fromEnum TagSum
-    , I64_store 3 0
-    , Get_global hp  -- PUSH hp
-    , Get_global hp  -- hp = hp + 8
-    , I32_const 8
-    , I32_add
-    , Set_global hp
-    , Call $ wasmFunNo "#pairwith42"
-    , End
-    ]
   deQuasi :: QuasiWasm -> [WasmOp]
   deQuasi (Custom x) = case x of
     CallSym s -> [Call $ wasmFunNo s]
     ReduceArgs n -> concat $ replicate n $ concatMap fromIns [Push (n - 1), Eval]
 
-  deQuasi (Block t body) = [Block t $ concatMap deQuasi body]
-  deQuasi (Loop  t body) = [Loop  t $ concatMap deQuasi body]
-  deQuasi (If    t a b)  = [If    t (concatMap deQuasi a) $ concatMap deQuasi b]
+  deQuasi (Block t body) = [Block t $ cdq body]
+  deQuasi (Loop  t body) = [Loop  t $ cdq body]
+  deQuasi (If    t a b)  = [If    t (cdq a) $ cdq b]
   deQuasi (op) = [error "missing deQuasi case?" <$> op]
 
   prims = M.fromList $ boostPrims boost
@@ -717,20 +669,20 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
     Eval -> [ Call $ wasmFunNo "#eval" ]  -- (Tail call.)
     PushInt n -> [ I64_const n, Call $ wasmFunNo "#pushint" ]
     PushRef n -> [ I32_const n, Call $ wasmFunNo "#pushref" ]
-    Push n -> [ I32_const $ fromIntegral $ 4*(n + 1), Call $ wasmFunNo "#push" ]
+    Push n ->
+      [ Get_global sp
+      , I32_load 2 $ fromIntegral $ 4*(n + 1)
+      , Call $ wasmFunNo "#push32"
+      ]
     MkAp -> [ Call $ wasmFunNo "#mkap" ]
     PushGlobal fun | (n, g) <- getGlobal fun ->
       [ I64_const $ fromIntegral $ fromEnum TagGlobal + shift n 8 + shift g 32
       , Call $ wasmFunNo "#pushglobal"
       ]
     PushString s ->
-      [ Get_global sp  -- [sp] = address of string const
-      , I32_const $ fromIntegral $ strAddrs M.! s
-      , I32_store 2 0
-      , Get_global sp  -- sp = sp - 4
-      , I32_const 4
-      , I32_sub
-      , Set_global sp
+      -- #push32 (address of string const)
+      [ I32_const $ fromIntegral $ strAddrs M.! s
+      , Call $ wasmFunNo "#push32"
       ]
     PushCallIndirect ty ->
       -- 3 arguments: slot, argument tuple, #RealWorld.
@@ -980,15 +932,21 @@ mkApAsm =
   , Set_global hp
   , End
   ]
-pushIntAsm :: [WasmOp]
-pushIntAsm =
-  [ Get_global sp  -- [sp] = hp
-  , Get_global hp
+push32Asm :: [WasmOp]
+push32Asm =
+  [ Get_global sp  -- [sp] = local_0
+  , Get_local 0
   , I32_store 2 0
   , Get_global sp  -- sp = sp - 4
   , I32_const 4
   , I32_sub
   , Set_global sp
+  , End
+  ]
+pushIntAsm :: [QuasiWasm]
+pushIntAsm =
+  [ Get_global hp  -- #push32 hp
+  , Custom $ CallSym "#push32"
   , Get_global hp  -- [hp] = TagInt
   , tag_const TagInt
   , I32_store 2 0
@@ -1001,15 +959,10 @@ pushIntAsm =
   , Set_global hp
   , End
   ]
-pushRefAsm :: [WasmOp]
+pushRefAsm :: [QuasiWasm]
 pushRefAsm =
-  [ Get_global sp  -- [sp] = hp
-  , Get_global hp
-  , I32_store 2 0
-  , Get_global sp  -- sp = sp - 4
-  , I32_const 4
-  , I32_sub
-  , Set_global sp
+  [ Get_global hp  -- #push32 hp
+  , Custom $ CallSym "#push32"
   , Get_global hp  -- [hp] = TagRef
   , tag_const TagRef
   , I32_store 2 0
@@ -1022,25 +975,10 @@ pushRefAsm =
   , Set_global hp
   , End
   ]
-pushAsm :: [WasmOp]
-pushAsm =
-  [ Get_global sp  -- [sp] = [sp + local_0]
-  , Get_global sp
-  , Get_local 0  -- Should be 4*(n + 1).
-  , I32_add
-  , I32_load 2 0
-  , I32_store 2 0
-  , Get_global sp  -- sp = sp - 4
-  , I32_const 4
-  , I32_sub
-  , Set_global sp
-  , End
-  ]
-pushGlobalAsm :: [WasmOp]
+pushGlobalAsm :: [QuasiWasm]
 pushGlobalAsm =
-  [ Get_global sp  -- [sp] = hp
-  , Get_global hp
-  , I32_store 2 0
+  [ Get_global hp  -- #push32 hp
+  , Custom $ CallSym "#push32"
   , Get_global hp  -- [hp] = local_0.64  -- TagGlobal | (n << 8) | (funNo << 32)
   , Get_local 0
   , I64_store 3 0
@@ -1048,10 +986,6 @@ pushGlobalAsm =
   , I32_const 8
   , I32_add
   , Set_global hp
-  , Get_global sp  -- sp = sp - 4
-  , I32_const 4
-  , I32_sub
-  , Set_global sp
   , End
   ]
 updatePopAsm :: [WasmOp]
@@ -1073,7 +1007,7 @@ updatePopAsm =
   , I32_store 2 4
   , End
   ]
-allocAsm :: [WasmOp]
+allocAsm :: [QuasiWasm]
 allocAsm =
   [ Loop Nada
     [ Get_local 0  -- Break when local0 == 0
@@ -1083,9 +1017,8 @@ allocAsm =
     , I32_const 1
     , I32_sub
     , Set_local 0
-    , Get_global sp  -- [sp] = hp
-    , Get_global hp
-    , I32_store 2 0
+    , Get_global hp  -- #push32 hp
+    , Custom $ CallSym "#push32"
     , Get_global hp  -- [hp] = TagInd
     , tag_const TagInd
     , I32_store 2 0
@@ -1093,10 +1026,6 @@ allocAsm =
     , I32_const 8
     , I32_add
     , Set_global hp
-    , Get_global sp  -- sp = sp - 4
-    , I32_const 4
-    , I32_sub
-    , Set_global sp
     , Br 0
     ]
   , End
@@ -1115,6 +1044,42 @@ updateIndAsm =
   , Get_global sp
   , I32_load 2 0
   , I32_store 2 4
+  , End
+  ]
+
+pairWith42Asm :: [WasmOp]
+pairWith42Asm =  -- [sp + 4] = (local0, #RealWorld)
+  [ Get_global hp  -- [hp] = (TagSum | (2 << 8)).64
+  , I64_const $ fromIntegral $ fromEnum TagSum + 256 * 2
+  , I64_store 3 0
+  , Get_global hp  -- [hp + 8] = local0
+  , Get_local 0
+  , I32_store 2 8
+  , Get_global hp  -- [hp + 12] = 42
+  , I32_const 42
+  , I32_store 2 12
+  , Get_global sp  -- [sp + 4] = hp
+  , Get_global hp
+  , I32_store 2 4
+  , Get_global hp  -- hp = hp + 16
+  , I32_const 16
+  , I32_add
+  , Set_global hp
+  , End
+  ]
+-- | [sp + 4] = ((), #RealWorld)
+-- TODO: Optimize by placing this special value at a known location in memory.
+nil42Asm :: [QuasiWasm]
+nil42Asm =
+  [ Get_global hp  -- [hp].64 = TagSum
+  , I64_const $ fromIntegral $ fromEnum TagSum
+  , I64_store 3 0
+  , Get_global hp  -- PUSH hp
+  , Get_global hp  -- hp = hp + 8
+  , I32_const 8
+  , I32_add
+  , Set_global hp
+  , Custom $ CallSym "#pairwith42"
   , End
   ]
 

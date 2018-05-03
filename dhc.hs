@@ -10,4 +10,4 @@ main = do
   s <- getContents
   case hsToWasm demoBoost s of
     Left err -> error err
-    Right bin -> B.putStr $ B.pack $ fromIntegral <$> wasmBinary bin
+    Right bin -> B.putStr $ B.pack $ fromIntegral <$> bin
