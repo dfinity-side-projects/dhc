@@ -11,7 +11,7 @@ module Hero
   , mkHeroVM
   , setArgsVM
   , setTable
-  , tableInputs
+  , origElements
   , globalVM, setGlobalVM
   , permaGlobalVM
   , getNumVM, putNumVM
@@ -293,10 +293,10 @@ setArgsVM ls vm = vm { stack = reverse ls ++ stack vm }
 setTable :: Int32 -> VMFun a -> HeroVM a -> HeroVM a
 setTable slot fun vm = vm { table = IM.insert (fromIntegral slot) fun $ table vm }
 
--- Returns contents of table as
+-- Returns elements of original table as
 -- association list of slot to (function index, function type).
-tableInputs :: HeroVM a -> [(Int, (Int, [WasmType]))]
-tableInputs vm = second (\n -> (n, maybe (error "BUG! missing type")
+origElements :: HeroVM a -> [(Int, (Int, [WasmType]))]
+origElements vm = second (\n -> (n, maybe (error "BUG! missing type")
   (martinTypes!!) $ lookup (n  - length imports) martinTypeMap)) <$> es where
   Wasm {martinTypes, martinTypeMap, elemSection, imports} = wasm vm
   es = concatMap (\(offset, ns) -> zip [offset..] ns) elemSection
