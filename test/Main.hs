@@ -41,7 +41,7 @@ gmachine prog = if "main_" `M.member` funs then
   arity "putInt" = 1
   arity s = case M.lookup s funs of
     Just a -> a
-    Nothing -> arityFromType $ fst $ fromJust $ lookup s $ boostHs stdBoost
+    Nothing -> arityFromType $ fst $ fromJust $ lookup s $ boostPrims stdBoost
   go (fOrIns:rest) s h = either prim exec fOrIns where
     k = M.size h
     heapAdd x = M.insert k x h

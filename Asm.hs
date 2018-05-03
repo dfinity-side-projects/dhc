@@ -244,11 +244,13 @@ renumberCalls m ws = case ws of
     If t a b -> If t (rec a) (rec b)
     x -> x
 
-followGCalls :: [String] -> Map String [Ins] -> Set String
-followGCalls fs m = execState (go fs) $ S.fromList fs where
-  go (f:rest) = do
-    maybe (pure ()) tr $ M.lookup f m
-    go rest
+followGCalls :: [String] -> Set String -> Map String [Ins] -> Set String
+followGCalls fs prims m = execState (go fs) $ S.fromList fs where
+  go (f:rest) = if S.member f prims
+    then modify $ S.insert f
+    else do
+      maybe (pure ()) tr $ M.lookup f m
+      go rest
   go [] = pure ()
   tr (w:rest) = do
     case w of
@@ -271,7 +273,7 @@ data WasmFun = WasmFun
   } deriving Show
 
 insToBin :: String -> Boost -> (WasmMeta, Map String [Ins]) -> [Int]
-insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements, strAddrs, storeTypes}, gmachine) = wasm where
+insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, strAddrs, storeTypes}, gmachine) = wasm where
   ees = exports ++ elements
   encMartinTypes :: [Type] -> [Int]
   encMartinTypes ts = 0x60 : lenc (encMartinType . fromJust . toPrimeaType <$> ts) ++ [0]
@@ -315,7 +317,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
       ++ concatMap (leb128 . liveFunNo . ('@':) . fst) ees]
     , sect 10 $ encProcedure <$> M.elems liveFuns  -- Code section.
     , sect 11 $ encStrConsts <$> M.assocs strAddrs  -- Data section.
-    , sectCustom "dfndbg" [ord <$> show (sort $ swp <$> (M.assocs $ wasmFunMap))]
+    , sectCustom "dfndbg" [ord <$> show (sort $ swp <$> (M.assocs $
+      (liveRenames M.!) <$> M.filter (`M.member` liveRenames) wasmFunMap))]
     , sectCustom "dfnhs" [ord <$> src]
     ]
   declareGlobal (TC "Int") = [encType I64, 1, 0x42, 0, 0xb]
@@ -335,7 +338,7 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
   importFun ((m, f), ty) = encStr m ++ encStr f ++ [0, uncurry typeNo ty]
   typeNo ins outs = typeMap BM.!> (ins, outs)
   typeMap = BM.fromList $ zip [0..] $ nub $
-    (snd <$> imps) ++  -- Types of imports
+    (snd <$> liveImps) ++  -- Types of imports
     -- Types of public and secret functions.
     (flip (,) [] . map toWasmType . snd <$> ees) ++
     -- call_indirect types.
@@ -374,22 +377,25 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
     ++ evalFuns
     -- Wrappers for functions in "public" and "secret" section.
     ++ (wrap <$> ees)
-  evalFuns =  -- Functions that "#eval" can call.
+  evalFuns = concat  -- Functions that "#eval" can call.
     -- Primitive functions.
     -- The assembly for "#eval" requires that the primitive functions
     -- directly precede those defined in the program.
-    ((\(s, p) -> (s, WasmFun (typeNo [] []) 0 p)) <$> prims)
+    [ M.assocs $ WasmFun (typeNo [] []) 0 . concatMap deQuasi . snd <$> livePrims
     -- Global get and set functions that interact with the DHC stack.
-    ++ concat (zipWith mkStoreAsm storeTypes [0..])
+    , concat (zipWith mkStoreAsm storeTypes [0..])
     -- Functions from the program, except `main`.
-    ++ (M.assocs $ fromGMachine <$> M.delete "main" liveGs)
+    , M.assocs $ fromGMachine <$> M.delete "main" liveGs
     -- The `main` function. Any supplied `main` function is appended to
     -- some standard setup code.
-    ++ [("main", WasmFun (typeNo [] []) 0 $ preMainAsm ++ concatMap fromIns (fromMaybe [] $ M.lookup "main" liveGs) ++ [End])]
-    -- Wrappers for call_indirect calls.
-    ++ (M.assocs $ WasmFun (typeNo [] []) 0 . (++ [End]) . concatMap fromIns <$> callEncoders wm)
+    , [("main", WasmFun (typeNo [] []) 0 $ preMainAsm ++ concatMap fromIns (fromMaybe [] $ M.lookup "main" liveGs) ++ [End])]
+    -- Wrappers for call_indirect ops.
+    , M.assocs $ WasmFun (typeNo [] []) 0 . (++ [End]) . concatMap fromIns <$> callEncoders wm
+    ]
 
-  liveGs = restrictKeys gmachine $ followGCalls ("main":(fst <$> ees)) $ callEncoders wm `M.union` gmachine
+  liveGIds = followGCalls ("main":(fst <$> ees)) (M.keysSet prims) $ callEncoders wm `M.union` gmachine
+  liveGs = restrictKeys gmachine liveGIds
+  livePrims = restrictKeys prims liveGIds
 
   fromGMachine g = WasmFun (typeNo [] []) 0 $ (++ [End]) $ concatMap fromIns g
   preMainAsm =
@@ -702,8 +708,8 @@ insToBin src (Boost imps _ boostPrims boostFuns) (wm@WasmMeta {exports, elements
   deQuasi (If    t a b)  = [If    t (concatMap deQuasi a) $ concatMap deQuasi b]
   deQuasi (op) = [error "missing deQuasi case?" <$> op]
 
-  prims = second (concatMap deQuasi . snd) <$> boostPrims
-  primsType = M.fromList $ second fst <$> boostPrims
+  prims = M.fromList $ boostPrims boost
+  primsType = fst <$> prims
 
   fromIns :: Ins -> [WasmOp]
   fromIns instruction = case instruction of

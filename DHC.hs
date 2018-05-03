@@ -820,7 +820,7 @@ arityFromType = f 0 where
   f acc _ = acc
 
 boostTypes :: Boost -> Map String (Maybe (Int, Int), Type)
-boostTypes b = M.fromList $ second (((,) Nothing) . fst) <$> boostHs b
+boostTypes b = M.fromList $ second (((,) Nothing) . fst) <$> boostPrims b
 
 hsToAst :: Boost -> QQuoter -> String -> Either String Clay
 hsToAst boost qq prog = do

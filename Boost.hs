@@ -83,7 +83,7 @@ data Boost = Boost
   -- Haskell definitions.
   , boostPrelude :: String
   -- Primitive Haskell functions.
-  , boostHs :: [(String, (Type, [QuasiWasm]))]
+  , boostPrims :: [(String, (Type, [QuasiWasm]))]
   -- Internal wasm functions, indexed by strings for CallSym.
   , boostWasm :: [(String, (([WasmType], [WasmType]), [QuasiWasm]))]
   }
