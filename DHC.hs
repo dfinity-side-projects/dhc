@@ -81,7 +81,7 @@ data Clay = Clay
   { publics :: [String]
   , secrets :: [String]
   , stores :: [(String, Type)]
-  , funTypes :: [(String, QualType)]
+  , funTypes :: Map String QualType
   , supers :: [(String, Ast)]
   , genDecls :: [(String, Type)]
   , datas :: [(String, (Maybe (Int, Int), Type))]
@@ -101,7 +101,7 @@ addGenDecl :: [(String, Type)] -> Clay -> Clay
 addGenDecl xs p = p { genDecls = xs ++ genDecls p }
 
 toplevels :: Parser Clay
-toplevels = foldl' (flip ($)) (Clay [] [] [] [] [] [] [] []) <$> topDecls where
+toplevels = foldl' (flip ($)) (Clay [] [] [] M.empty [] [] [] []) <$> topDecls where
   topDecls = between (want "{") (want "}") (topDecl `sepBy` want ";")
   topDecl
       = (want "data" >> simpleType)
@@ -470,6 +470,9 @@ parseModule = qParse contract (Boilerplate, []) ""
 data ConState = ConState Int [(Type, Type)] (Map String [String])
 data Constraints a = Constraints (ConState -> Either String (a, ConState))
 
+buildConstraints :: Constraints a -> Either String (a, ConState)
+buildConstraints (Constraints f) = f $ ConState 0 [] M.empty
+
 instance Functor Constraints where fmap = liftM
 instance Applicative Constraints where
   (<*>) = ap
@@ -595,11 +598,10 @@ instantiate (ty, qs) = do
   f m t = pure (m, t)
 
 generalize
-  :: Map String Type      -- Solution found through type unification.
-  -> Map String [String]  -- Context for qualified types.
+  :: Solution
   -> (String, AAst Type)
   -> (String, (QualType, Ast))
-generalize soln ctx (fun, a0@(AAst t0 _)) = (fun, (qt, a1)) where
+generalize (soln, ctx) (fun, a0@(AAst t0 _)) = (fun, (qt, a1)) where
   qt@(_, qs) = runState (generalize' ctx $ typeSolve soln t0) []
   -- TODO: Here, and elsewhere: need to sort qs?
   dsoln = zip qs $ ("#d" ++) . show <$> [(0::Int)..]
@@ -755,64 +757,69 @@ listFromTupleType ty = case ty of
     TApp h@(TV _) rest -> (h:) <$> weirdList rest
     _ -> Left $ "want tuple: " ++ show tup
 
-unify :: [(Type, Type)] -> Map String [String] -> Either String (Map String Type, Map String [String])
+type Solution = (Map String Type, Map String [String])
+
+unify :: [(Type, Type)] -> Map String [String] -> Either String Solution
 unify constraints ctx = execStateT (uni constraints) (M.empty, ctx)
-  where
-  uni :: [(Type, Type)] -> StateT (Map String Type, Map String [String]) (Either String) ()
-  uni [] = do
-    (tm, qm) <- get
-    as <- forM (M.keys tm) $ follow . TV
-    put (M.fromList $ zip (M.keys tm) as, qm)
-  uni ((GV _, _):_) = nope "BUG! generalized variable in constraint"
-  uni ((_, GV _):_) = nope "BUG! generalized variable in constraint"
-  uni ((lhs, rhs):cs) = do
-    z <- (,) <$> follow lhs <*> follow rhs
-    case z of
-      (s, t) | s == t -> uni cs
-      (TV x, TV y) -> do
-        when (x /= y) $ do
-          (tm, qm) <- get
-          -- (Ideally should union by rank.)
-          put (M.insert x (TV y) tm, case M.lookup x qm of
-            Just q -> M.insert y q $ M.delete x qm
-            _ -> qm)
+
+refine :: [(Type, Type)] -> Solution -> Either String Solution
+refine constraints soln = execStateT (uni constraints) soln
+
+uni :: [(Type, Type)] -> StateT (Map String Type, Map String [String]) (Either String) ()
+uni [] = do
+  (tm, qm) <- get
+  as <- forM (M.keys tm) $ follow . TV
+  put (M.fromList $ zip (M.keys tm) as, qm)
+uni ((GV _, _):_) = lift $ Left "BUG! generalized variable in constraint"
+uni ((_, GV _):_) = lift $ Left "BUG! generalized variable in constraint"
+uni ((lhs, rhs):cs) = do
+  z <- (,) <$> follow lhs <*> follow rhs
+  case z of
+    (s, t) | s == t -> uni cs
+    (TV x, TV y) -> do
+      when (x /= y) $ do
+        (tm, qm) <- get
+        -- (Ideally should union by rank.)
+        put (M.insert x (TV y) tm, case M.lookup x qm of
+          Just q -> M.insert y q $ M.delete x qm
+          _ -> qm)
+      uni cs
+    (TV x, t) -> do
+      -- TODO: Test infinite type detection.
+      if x `elem` freeTV t then lift . Left $ "infinite: " ++ x ++ " = " ++ show t
+      else do
+        -- The `instantiateTyvar` function of "Implementing type classes".
+        (_, qm) <- get
+        -- For example, Eq [a] propagates to Eq a, which we record.
+        either (lift . Left) addQuals $ propagate (fromMaybe [] $ M.lookup x qm) t
+        modify' $ first $ M.insert x t
         uni cs
-      (TV x, t) -> do
-        -- TODO: Test infinite type detection.
-        if x `elem` freeTV t then nope $ "infinite: " ++ x ++ " = " ++ show t
-        else do
-          -- The `instantiateTyvar` function of "Implementing type classes".
-          (_, qm) <- get
-          -- For example, Eq [a] propagates to Eq a, which we record.
-          either nope addQuals $ propagate (fromMaybe [] $ M.lookup x qm) t
-          modify' $ first $ M.insert x t
-          uni cs
-      (s, t@(TV _)) -> uni $ (t, s):cs
-      (TApp s1 s2, TApp t1 t2) -> uni $ (s1, t1):(s2, t2):cs
-      (s1 :-> s2, t1 :-> t2) -> uni ((s1, t1):(s2, t2):cs)
-      (s, t) -> nope $ "mismatch: " ++ show s ++ " /= " ++ show t
-  addQuals = modify' . second . M.unionWith union . M.fromList
-  nope = lift . Left
-  -- Galler-Fischer-esque Data.Map (path compression).
-  follow :: Type -> StateT (Map String Type, a) (Either String) Type
-  follow t = case t of
-    TApp a b -> TApp <$> follow a <*> follow b
-    a :-> b  -> (:->) <$> follow a <*> follow b
-    TV x     -> do
-      (tm, qm) <- get
-      case M.lookup x tm of
-        Just u -> do
-          z <- follow u
-          put (M.insert x z tm, qm)
-          pure z
-        Nothing -> pure $ TV x
-    _        -> pure t
-  freeTV :: Type -> [String]
-  freeTV t = case t of
-    TApp a b -> freeTV a ++ freeTV b
-    a :-> b  -> freeTV a ++ freeTV b
-    TV tv    -> [tv]
-    _        -> []
+    (s, t@(TV _)) -> uni $ (t, s):cs
+    (TApp s1 s2, TApp t1 t2) -> uni $ (s1, t1):(s2, t2):cs
+    (s1 :-> s2, t1 :-> t2) -> uni ((s1, t1):(s2, t2):cs)
+    (s, t) -> lift . Left $ "mismatch: " ++ show s ++ " /= " ++ show t
+  where addQuals = modify' . second . M.unionWith union . M.fromList
+
+-- Galler-Fischer-esque Data.Map (path compression).
+follow :: Type -> StateT (Map String Type, a) (Either String) Type
+follow t = case t of
+  TApp a b -> TApp <$> follow a <*> follow b
+  a :-> b  -> (:->) <$> follow a <*> follow b
+  TV x     -> do
+    (tm, qm) <- get
+    case M.lookup x tm of
+      Just u -> do
+        z <- follow u
+        put (M.insert x z tm, qm)
+        pure z
+      Nothing -> pure $ TV x
+  _        -> pure t
+freeTV :: Type -> [String]
+freeTV t = case t of
+  TApp a b -> freeTV a ++ freeTV b
+  a :-> b  -> freeTV a ++ freeTV b
+  TV tv    -> [tv]
+  _        -> []
 
 arityFromType :: Type -> Int
 arityFromType = f 0 where
@@ -831,7 +838,7 @@ hsToAst boost qq prog = do
     types = second fst <$> inferred
     stripStore (TApp (TC "Store") t) = t
     stripStore _ = error "expect Store"
-  pure cl { supers = subbedDefs, funTypes = types, stores = second (stripStore . typeSolve storageCons) <$> stores cl }
+  pure cl { supers = subbedDefs, funTypes = M.fromList types, stores = second (stripStore . typeSolve storageCons) <$> stores cl }
   where showErr = either (Left . show) Right
 
 inferType
@@ -860,27 +867,36 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJ
     (typedAsts, ConState _ cs m) <- buildConstraints $ forM grp $ \(s, d) -> do
       t <- gather cl globs env d
       addConstraint (TV $ '*':s, annOf t)
-      -- TODO: Breaks eta reduction. Better off without this?
-      -- We should probably require exported functions to be declared anyway.
-      when (s == "main" || s `elem` publics cl || s `elem` secrets cl) $
-        addConstraint (retType $ annOf t, TApp (TC "IO") $ TC "()")
+      when (s == "main") $ addConstraint (TV $ '*':s, TApp (TC "IO") $ TC "()")
       case (s `lookup` genDecls cl) of
         Nothing -> pure ()
         Just gt -> do
           (ty, _) <- instantiate (gt, [])
           addConstraint (TV $ '*':s, ty)
       pure (s, t)
-    (soln, ctx) <- unify cs m
-    let storageCons = M.filterWithKey (\k _ -> head k == '@') soln
+    initSol <- unify cs m
+    sol@(solt, _) <- foldM (checkPubSecs cl) initSol (fst <$> grp)
+    let storageCons = M.filterWithKey (\k _ -> head k == '@') solt
     -- TODO: Look for conflicting storage constraints.
-    pure ((++ acc) $ generalize soln ctx <$> typedAsts, accStorage `M.union` storageCons)
+    pure ((++ acc) $ generalize sol <$> typedAsts, accStorage `M.union` storageCons)
     where
-      retType (_ :-> a) = retType a
-      retType r = r
       annOf (AAst a _) = a
-      buildConstraints (Constraints f) = f $ ConState 0 [] M.empty
       tvs = TV . ('*':) . fst <$> grp
       env = zip (fst <$> grp) (zip tvs $ repeat $ []) ++ map (second fst) acc
+
+checkPubSecs :: Clay -> Solution -> String -> Either String Solution
+checkPubSecs cl (soln, ctx) s
+  | s /= "main" &&  -- Already handled.
+      (s `elem` publics cl || s `elem` secrets cl) =
+    -- Require `public` and `secret` functions to return IO ().
+    refine [(retType t, TApp (TC "IO") (TC "()"))] (soln, ctx)
+    -- TODO: Check no free variables are left, and
+    -- propagate ["Storage"] succeeds (returns []) for each argument type.
+  | otherwise = Right (soln, ctx)
+  where
+  Just t = M.lookup ('*':s) soln
+  retType (_ :-> a) = retType a
+  retType r = r
 
 -- TODO: For finding strongly-connected components, there's no need to find
 -- all dependencies. If a node has already been processed, we should avoid

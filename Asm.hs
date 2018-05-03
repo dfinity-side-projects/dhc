@@ -168,7 +168,7 @@ astToIns cl = (WasmMeta
   helps = concat $ helpers . snd . snd <$> compilerOut
   ins = M.fromList $ second fst <$> compilerOut
   (hp1, addrs) = mkStrConsts $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
-  listifyTypes w = (w, inTypes [] $ fst $ fromJust $ lookup w $ funTypes cl)
+  listifyTypes w = (w, inTypes [] $ fst $ fromJust $ M.lookup w $ funTypes cl)
   inTypes acc t = case t of
     a :-> b -> case toPrimeaType a of
       Just _ -> inTypes (a : acc) b
