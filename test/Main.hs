@@ -101,7 +101,7 @@ gmachine prog = if "main_" `M.member` funs then
         NAp a _ -> go (Right Eval:rest) (a:s) h
         NGlobal n g -> let
           p | g == "putStr" = [Right $ Push 0, Right Eval, Left "putStr", Right $ Slide 3]
-            | otherwise  = case lookup g m of
+            | otherwise  = case M.lookup g m of
             Just is -> Right <$> is
             Nothing -> (Right <$> [Push 1, Eval, Push 1, Eval]) ++
               [Left g, Right $ UpdatePop 2, Right Eval]

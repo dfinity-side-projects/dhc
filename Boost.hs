@@ -70,7 +70,6 @@ tag_const = I32_const . fromIntegral . fromEnum
 type QuasiWasm = CustomWasmOp QuasiWasmHelper
 data QuasiWasmHelper =
     CallSym String  -- Find function index and call it.
-  | FarCall [Type]  -- Find type index and call_indirect it
   | ReduceArgs Int  -- Copy arguments from heap and reduce them to WHNF.
   deriving Show
 
