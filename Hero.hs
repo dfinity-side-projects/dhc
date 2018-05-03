@@ -6,6 +6,7 @@ module Hero
   , HeroVM
   , parseWasm
   , runWasm
+  , runWasmIndex
   , runWasmSlot
   , mkHeroVM
   , setArgsVM
@@ -251,6 +252,7 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
           mem' = putNum sz (addr + fromIntegral off) n mem
       run (step $ drop 2 stack) { mem = mem'}
 
+-- | Runs a function at a given index.
 runWasmIndex :: Int -> [WasmOp] -> HeroVM a -> IO ([WasmOp], HeroVM a)
 runWasmIndex n args vm = run (setArgsVM args vm) { insts = [[Call n]] }
 
@@ -291,7 +293,10 @@ setArgsVM ls vm = vm { stack = reverse ls ++ stack vm }
 setTable :: Int32 -> VMFun a -> HeroVM a -> HeroVM a
 setTable slot fun vm = vm { table = IM.insert (fromIntegral slot) fun $ table vm }
 
-tableInputs :: HeroVM a -> [(Int, [WasmType])]
-tableInputs vm = second ((martinTypes!!) . fromMaybe (error "BUG! missing type") . (`lookup` martinTypeMap) . (+ (-length imports))) <$> es where
+-- Returns contents of table as
+-- association list of slot to (function index, function type).
+tableInputs :: HeroVM a -> [(Int, (Int, [WasmType]))]
+tableInputs vm = second (\n -> (n, maybe (error "BUG! missing type")
+  (martinTypes!!) $ lookup (n  - length imports) martinTypeMap)) <$> es where
   Wasm {martinTypes, martinTypeMap, elemSection, imports} = wasm vm
   es = concatMap (\(offset, ns) -> zip [offset..] ns) elemSection
