@@ -391,8 +391,9 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
     , M.assocs $ WasmFun (typeNo [] []) 0 . (++ [End]) . concatMap fromIns <$> callEncoders wm
     ]
 
-  liveGIds = followGCalls ("*decoders*":"main":(fst <$> ees)) (M.keysSet prims) $ callEncoders wm `M.union` gmachine
-    `M.union` M.singleton "*decoders*" (concatMap snd $ concatMap snd ees)
+  -- The "***" is a hack to force it to follow the instructions for all
+  -- argument encoders and decoders.
+  liveGIds = followGCalls ("***":"main":(fst <$> ees)) (M.keysSet prims) $ gmachine `M.union` M.singleton "***" (concatMap snd (concatMap snd ees) ++ concat (M.elems $ callEncoders wm))
   liveGs = restrictKeys gmachine liveGIds
   livePrims = restrictKeys prims liveGIds
 
