@@ -12,7 +12,6 @@ It accepts only a tiny subset of the language.
 https://dhc.dfinity.org
 
 ## Installation / Dependencies
-TBD
 
 ## Usage / Examples
 TBD
