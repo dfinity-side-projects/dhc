@@ -699,6 +699,7 @@ dictSolve dsoln soln (Ast ast) = case ast of
       TC "Actor" -> boxy (aVar "#reduce") (aVar "#reduce")
       TC "Module" -> boxy (aVar "#reduce") (aVar "#reduce")
       TC "Int" -> Ast (Pack 0 4) @@ aVar "Int-toAny" @@ aVar "Int-fromAny" @@ aVar "#reduce" @@ aVar "#reduce"
+      TC "Bool" -> Ast (Pack 0 4) @@ aVar "Bool-toAny" @@ aVar "Bool-fromAny" @@ aVar "Bool-toUnboxed" @@ aVar "Bool-fromUnboxed"
       TApp (TC "[]") a -> let
         ltai = aVar "list_to_any_instance" @@ rec (Ast $ Placeholder "Storage" a)
         lfai = aVar "list_from_any_instance" @@ rec (Ast $ Placeholder "Storage" a)
@@ -1078,4 +1079,4 @@ expandCase = ffix $ \h (Ast ast) -> Ast $ case ast of
     fromApList a = [a]
 
 messageTypes :: [String]
-messageTypes = ["Databuf", "String", "Actor", "Module", "Port", "I32", "Int"]
+messageTypes = ["Databuf", "String", "Actor", "Module", "Port", "I32", "Int", "Bool"]

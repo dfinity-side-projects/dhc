@@ -185,6 +185,7 @@ toPrimeaType t = case t of
   TApp (TC "[]") _ -> Ref "Elem"
   TC "Int" -> I64
   TC "I32" -> I32
+  TC "Bool" -> I32
   TC "String" -> Ref "Databuf"
   TC s | elem s ["Port", "Databuf", "Actor", "Module"] -> Ref s
   _ -> error $ "BUG! type check failed to catch: " ++ show t
