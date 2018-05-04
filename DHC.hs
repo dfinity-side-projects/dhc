@@ -78,8 +78,10 @@ fixity :: String -> (Associativity, Int)
 fixity o = fromMaybe (LAssoc, 9) $ M.lookup o standardFixities
 
 data Clay = Clay
-  { publics :: [String]
-  , secrets :: [String]
+  -- Public and secret functions are accompanied by a list of their
+  -- arguments types and a program for decoding them from a Primea object.
+  { publics :: [(String, [(Type, Ast)])]
+  , secrets :: [(String, [(Type, Ast)])]
   , stores :: [(String, Type)]
   , funTypes :: Map String QualType
   , supers :: [(String, Ast)]
@@ -437,7 +439,8 @@ contract = do
     storeCons s
       | Just ty <- lookup s $ genDecls p = (s, ty)
       | otherwise = (s, TC "Store" `TApp` TV ('@':s))
-  pure $ p { publics = ws, secrets = ss, stores = storeCons <$> ps }
+    withNulls = (`zip` repeat [])
+  pure p { publics = withNulls ws, secrets = withNulls ss, stores = storeCons <$> ps }
 
 qParse :: Parser a
   -> (LayoutState, [Int])
@@ -515,7 +518,7 @@ gather cl globs env (Ast ast) = case ast of
     let r = foldr1 TApp $ TC "()":xs
     pure $ AAst (foldr (:->) r xs) $ Pack m n
   Qual "my" f
-    | Just n <- elemIndex f (publics cl ++ secrets cl) -> rec env $ Ast (Ast (Var "#preslot") :@ Ast (I $ fromIntegral n))
+    | Just n <- elemIndex f (fst <$> publics cl ++ secrets cl) -> rec env $ Ast (Ast (Var "#preslot") :@ Ast (I $ fromIntegral n))
     | otherwise -> bad $ "must be secret or public: " ++ f
   Var "_" -> do
     x <- newTV
@@ -835,11 +838,29 @@ hsToAst boost qq prog = do
   (inferred, storageCons) <- inferType boost cl
   let
     subbedDefs = (second expandCase <$>) . liftLambdas . (second snd <$>) $ inferred
-    types = second fst <$> inferred
+    types = M.fromList $ second fst <$> inferred
     stripStore (TApp (TC "Store") t) = t
     stripStore _ = error "expect Store"
-  pure cl { supers = subbedDefs, funTypes = M.fromList types, stores = second (stripStore . typeSolve storageCons) <$> stores cl }
-  where showErr = either (Left . show) Right
+  pure cl
+    { publics = addDecoders types . fst <$> publics cl
+    , secrets = addDecoders types . fst <$> secrets cl
+    , supers = subbedDefs
+    , funTypes = types
+    , stores = second (stripStore . typeSolve storageCons) <$> stores cl }
+  where
+  showErr = either (Left . show) Right
+
+addDecoders :: (Map String QualType) -> String -> (String, [(Type, Ast)])
+addDecoders types s = (s, addDec [] ty)
+  where
+  Just (ty, _) = M.lookup s types
+  addDec acc t = case t of
+    a :-> b -> addDec ((a, dictSolve [] M.empty $ aVar "p4of4" @@ Ast (Placeholder "Storage" a)) : acc) b
+    TApp (TC "IO") (TC "()") -> reverse acc
+    _ -> error $ "exported functions must return IO ()"
+  aVar = Ast . Var
+  infixl 5 @@
+  x @@ y = Ast $ x :@ y
 
 inferType
   :: Boost
@@ -887,7 +908,7 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJ
 checkPubSecs :: Clay -> Solution -> String -> Either String Solution
 checkPubSecs cl (soln, ctx) s
   | s /= "main" &&  -- Already handled.
-      (s `elem` publics cl || s `elem` secrets cl) =
+      (s `elem` (fst <$> publics cl ++ secrets cl)) =
     -- Require `public` and `secret` functions to return IO ().
     refine [(retType t, TApp (TC "IO") (TC "()"))] (soln, ctx)
     -- TODO: Check no free variables are left, and

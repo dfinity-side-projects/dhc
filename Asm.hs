@@ -103,8 +103,11 @@ data WasmMeta = WasmMeta
   -- Arity of each user-defined function, whether exported or not.
   -- Eval uses this to remove the spine correctly.
   { arities :: Map String Int
-  , exports :: [(String, [Type])]  -- List of public functions.
-  , elements :: [(String, [Type])]
+  -- Public and private functions that can become references.
+  -- We also hang on to the type of each argument as well as a function
+  -- to decode it from a Primea object.
+  , exports :: [(String, [(Type, [Ins])])]
+  , elements :: [(String, [(Type, [Ins])])]
   , callTypes :: [[Type]]  -- Types needed by call_indirect ops.
   , strEndHP :: Int  -- Heap address immediately past the string constants.
   , strAddrs :: Map ShortByteString Int  -- String constant addresses.
@@ -155,8 +158,8 @@ mkStrConsts ss = f (0, []) ss where
 astToIns :: Clay -> (WasmMeta, Map String [Ins])
 astToIns cl = (WasmMeta
   { arities = funs
-  , exports = listifyTypes <$> publics cl
-  , elements = listifyTypes <$> secrets cl
+  , exports = compileDecoders <$> publics cl
+  , elements = compileDecoders <$> secrets cl
   , callTypes = ciTypes
   , strEndHP = hp1
   , strAddrs = addrs
@@ -168,27 +171,23 @@ astToIns cl = (WasmMeta
   helps = concat $ helpers . snd . snd <$> compilerOut
   ins = M.fromList $ second fst <$> compilerOut
   (hp1, addrs) = mkStrConsts $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
-  listifyTypes w = (w, inTypes [] $ fst $ fromJust $ M.lookup w $ funTypes cl)
-  inTypes acc t = case t of
-    a :-> b -> case toPrimeaType a of
-      Just _ -> inTypes (a : acc) b
-      _ -> error $ "unpublishable argument type: " ++ show t
-    TApp (TC "IO") (TC "()") -> reverse acc
-    _ -> error $ "exported functions must return IO ()"
   funs = M.fromList $ ((\(name, Ast (Lam as _)) -> (name, length as)) <$> supers cl)
     ++ (concatMap (\n -> [("#set-" ++ show n, 1), ("#get-" ++ show n, 0)]) [0..length (stores cl) - 1])
+  -- Argument decoders only use a certain subset of functions.
+  compileDecoders = second $ fmap $ second (fst . compile [])
 
 enc32 :: Int -> [Int]
 enc32 n = (`mod` 256) . (div n) . (256^) <$> [(0 :: Int)..3]
 
-toPrimeaType :: Type -> Maybe WasmType
+toPrimeaType :: Type -> WasmType
 toPrimeaType t = case t of
-  TC "Int" -> Just I64
-  TC "I32" -> Just I32
-  TC "String" -> Just $ Ref "Databuf"
-  TC s -> if elem s ["Port", "Databuf", "Actor", "Module"]
-    then Just $ Ref s else Nothing
-  _ -> Nothing
+  TApp (TC "()") _ -> Ref "Elem"
+  TApp (TC "[]") _ -> Ref "Elem"
+  TC "Int" -> I64
+  TC "I32" -> I32
+  TC "String" -> Ref "Databuf"
+  TC s | elem s ["Port", "Databuf", "Actor", "Module"] -> Ref s
+  _ -> error $ "BUG! type check failed to catch: " ++ show t
 
 encMartinType :: WasmType -> Int
 encMartinType t = case t of
@@ -202,12 +201,6 @@ encMartinType t = case t of
   Ref "Databuf" -> 0x6c
   Ref "Elem" -> 0x6b
   _ -> error "bad type"
-
-fromStoreType :: Type -> WasmType
-fromStoreType t = case t of
-  TApp (TC "()") _ -> Ref "Elem"
-  TApp (TC "[]") _ -> Ref "Elem"
-  _ -> fromMaybe (error $ "bad persist: " ++ show t) $ toPrimeaType t
 
 followCalls :: [Int] -> Map Int [WasmOp] -> Set Int
 followCalls ns m = execState (go ns) $ S.fromList ns where
@@ -280,7 +273,7 @@ insToBin :: String -> Boost -> (WasmMeta, Map String [Ins]) -> [Int]
 insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, strAddrs, storeTypes}, gmachine) = wasm where
   ees = exports ++ elements
   encMartinTypes :: [Type] -> [Int]
-  encMartinTypes ts = 0x60 : lenc (encMartinType . fromJust . toPrimeaType <$> ts) ++ [0]
+  encMartinTypes ts = 0x60 : lenc (encMartinType . toPrimeaType <$> ts) ++ [0]
   encMartinTM :: String -> Int -> [Int]
   encMartinTM f t = leb128 (liveFunNo ('@':f) - length liveImps) ++ leb128 t
   encMartinGlobal t i = [3] ++ leb128 (mainCalled + i) ++ leb128 t
@@ -288,9 +281,9 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
     [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
 
     -- Custom sections for Martin's Primea.
-    , sectCustom "types" $ encMartinTypes . snd <$> ees
+    , sectCustom "types" $ encMartinTypes . map fst . snd <$> ees
     , sectCustom "typeMap" $ zipWith encMartinTM (fst <$> ees) [0..]
-    , sectCustom "persist" $ zipWith encMartinGlobal (encMartinType . fromStoreType <$> TC "I32":storeTypes) [0..]
+    , sectCustom "persist" $ zipWith encMartinGlobal (encMartinType . toPrimeaType <$> TC "I32":storeTypes) [0..]
 
     , sect 1 $ uncurry encSig . snd <$> BM.assocs typeMap  -- Type section.
     , sect 2 $ importFun <$> liveImps  -- Import section.
@@ -344,7 +337,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
   typeMap = BM.fromList $ zip [0..] $ nub $
     (snd <$> liveImps) ++  -- Types of imports
     -- Types of public and secret functions.
-    (flip (,) [] . map toWasmType . snd <$> ees) ++
+    (flip (,) [] . map (toWasmType . fst) . snd <$> ees) ++
     -- call_indirect types.
     (flip (,) [] <$> map toWasmType <$> callTypes wm) ++
     (fst . snd <$> internalFuns)  -- Types of internal functions.
@@ -398,7 +391,8 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
     , M.assocs $ WasmFun (typeNo [] []) 0 . (++ [End]) . concatMap fromIns <$> callEncoders wm
     ]
 
-  liveGIds = followGCalls ("main":(fst <$> ees)) (M.keysSet prims) $ callEncoders wm `M.union` gmachine
+  liveGIds = followGCalls ("*decoders*":"main":(fst <$> ees)) (M.keysSet prims) $ callEncoders wm `M.union` gmachine
+    `M.union` M.singleton "*decoders*" (concatMap snd $ concatMap snd ees)
   liveGs = restrictKeys gmachine liveGIds
   livePrims = restrictKeys prims liveGIds
 
@@ -410,7 +404,8 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
   wasmFunMap = M.fromList $ zip (((\(m, f) -> m ++ "." ++ f) . fst <$> imps) ++ (fst <$> wasmFuns)) [0..]
   wasmFunNo s = fromMaybe (error s) $ M.lookup s wasmFunMap
 
-  wrap (f, ins) = (,) ('@':f) $ WasmFun (typeNo (toWasmType <$> ins) []) 0 $
+  wrap (f, ps) = let (inTypes, decoders) = unzip ps in
+    (,) ('@':f) $ WasmFun (typeNo (toWasmType <$> inTypes) []) 0 $
     -- Wraps a DHC function.
     -- When a wasm function f(arg0, arg1, ...) is called,
     -- the arguments are placed in local variables.
@@ -442,73 +437,19 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
     ] ++
     -- Input arguments are local variables.
     -- We move these to our stack in reverse order.
-    concat (reverse $ zipWith publicIn ins [0..]) ++
+    concat (reverse $ zipWith3 fromWire inTypes decoders [0..]) ++
     -- Build the spine.
-    concatMap fromIns (PushGlobal f : replicate (length ins + 1) MkAp) ++
+    concatMap fromIns (PushGlobal f : replicate (length inTypes + 1) MkAp) ++
     [ Call $ wasmFunNo "#eval"
     , End
     ]
-  publicIn (TC "Int") i =
+  fromWire t dec i =
     [ Get_local i
-    , Call $ wasmFunNo "#pushint"
-    ]
-  publicIn (TC "String") i =
-    [ Get_global hp  -- [hp] = TagString
-    , tag_const TagString
-    , I32_store 2 0
-    , Get_global hp  -- [hp + 4] = hp + 16
-    , I32_const 4
-    , I32_add
-    , Get_global hp
-    , I32_const 16
-    , I32_add
-    , I32_store 2 0
-    , Get_global hp  -- [hp + 8] = 0
-    , I32_const 8
-    , I32_add
-    , I32_const 0
-    , I32_store 2 0
-    , Get_global hp  -- [hp + 12] = bp = data.length local_i
-    , I32_const 12
-    , I32_add
-    , Get_local i
-    , Call $ wasmFunNo "data.length"
-    , Set_global bp
-    , Get_global bp
-    , I32_store 2 0
-    , Get_global hp  -- PUSH hp + 16
-    , I32_const 16
-    , I32_add
-    , Get_global bp  -- PUSH bp
-    , Get_local i  -- PUSH local_i
-    , I32_const 0   -- PUSH 0
-    , Call $ wasmFunNo "data.internalize"
-    , Get_global sp  -- [sp] = hp
-    , Get_global hp
-    , I32_store 2 0
-    , Get_global hp  -- hp = hp + bp + 16
-    , Get_global bp
-    , I32_add
-    , I32_const 16
-    , I32_add
-    , Set_global hp
-    , I32_const 0  -- Align hp.
-    , Get_global hp
-    , I32_sub
-    , I32_const 3
-    , I32_and
-    , Get_global hp
-    , I32_add
-    , Set_global hp
-    , Get_global sp  -- sp = sp - 4
-    , I32_const 4
-    , I32_sub
-    , Set_global sp
-    ]
-  publicIn _ i =
-    [ Get_local i
-    , Call $ wasmFunNo "#pushref"
-    ]
+    , case toWasmType t of
+      I64 -> Call $ wasmFunNo "#pushint"
+      _   -> Call $ wasmFunNo "#pushref"
+    ] ++ concatMap fromIns dec ++
+    [ Call $ wasmFunNo "#mkap" ]
   sect t xs = t : lenc (varlen xs ++ concat xs)
   sectCustom s xs = 0 : lenc (encStr s ++ varlen xs ++ concat xs)
   encStr s = lenc $ ord <$> s
