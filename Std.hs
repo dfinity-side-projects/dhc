@@ -76,9 +76,8 @@ intAsm op =
   , I64_load 3 8
   , op
   , Custom $ CallSym "#pushint"
-  , I32_const 12  -- UpdatePop 2
-  , Custom $ CallSym "#updatepop"
-  , Custom $ CallSym "#eval"
+  , I32_const 12  -- UpdatePopEval 2
+  , Custom $ CallSym "#updatepopeval"
   , End
   ]
 cmpAsm :: QuasiWasm -> [QuasiWasm]
@@ -108,9 +107,8 @@ cmpAsm op =
   , I32_const 8
   , I32_add
   , Set_global hp
-  , I32_const 12  -- UpdatePop 2
-  , Custom $ CallSym "#updatepop"
-  , Custom $ CallSym "#eval"
+  , I32_const 12  -- UpdatePopEval 2
+  , Custom $ CallSym "#updatepopeval"
   , End
   ]
 boolAsm :: QuasiWasm -> [QuasiWasm]
@@ -140,9 +138,8 @@ boolAsm op =
   , I32_const 8
   , I32_add
   , Set_global hp
-  , I32_const 12  -- UpdatePop 2
-  , Custom $ CallSym "#updatepop"
-  , Custom $ CallSym "#eval"
+  , I32_const 12  -- UpdatePopEval 2
+  , Custom $ CallSym "#updatepopeval"
   , End
   ]
 catAsm :: [QuasiWasm]
@@ -209,9 +206,8 @@ catAsm =
   , Get_global hp
   , I32_add
   , Set_global hp
-  , I32_const 12  -- UpdatePop 2
-  , Custom $ CallSym "#updatepop"
-  , Custom $ CallSym "#eval"
+  , I32_const 12  -- UpdatePopEval 2
+  , Custom $ CallSym "#updatepopeval"
   , End
   ]
 memcpyhpAsm :: [QuasiWasm]
@@ -292,9 +288,8 @@ strEqAsm =
   , I32_const 8
   , I32_add
   , Set_global hp
-  , I32_const 12  -- UpdatePop 2
-  , Custom $ CallSym "#updatepop"
-  , Custom $ CallSym "#eval"
+  , I32_const 12  -- UpdatePopEval 2
+  , Custom $ CallSym "#updatepopeval"
   , End
   ]
 notmemcmpAsm :: [QuasiWasm]
@@ -399,8 +394,7 @@ sliceAsm =
   , I32_const 48
   , I32_add
   , Set_global hp
-  , I32_const 12  -- UpdatePop 2
-  , Custom $ CallSym "#updatepop"
-  , Custom $ CallSym "#eval"
+  , I32_const 12  -- UpdatePopEval 2
+  , Custom $ CallSym "#updatepopeval"
   , End
   ]

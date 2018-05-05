@@ -56,7 +56,7 @@ data Ins = Copro Int Int | PushInt Int64 | Push Int | PushGlobal String
   | PushRef Int32
   | PushString ShortByteString
   | MkAp | Slide Int | Split Int | Eval
-  | UpdatePop Int | UpdateInd Int | Alloc Int
+  | UpdatePopEval Int | UpdateInd Int | Alloc Int
   | Casejump [(Maybe Int, [Ins])] | Trap
   | PushCallIndirect [Type]
   | WasmPush [Ins] Type
@@ -364,7 +364,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
     , ("#pushint", (([I64], []), cdq pushIntAsm))
     , ("#pushref", (([I32], []), cdq pushRefAsm))
     , ("#pushglobal", (([I64], []), cdq pushGlobalAsm))
-    , ("#updatepop", (([I32], []), updatePopAsm))
+    , ("#updatepopeval", (([I32], []), cdq updatePopEvalAsm))
     , ("#updateind", (([I32], []), updateIndAsm))
     , ("#alloc", (([I32], []), cdq allocAsm))
     , ("#pairwith42", (([I32], []), pairWith42Asm))
@@ -650,9 +650,9 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
     Alloc n -> [ I32_const $ fromIntegral n, Call $ wasmFunNo "#alloc" ]
     UpdateInd n ->
       [ I32_const $ fromIntegral $ 4*(n + 1), Call $ wasmFunNo "#updateind" ]
-    UpdatePop n ->
+    UpdatePopEval n ->
       [ I32_const $ fromIntegral $ 4*(n + 1)
-      , Call $ wasmFunNo "#updatepop"
+      , Call $ wasmFunNo "#updatepopeval"
       ]
     Copro m n ->
       [ Get_global hp  -- [hp] = (TagSum | (n << 8) | (m << 32)).64
@@ -779,7 +779,7 @@ mk1 pglobals (Ast ast) = case ast of
   -- Thanks to lambda lifting, `Lam` can only occur at the top level.
   Lam as b -> do
     putBindings $ zip as [0..]
-    (++ [UpdatePop $ length as, Eval]) <$> rec b
+    (++ [UpdatePopEval $ length as]) <$> rec b
   I n -> pure [PushInt n]
   S s -> do
     st <- get
@@ -933,8 +933,8 @@ pushGlobalAsm =
   , Set_global hp
   , End
   ]
-updatePopAsm :: [WasmOp]
-updatePopAsm =
+updatePopEvalAsm :: [QuasiWasm]
+updatePopEvalAsm =
   [ Get_global sp  -- bp = [sp + 4]
   , I32_load 2 4
   , Set_global bp
@@ -950,6 +950,7 @@ updatePopAsm =
   , I32_load 2 4
   , Get_global bp
   , I32_store 2 4
+  , Custom $ CallSym "#eval"
   , End
   ]
 allocAsm :: [QuasiWasm]

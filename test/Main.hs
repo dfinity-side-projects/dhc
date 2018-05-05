@@ -88,7 +88,7 @@ gmachine prog = if "main_" `M.member` funs then
       PushGlobal v -> go rest (k:s) $ heapAdd $ NGlobal (arity v) v
       MkAp -> let (s0:s1:srest) = s in go rest (k:srest) $ heapAdd $ NAp s0 s1
       UpdateInd n -> go rest (tail s) $ M.insert (s!!(n + 1)) (NInd $ head s) h
-      UpdatePop n -> go rest (drop' (n + 1) s) $ M.insert (s!!(n + 1)) (NInd $ head s) h
+      UpdatePopEval n -> go (Right Eval:rest) (drop' (n + 1) s) $ M.insert (s!!(n + 1)) (NInd $ head s) h
       Alloc n -> go rest ([k..k+n-1]++s) $ M.union h $ M.fromList $ zip [k..k+n-1] (repeat $ NInd 0)
       Slide n -> let (s0:srest) = s in go rest (s0:drop' n srest) h
       Copro n l -> go rest (k:drop' l s) $ heapAdd $ NCon n $ take l s
@@ -104,7 +104,7 @@ gmachine prog = if "main_" `M.member` funs then
             | otherwise  = case M.lookup g m of
             Just is -> Right <$> is
             Nothing -> (Right <$> [Push 1, Eval, Push 1, Eval]) ++
-              [Left g, Right $ UpdatePop 2, Right Eval]
+              [Left g, Right $ UpdatePopEval 2]
           debone i = r where NAp _ r = h M.! i
           in go (p ++ rest) ((debone <$> take n (tail s)) ++ drop' n s) h
         _ -> go rest s h
