@@ -6,10 +6,12 @@ import WasmOp
 
 data WasmFun = WasmFun
   { typeSig :: Int
-  -- We only support functions with I32 locals.
-  , localCount :: Int
+  , localCount :: Int  -- We only support functions with I32 locals.
   , funBody :: [WasmOp]
   } deriving Show
+
+wasmHeader :: [Int]
+wasmHeader = [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
 
 encWasmOp :: WasmOp -> [Int]
 encWasmOp op = case op of
@@ -88,13 +90,25 @@ sectCustom s xs = 0 : lenc (encStr s ++ varlen xs ++ concat xs)
 encStr :: String -> [Int]
 encStr s = lenc $ ord <$> s
 
-encProcedure :: WasmFun -> [Int]
-encProcedure (WasmFun _ 0 body) = lenc $ 0:concatMap encWasmOp body
-encProcedure (WasmFun _ n body) = lenc $ ([1, n, encType I32] ++) $ concatMap encWasmOp body
+-- | Encodes type section (1).
+sectType :: [([WasmType], [WasmType])] -> [Int]
+sectType = sect 1 . map encSig where
+  encSig (ins, outs) = 0x60 : lenc (encType <$> ins) ++ lenc (encType <$> outs)
 
--- | Encodes function signature.
-encSig :: [WasmType] -> [WasmType] -> [Int]
-encSig ins outs = 0x60 : lenc (encType <$> ins) ++ lenc (encType <$> outs)
+-- | Encodes import section (2).
+sectImport :: [((String, String), Int)] -> [Int]
+sectImport imps = sect 2 $ importFun <$> imps where
+  importFun ((m, f), ty) = encStr m ++ encStr f ++ [0, ty]
+
+-- | Encodes function section (3)
+sectFunction :: [WasmFun] -> [Int]
+sectFunction fs = sect 3 $ pure . typeSig <$> fs
+
+-- | Encodes code section (10)
+sectCode :: [WasmFun] -> [Int]
+sectCode fs = sect 10 $ encProcedure <$> fs where
+  encProcedure (WasmFun _ 0 body) = lenc $ 0:concatMap encWasmOp body
+  encProcedure (WasmFun _ n body) = lenc $ ([1, n, encType I32] ++) $ concatMap encWasmOp body
 
 varlen :: [a] -> [Int]
 varlen xs = leb128 $ length xs

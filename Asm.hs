@@ -224,16 +224,15 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
   encMartinTM f t = leb128 (liveFunNo ('@':f) - length liveImps) ++ leb128 t
   encMartinGlobal t i = [3] ++ leb128 (mainCalled + i) ++ leb128 t
   wasm = concat
-    [ [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
-
+    [ wasmHeader
     -- Custom sections for Martin's Primea.
     , sectCustom "types" $ encMartinTypes . map fst . snd <$> ees
     , sectCustom "typeMap" $ zipWith encMartinTM (fst <$> ees) [0..]
     , sectCustom "persist" $ zipWith encMartinGlobal (encMartinType . toPrimeaType <$> TC "I32":storeTypes) [0..]
-
-    , sect 1 $ uncurry encSig . snd <$> BM.assocs typeMap  -- Type section.
-    , sect 2 $ importFun <$> liveImps  -- Import section.
-    , sect 3 $ pure . typeSig <$> M.elems liveFuns  -- Function section.
+    -- Section order matters.
+    , sectType $ snd <$> BM.assocs typeMap
+    , sectImport $ second (uncurry typeNo) <$> liveImps
+    , sectFunction $ M.elems liveFuns
     , sect 4 [[encType AnyFunc, 0] ++ leb128 256]  -- Table section (0 = no-maximum).
     , sect 5 [0 : leb128 nPages]  -- Memory section (0 = no-maximum).
     , sect 6 $  -- Global section (1 = mutable).
@@ -258,7 +257,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
       , 0x41, 0, 0xb]
       ++ leb128 (length ees)
       ++ concatMap (leb128 . liveFunNo . ('@':) . fst) ees]
-    , sect 10 $ encProcedure <$> M.elems liveFuns  -- Code section.
+    , sectCode $ M.elems liveFuns
     , sect 11 $ encStrConsts <$> M.assocs strAddrs  -- Data section.
     , sectCustom "dfndbg" [ord <$> show (sort $ swp <$> (M.assocs $
       (liveRenames M.!) <$> M.filter (`M.member` liveRenames) wasmFunMap))]
@@ -278,7 +277,6 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
     , fromIntegral <$> unpack s
     ]
   -- 0 = external_kind Function.
-  importFun ((m, f), ty) = encStr m ++ encStr f ++ [0, uncurry typeNo ty]
   typeNo ins outs = typeMap BM.!> (ins, outs)
   typeMap = BM.fromList $ zip [0..] $ nub $
     (snd <$> liveImps) ++  -- Types of imports
