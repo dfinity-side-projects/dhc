@@ -34,16 +34,16 @@ encWasmOp op = case op of
   Br n -> 0xc : leb128 n
   Br_if n -> 0xd : leb128 n
   Br_table bs a -> 0xe : leb128 (length bs) ++ concatMap leb128 (bs ++ [a])
-  If _ as [] -> [0x4, 0x40] ++ concatMap encWasmOp as ++ [0xb]
-  If _ as bs -> concat
-    [ [0x4, 0x40]
+  If t as [] -> [0x4, encType t] ++ concatMap encWasmOp as ++ [0xb]
+  If t as bs -> concat
+    [ [0x4, encType t]
     , concatMap encWasmOp as
     , [0x5]
     , concatMap encWasmOp bs
     , [0xb]
     ]
-  Block _ as -> [2, 0x40] ++ concatMap encWasmOp as ++ [0xb]
-  Loop _ as -> [3, 0x40] ++ concatMap encWasmOp as ++ [0xb]
+  Block t as -> [2, encType t] ++ concatMap encWasmOp as ++ [0xb]
+  Loop t as -> [3, encType t] ++ concatMap encWasmOp as ++ [0xb]
   _ -> maybe (error $ "unsupported: " ++ show op) pure $ lookup op rZeroOps
 
 enc32 :: Int -> [Int]
@@ -65,6 +65,7 @@ encType t = case t of
   F32 -> 0x7d
   F64 -> 0x7c
   AnyFunc -> 0x70
+  Nada -> 0x40
   _ -> error "bad type"
 
 leb128 :: Int -> [Int]
