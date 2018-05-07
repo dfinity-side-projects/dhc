@@ -222,18 +222,17 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
   encMartinTypes ts = 0x60 : lenc (encMartinType . toPrimeaType <$> ts) ++ [0]
   encMartinTM :: String -> Int -> [Int]
   encMartinTM f t = leb128 (liveFunNo ('@':f) - length liveImps) ++ leb128 t
-  encMartinGlobal t i = [3] ++ leb128 (mainCalled + i) ++ leb128 t
   wasm = concat
     [ wasmHeader
     -- Custom sections for Martin's Primea.
     , sectCustom "types" $ encMartinTypes . map fst . snd <$> ees
     , sectCustom "typeMap" $ zipWith encMartinTM (fst <$> ees) [0..]
-    , sectCustom "persist" $ zipWith encMartinGlobal (encMartinType . toPrimeaType <$> TC "I32":storeTypes) [0..]
+    , sectPersist $ zip [mainCalled..] $ toPrimeaType <$> TC "I32":storeTypes
     -- Section order matters.
     , sectType $ snd <$> BM.assocs typeMap
     , sectImport $ second (uncurry typeNo) <$> liveImps
     , sectFunction $ M.elems liveFuns
-    , sect 4 [[encType AnyFunc, 0] ++ leb128 256]  -- Table section (0 = no-maximum).
+    , sectTable 256
     , sect 5 [0 : leb128 nPages]  -- Memory section (0 = no-maximum).
     , sect 6 $  -- Global section (1 = mutable).
       [ [encType I32, 1, 0x41] ++ sleb128 memTop ++ [0xb]  -- SP

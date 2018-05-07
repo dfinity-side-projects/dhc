@@ -66,7 +66,12 @@ encType t = case t of
   F64 -> 0x7c
   AnyFunc -> 0x70
   Nada -> 0x40
-  _ -> error "bad type"
+  _ -> error $ "bad type:" ++ show t
+
+standardType :: WasmType -> WasmType
+standardType t = case t of
+  Ref _ -> I32
+  _ -> t
 
 leb128 :: Int -> [Int]
 leb128 n | n < 128   = [n]
@@ -101,11 +106,16 @@ sectImport :: [((String, String), Int)] -> [Int]
 sectImport imps = sect 2 $ importFun <$> imps where
   importFun ((m, f), ty) = encStr m ++ encStr f ++ [0, ty]
 
--- | Encodes function section (3)
+-- | Encodes function section (3).
 sectFunction :: [WasmFun] -> [Int]
 sectFunction fs = sect 3 $ pure . typeSig <$> fs
 
--- | Encodes code section (10)
+-- | Encodes table section (4).
+-- Selects "no-maximum" (0).
+sectTable :: Int -> [Int]
+sectTable sz = sect 4 [[encType AnyFunc, 0] ++ leb128 sz]
+
+-- | Encodes code section (10).
 sectCode :: [WasmFun] -> [Int]
 sectCode fs = sect 10 $ encProcedure <$> fs where
   encProcedure (WasmFun _ 0 body) = lenc $ 0:concatMap encWasmOp body
@@ -116,3 +126,8 @@ varlen xs = leb128 $ length xs
 
 lenc :: [Int] -> [Int]
 lenc xs = varlen xs ++ xs
+
+-- | Encodes persistent globals (0).
+sectPersist :: [(Int, WasmType)] -> [Int]
+sectPersist = sectCustom "persist" . fmap encMartinGlobal where
+  encMartinGlobal (i, t) = [3] ++ leb128 i ++ leb128 (encMartinType t)
