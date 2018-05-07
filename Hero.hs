@@ -84,6 +84,10 @@ putNum w addr n mem = foldl' f mem [0..w-1] where
   f m k = IM.insert (fromIntegral addr + k) (getByte k) m
   getByte k = fromIntegral n `div` (256^k) `mod` 256
 
+-- TODO: Check this works as expected on negative inputs.
+rem32 :: Int32 -> Int32 -> Int32
+rem32 a b = fromIntegral $ rem ((fromIntegral a) :: Word32) $ fromIntegral (fromIntegral b :: Word32)
+
 rem32U :: Int32 -> Int32 -> Int32
 rem32U a b = fromIntegral $ mod ((fromIntegral a) :: Word32) $ fromIntegral (fromIntegral b :: Word32)
 
@@ -91,7 +95,7 @@ rotateL32 :: Word32 -> Word32 -> Int32
 rotateL32 a b = fromIntegral $ rotateL a $ fromIntegral (b `mod` 32)
 
 rotateR32 :: Word32 -> Word32 -> Int32
-rotateR32 a b = fromIntegral $ rotateL a $ fromIntegral (b `mod` 32)
+rotateR32 a b = fromIntegral $ rotateR a $ fromIntegral (b `mod` 32)
 
 shiftL32 :: Word32 -> Word32 -> Int32
 shiftL32 a b = fromIntegral $ shiftL a $ fromIntegral (b `mod` 32)
@@ -158,6 +162,7 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
   I32_mul -> binOp32 (*)
   I32_div_s -> binOp32 div  -- TODO: Is this right for negative inputs?
   I32_rem_u -> binOp32 rem32U
+  I32_rem_s -> binOp32 rem32
   I32_shl -> binOp32U shiftL32
   I32_rotl -> binOp32U rotateL32
   I32_rotr -> binOp32U rotateR32

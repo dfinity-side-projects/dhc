@@ -4,6 +4,7 @@
 
 module Network.DFINITY.Parse (parseWasm, Wasm(..)) where
 
+import Control.Arrow
 import Control.Monad
 import qualified Data.ByteString.Char8 as B8
 import Data.ByteString.Char8 (ByteString)
@@ -272,7 +273,7 @@ wasm = do
         , (0x7e, I64)
         , (0x7d, F32)
         , (0x7c, F64)
-        , (0x70, AnyFunc)
+        , (0x70, Ref "Any")  -- AnyFunc in standard wasm.
         , (0x6f, Ref "Actor")
         , (0x6e, Ref "Module")
         , (0x6d, Ref "Port")
@@ -386,4 +387,13 @@ wasm = do
 parseWasm :: B8.ByteString -> Either String Wasm
 parseWasm b = do
   w@Wasm{imports, exports, martinTypeMap, martinTypes} <- byteParse wasm b
-  pure w { dfnExports = catMaybes $ (\(s, k) -> (,) s . (martinTypes!!) <$> lookup (k - length imports) martinTypeMap) <$> exports }
+  let
+    findType k
+      | Just mt <- lookup (k - length imports) martinTypeMap = martinTypes!!mt
+      -- TODO: Check there are no outputs below.
+      -- Also, does it make sense to export an import?
+      -- Syscalls are synchronous, but exports are not. And where are their
+      -- types annotated?
+      | k < length imports = fst $ snd $ imports !! k
+      | otherwise = fst $ decls w !! (k - length imports)
+  pure w { dfnExports = second findType <$> exports }
