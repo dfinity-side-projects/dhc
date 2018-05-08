@@ -26,6 +26,7 @@ library
     Ast
     Boost
     DHC
+    Encode
     Std
     WasmOp
   ghc-options:
