@@ -6,7 +6,7 @@ import WasmOp
 
 data WasmFun = WasmFun
   { typeSig :: Int
-  , localCount :: Int  -- We only support functions with I32 locals.
+  , localVars :: [WasmType]
   , funBody :: [WasmOp]
   } deriving Show
 
@@ -118,8 +118,9 @@ sectTable sz = sect 4 [[encType AnyFunc, 0] ++ leb128 sz]
 -- | Encodes code section (10).
 sectCode :: [WasmFun] -> [Int]
 sectCode fs = sect 10 $ encProcedure <$> fs where
-  encProcedure (WasmFun _ 0 body) = lenc $ 0:concatMap encWasmOp body
-  encProcedure (WasmFun _ n body) = lenc $ ([1, n, encType I32] ++) $ concatMap encWasmOp body
+  encProcedure wf = lenc $ leb128 (length $ localVars wf) ++
+    concatMap (\t -> [1, encType $ standardType t]) (localVars wf) ++
+    concatMap encWasmOp (funBody wf)
 
 varlen :: [a] -> [Int]
 varlen xs = leb128 $ length xs

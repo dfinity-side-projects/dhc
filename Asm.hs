@@ -314,7 +314,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
     ] ++ (second (second cdq) <$> boostFuns)
   wasmFuns :: [(String, WasmFun)]
   wasmFuns =
-    (second (\((ins, outs), a) -> WasmFun (typeNo ins outs) 0 a) <$> internalFuns)
+    (second (\((ins, outs), a) -> WasmFun (typeNo ins outs) [] a) <$> internalFuns)
     ++ evalFuns
     -- Wrappers for functions in "public" and "secret" section.
     ++ (wrap <$> ees)
@@ -322,16 +322,16 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
     -- Primitive functions.
     -- The assembly for "#eval" requires that the primitive functions
     -- directly precede those defined in the program.
-    [ M.assocs $ WasmFun (typeNo [] []) 0 . cdq . snd <$> livePrims
+    [ M.assocs $ WasmFun (typeNo [] []) [] . cdq . snd <$> livePrims
     -- Global get and set functions that interact with the DHC stack.
     , concat (zipWith mkStoreAsm storeTypes [0..])
     -- Functions from the program, except `main`.
     , M.assocs $ fromGMachine <$> M.delete "main" liveGs
     -- The `main` function. Any supplied `main` function is appended to
     -- some standard setup code.
-    , [("main", WasmFun (typeNo [] []) 0 $ preMainAsm ++ concatMap fromIns (fromMaybe [] $ M.lookup "main" liveGs) ++ [End])]
+    , [("main", WasmFun (typeNo [] []) [] $ preMainAsm ++ concatMap fromIns (fromMaybe [] $ M.lookup "main" liveGs) ++ [End])]
     -- Wrappers for call_indirect ops.
-    , M.assocs $ WasmFun (typeNo [] []) 0 . (++ [End]) . concatMap fromIns <$> callEncoders wm
+    , M.assocs $ WasmFun (typeNo [] []) [] . (++ [End]) . concatMap fromIns <$> callEncoders wm
     ]
 
   -- The "***" is a hack to force it to follow the instructions for all
@@ -340,7 +340,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
   liveGs = restrictKeys gmachine liveGIds
   livePrims = restrictKeys prims liveGIds
 
-  fromGMachine g = WasmFun (typeNo [] []) 0 $ (++ [End]) $ concatMap fromIns g
+  fromGMachine g = WasmFun (typeNo [] []) [] $ (++ [End]) $ concatMap fromIns g
   preMainAsm =
     [ I32_const 1  -- mainCalled = 1
     , Set_global mainCalled
@@ -349,7 +349,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
   wasmFunNo s = fromMaybe (error s) $ M.lookup s wasmFunMap
 
   wrap (f, ps) = let (inTypes, decoders) = unzip ps in
-    (,) ('@':f) $ WasmFun (typeNo (toWasmType <$> inTypes) []) 0 $
+    (,) ('@':f) $ WasmFun (typeNo (toWasmType <$> inTypes) []) [] $
     -- Wraps a DHC function.
     -- When a wasm function f(arg0, arg1, ...) is called,
     -- the arguments are placed in local variables.
@@ -465,7 +465,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
 
   mkStoreAsm :: Type -> Int -> [(String, WasmFun)]
   mkStoreAsm t n =
-    [ ("#set-" ++ show n, WasmFun (typeNo [] []) 0 $
+    [ ("#set-" ++ show n, WasmFun (typeNo [] []) [] $
       [ Get_global sp  -- Push 0, Eval.
       , I32_load 2 4
       , Call $ wasmFunNo "#push32"
@@ -491,7 +491,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
       , Call $ wasmFunNo "#nil42"
       , End
       ])
-    , ("#get-" ++ show n, WasmFun (typeNo [] []) 0 $
+    , ("#get-" ++ show n, WasmFun (typeNo [] []) [] $
       [ Get_global hp  -- PUSH hp
       ] ++ (case t of
         TC "Int" ->
