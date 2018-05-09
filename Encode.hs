@@ -128,6 +128,16 @@ varlen xs = leb128 $ length xs
 lenc :: [Int] -> [Int]
 lenc xs = varlen xs ++ xs
 
+-- | Encodes functions with certain custom types (0).
+-- Expects the number of imports to be subtracted from the function index.
+sectsMartin :: [(Int, [WasmType])] -> [Int]
+sectsMartin fs =
+  (sectCustom "types" $ encMartinTypes . snd <$> fs) ++
+  (sectCustom "typeMap" $ zipWith (++) (leb128 . fst <$> fs) (leb128 <$> [0..]))
+  where
+  encMartinTypes :: [WasmType] -> [Int]
+  encMartinTypes ts = 0x60 : lenc (encMartinType <$> ts) ++ [0]
+
 -- | Encodes persistent globals (0).
 sectPersist :: [(Int, WasmType)] -> [Int]
 sectPersist = sectCustom "persist" . fmap encMartinGlobal where

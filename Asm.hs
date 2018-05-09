@@ -1,6 +1,5 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE PackageImports #-}
 {-# LANGUAGE NamedFieldPuns #-}
 module Asm
   ( hsToWasm
@@ -118,9 +117,9 @@ align4 :: Int -> Int
 align4 n = (n + 3) `div` 4 * 4
 
 mkStrConsts :: [ShortByteString] -> (Int, Map ShortByteString Int)
-mkStrConsts ss = f (0, []) ss where
+mkStrConsts = f (0, []) where
   f (p, ds) [] = (p, M.fromList ds)
-  f (k, ds) (s:rest) = f (k + 16 + align4 (sbslen s), ((s, k):ds)) rest
+  f (k, ds) (s:rest) = f (k + 16 + align4 (sbslen s), (s, k):ds) rest
 
 astToIns :: Clay -> (WasmMeta, Map String [Ins])
 astToIns cl = (WasmMeta
@@ -139,7 +138,7 @@ astToIns cl = (WasmMeta
   ins = M.fromList $ second fst <$> compilerOut
   (hp1, addrs) = mkStrConsts $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
   funs = M.fromList $ ((\(name, Ast (Lam as _)) -> (name, length as)) <$> supers cl)
-    ++ (concatMap (\n -> [("#set-" ++ show n, 1), ("#get-" ++ show n, 0)]) [0..length (stores cl) - 1])
+    ++ concatMap (\n -> [("#set-" ++ show n, 1), ("#get-" ++ show n, 0)]) [0..length (stores cl) - 1]
   -- Argument decoders only use a certain subset of functions.
   compileDecoders = second $ fmap $ second (fst . compile [])
 
@@ -218,15 +217,10 @@ mk64 a b = fromIntegral a + shift (fromIntegral b) 32
 insToBin :: String -> Boost -> (WasmMeta, Map String [Ins]) -> [Int]
 insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, strAddrs, storeTypes}, gmachine) = wasm where
   ees = exports ++ elements
-  encMartinTypes :: [Type] -> [Int]
-  encMartinTypes ts = 0x60 : lenc (encMartinType . toPrimeaType <$> ts) ++ [0]
-  encMartinTM :: String -> Int -> [Int]
-  encMartinTM f t = leb128 (liveFunNo ('@':f) - length liveImps) ++ leb128 t
   wasm = concat
     [ wasmHeader
     -- Custom sections for Martin's Primea.
-    , sectCustom "types" $ encMartinTypes . map fst . snd <$> ees
-    , sectCustom "typeMap" $ zipWith encMartinTM (fst <$> ees) [0..]
+    , sectsMartin $ (((+(-length liveImps)) . liveFunNo . ('@':)) *** map (toPrimeaType . fst)) <$> ees
     , sectPersist $ zip [mainCalled..] $ toPrimeaType <$> TC "I32":storeTypes
     -- Section order matters.
     , sectType $ snd <$> BM.assocs typeMap
@@ -258,8 +252,8 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
       ++ concatMap (leb128 . liveFunNo . ('@':) . fst) ees]
     , sectCode $ M.elems liveFuns
     , sect 11 $ encStrConsts <$> M.assocs strAddrs  -- Data section.
-    , sectCustom "dfndbg" [ord <$> show (sort $ swp <$> (M.assocs $
-      (liveRenames M.!) <$> M.filter (`M.member` liveRenames) wasmFunMap))]
+    , sectCustom "dfndbg" [ord <$> show (sort $ swp <$> M.assocs
+      ((liveRenames M.!) <$> M.filter (`M.member` liveRenames) wasmFunMap))]
     , sectCustom "dfnhs" [ord <$> src]
     ]
   declareGlobal (TC "Int") = [encType I64, 1, 0x42, 0, 0xb]
@@ -282,7 +276,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
     -- Types of public and secret functions.
     (flip (,) [] . map (toWasmType . fst) . snd <$> ees) ++
     -- call_indirect types.
-    (flip (,) [] <$> map toWasmType <$> callTypes wm) ++
+    (flip (,) [] . map toWasmType <$> callTypes wm) ++
     (fst . snd <$> internalFuns)  -- Types of internal functions.
 
   -- Preserve live wasm code only.
@@ -535,7 +529,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
   deQuasi (Block t body) = [Block t $ cdq body]
   deQuasi (Loop  t body) = [Loop  t $ cdq body]
   deQuasi (If    t a b)  = [If    t (cdq a) $ cdq b]
-  deQuasi (op) = [error "missing deQuasi case?" <$> op]
+  deQuasi op = [error "missing deQuasi case?" <$> op]
 
   prims = M.fromList $ boostPrims boost
   primsType = fst <$> prims
@@ -751,7 +745,7 @@ mk1 pglobals (Ast ast) = case ast of
   where
     bump n = modifyBindings $ fmap $ second (+n)
     modifyBindings f = putBindings =<< f <$> getBindings
-    getBindings = bindings <$> get
+    getBindings = gets bindings
     putBindings b = do
       st <- get
       put st { bindings = b }
