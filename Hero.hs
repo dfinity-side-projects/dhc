@@ -106,6 +106,12 @@ shiftR32U a b = fromIntegral $ shiftR a $ fromIntegral (b `mod` 32)
 shiftR64U :: Int64 -> Int64 -> Int64
 shiftR64U a b = fromIntegral $ shiftR ((fromIntegral a) :: Word64) $ fromIntegral ((fromIntegral b :: Word64) `mod` 64)
 
+shiftL64 :: Int64 -> Int64 -> Int64
+shiftL64 a b = shiftL a $ fromIntegral ((fromIntegral b :: Word64) `mod` 64)
+
+rotateR64 :: Int64 -> Int64 -> Int64
+rotateR64 a b = rotateR a $ fromIntegral ((fromIntegral b :: Word64) `mod` 64)
+
 drop' :: Int -> [a] -> [a]
 drop' n as | n > length as = error "BAD DROP"
            | otherwise = drop n as
@@ -185,10 +191,19 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
   I64_add -> binOp64 (+)
   I64_sub -> binOp64 (-)
   I64_mul -> binOp64 (*)
+  I64_xor -> binOp64 xor
+  I64_and -> binOp64 (.&.)
+  I64_or -> binOp64 (.|.)
   I64_shr_u -> binOp64 shiftR64U
+  I64_shl -> binOp64 shiftL64
+  I64_rotr -> binOp64 rotateR64
   I64_extend_s_i32 -> let
     I32_const a = head stack
     c = I64_const $ fromIntegral a
+    in run $ step (c:tail stack)
+  I64_extend_u_i32 -> let
+    I32_const a = head stack
+    c = I64_const $ fromIntegral (fromIntegral a :: Word32)
     in run $ step (c:tail stack)
   I32_wrap_i64 -> let
     I64_const a = head stack

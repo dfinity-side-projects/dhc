@@ -75,6 +75,7 @@ remainder = ByteParser $ \s -> Right (s, "")
 
 initLocal :: WasmType -> WasmOp
 initLocal I32 = I32_const 0
+initLocal I64 = I64_const 0
 initLocal _ = error "TODO"
 
 wasm :: ByteParser Wasm
