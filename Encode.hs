@@ -2,6 +2,7 @@ module Encode where
 
 import Data.Bits
 import Data.Char
+import Data.List
 import WasmOp
 
 data WasmFun = WasmFun
@@ -140,5 +141,5 @@ sectsMartin fs =
 
 -- | Encodes persistent globals (0).
 sectPersist :: [(Int, WasmType)] -> [Int]
-sectPersist = sectCustom "persist" . fmap encMartinGlobal where
+sectPersist = sectCustom "persist" . fmap encMartinGlobal . sortOn fst where
   encMartinGlobal (i, t) = [3] ++ leb128 i ++ leb128 (encMartinType t)
