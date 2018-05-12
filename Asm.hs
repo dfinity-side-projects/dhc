@@ -71,7 +71,7 @@ data WasmMeta = WasmMeta
   { arities :: Map String Int
   -- Public and private functions that can become references.
   -- We also hang on to the type of each argument as well as a function
-  -- to decode it from a Primea object.
+  -- to decode it from a heap object.
   , exports :: [(String, [(Type, [Ins])])]
   , elements :: [(String, [(Type, [Ins])])]
   , callTypes :: [[Type]]  -- Types needed by call_indirect ops.
@@ -142,8 +142,8 @@ astToIns cl = (WasmMeta
   -- Argument decoders only use a certain subset of functions.
   compileDecoders = second $ fmap $ second (fst . compile [])
 
-toPrimeaType :: Type -> WasmType
-toPrimeaType t = case t of
+toDfnType :: Type -> WasmType
+toDfnType t = case t of
   TApp (TC "()") _ -> Ref "Elem"
   TApp (TC "[]") _ -> Ref "Elem"
   TC "Int" -> I64
@@ -219,9 +219,9 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
   ees = exports ++ elements
   wasm = concat
     [ wasmHeader
-    -- Custom sections for Martin's Primea.
-    , sectsMartin $ (((+(-length liveImps)) . liveFunNo . ('@':)) *** map (toPrimeaType . fst)) <$> ees
-    , sectPersist $ zip [mainCalled..] $ toPrimeaType <$> TC "I32":storeTypes
+    -- Custom sections using Martin's annotations.
+    , sectsMartin $ (((+(-length liveImps)) . liveFunNo . ('@':)) *** map (toDfnType . fst)) <$> ees
+    , sectPersist $ zip [mainCalled..] $ toDfnType <$> TC "I32":storeTypes
     -- Section order matters.
     , sectType $ snd <$> BM.assocs typeMap
     , sectImport $ second (uncurry typeNo) <$> liveImps

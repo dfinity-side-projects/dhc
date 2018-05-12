@@ -79,7 +79,7 @@ fixity o = fromMaybe (LAssoc, 9) $ M.lookup o standardFixities
 
 data Clay = Clay
   -- Public and secret functions are accompanied by a list of their
-  -- arguments types and a program for decoding them from a Primea object.
+  -- arguments types and a program for decoding them from the heap.
   { publics :: [(String, [(Type, Ast)])]
   , secrets :: [(String, [(Type, Ast)])]
   , stores :: [(String, Type)]
@@ -413,7 +413,7 @@ rawTok = do
 filler :: Parser ()
 filler = void $ many $ void (char ' ') <|> nl <|> com
   where
-  hsNewline = (void $ try $ string "\r\n") <|> (void $ oneOf "\r\n\f")
+  hsNewline = (char '\r' >> optional (char '\n')) <|> void (oneOf "\n\f")
   com = do
     void $ between (try $ string "--") hsNewline $ many $ noneOf "\r\n\f"
     (st, is) <- getState
@@ -502,7 +502,7 @@ type QualType = (Type, [(String, String)])
 -- | Gathers constraints.
 -- Replaces overloaded methods with Placeholder.
 -- Replaces data constructors with Pack.
--- For Primea, replaces `my.f` with `#preslot n` where n is the slot number
+-- For DFINITY, replaces `my.f` with `#preslot n` where n is the slot number
 -- preloaded with the secret or public function `f`.
 gather
   :: Clay
