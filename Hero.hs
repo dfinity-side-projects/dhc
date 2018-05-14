@@ -126,10 +126,10 @@ run vm@HeroVM {insts} | null $ head insts = case tail insts of
   ((Loop _ _:rest):t) -> run vm {insts = rest:t}
   _                   -> run vm {insts = tail insts}
 run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
-  Call_indirect k -> do
+  Call_indirect (inSig, _) -> do
     let
       -- TODO: Dynamic type-check.
-      inCount = length $ fst $ sigs vm IM.! k
+      inCount = length inSig
       (I32_const i:params) = take' (inCount + 1) stack
     (results, vm1) <- (table vm IM.! fromIntegral i) (step $ drop' (inCount + 1) stack) (reverse params)
     run $ setArgsVM results vm1
@@ -283,8 +283,7 @@ runWasm f args vm = runWasmIndex n args vm where
 
 -- | Runs a given slot.
 runWasmSlot :: Int -> ([WasmType], [WasmType]) -> [WasmOp] -> HeroVM a -> IO ([WasmOp], HeroVM a)
-runWasmSlot k t args vm = run (setArgsVM (args ++ [I32_const (fromIntegral k)]) vm) { insts = [[Call_indirect typeIndex]] } where
-  typeIndex = fromMaybe (error "BUG! missing type") $ elemIndex t $ types $ wasm vm
+runWasmSlot k t args vm = run (setArgsVM (args ++ [I32_const (fromIntegral k)]) vm) { insts = [[Call_indirect t]] }
 
 -- | Builds a HeroVM for given Wasm binary, imports and persistent globals.
 mkHeroVM :: a -> ((String, String) -> VMFun a) -> Wasm -> [(Int, WasmOp)] -> HeroVM a

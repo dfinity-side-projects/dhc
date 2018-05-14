@@ -219,7 +219,7 @@ wasm = do
     sectGlobal w = do
       gs <- rep varuint32 $ do
         gt <- globalType
-        x <- codeBlock
+        x <- codeBlock w
         pure (gt, x)
       pure w { globals = gs }
 
@@ -232,7 +232,7 @@ wasm = do
       es <- rep varuint32 $ do
         index <- varuint32
         when (index /= 0) $ bad "MVP allows at most one table"
-        [I32_const offset] <- codeBlock
+        [I32_const offset] <- codeBlock w
         ns <- rep varuint32 $ do
           i <- varuint32
           when (i > functionCount w) $ bad "function index out of range"
@@ -247,7 +247,7 @@ wasm = do
           n <- varuint32
           t <- initLocal <$> valueType
           pure $ replicate n t)
-        ops <- codeBlock
+        ops <- codeBlock w
         pure (locals, ops)
       pure w { code = bodies}
 
@@ -255,7 +255,7 @@ wasm = do
       ds <- rep varuint32 $ do
         index <- varuint32
         when (index /= 0) $ bad "MVP allows at most one memory"
-        offset <- codeBlock
+        offset <- codeBlock w
         (,) offset <$> lstr
       pure w { dataSection = ds }
 
@@ -304,14 +304,14 @@ wasm = do
           pure w { haskell = B8.unpack s }
         _ -> remainder >> pure w
 
-    codeBlock :: ByteParser [WasmOp]
-    codeBlock = do
+    codeBlock :: Wasm -> ByteParser [WasmOp]
+    codeBlock w = do
       opcode <- varuint7
       s <- if
         | Just s <- lookup opcode $ zeroOperandOps -> pure s
         | Just s <- lookup opcode [(0x02, Block), (0x03, Loop)] -> do
           bt <- blockType
-          bl <- codeBlock
+          bl <- codeBlock w
           pure $ s bt bl
         | Just s <- lookup opcode [(0x20, Get_local), (0x21, Set_local), (0x22, Tee_local), (0x23, Get_global), (0x24, Set_global)] -> do
           v <- varuint32
@@ -326,10 +326,10 @@ wasm = do
         | otherwise -> case opcode of
           0x04 -> do
             bt <- blockType
-            bl <- codeBlock
+            bl <- codeBlock w
             case last bl of
               Else -> do
-                bl2 <- codeBlock
+                bl2 <- codeBlock w
                 pure $ If bt (init bl) bl2
               _ -> pure $ If bt bl []
           0x05 -> pure Else
@@ -350,12 +350,13 @@ wasm = do
           0x11 -> do
             i <- varuint32
             0 <- varuint1
-            pure $ Call_indirect i
+            when (i >= length (types w)) $ bad "Call_indirect index out of range"
+            pure $ Call_indirect $ types w !! i
           _ -> bad ("bad opcode " ++ show opcode)
       if
         | Else <- s -> pure [Else]
         | End <- s -> pure []
-        | otherwise -> (s:) <$> codeBlock
+        | otherwise -> (s:) <$> codeBlock w
 
     sect w = isEof >>= \b -> if b then pure w else do
       n <- varuint7
