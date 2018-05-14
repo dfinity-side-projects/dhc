@@ -24,7 +24,7 @@ data CustomWasmOp a = Custom a
   | Br_table [Int] Int
   | Br Int | Br_if Int
   | Call Int
-  | Call_indirect Int
+  | Call_indirect ([WasmType], [WasmType])
   | Drop | Select
   deriving (Show, Eq, Functor)
 

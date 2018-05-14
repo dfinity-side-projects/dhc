@@ -217,13 +217,14 @@ mk64 a b = fromIntegral a + shift (fromIntegral b) 32
 insToBin :: String -> Boost -> (WasmMeta, Map String [Ins]) -> [Int]
 insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, strAddrs, storeTypes}, gmachine) = wasm where
   ees = exports ++ elements
+  sigs = snd <$> BM.assocs typeMap
   wasm = concat
     [ wasmHeader
     -- Custom sections using Martin's annotations.
     , sectsMartin $ (((+(-length liveImps)) . liveFunNo . ('@':)) *** map (toDfnType . fst)) <$> ees
     , sectPersist $ zip [mainCalled..] $ toDfnType <$> TC "I32":storeTypes
     -- Section order matters.
-    , sectType $ snd <$> BM.assocs typeMap
+    , sectType sigs
     , sectImport $ second (uncurry typeNo) <$> liveImps
     , sectFunction $ M.elems liveFuns
     , sectTable 256
@@ -250,7 +251,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
       , 0x41, 0, 0xb]
       ++ leb128 (length ees)
       ++ concatMap (leb128 . liveFunNo . ('@':) . fst) ees]
-    , sectCode $ M.elems liveFuns
+    , sectCode sigs $ M.elems liveFuns
     , sect 11 $ encStrConsts <$> M.assocs strAddrs  -- Data section.
     , sectCustom "dfndbg" [ord <$> show (sort $ swp <$> M.assocs
       ((liveRenames M.!) <$> M.filter (`M.member` liveRenames) wasmFunMap))]
@@ -664,7 +665,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
       [ Get_global sp  -- PUSH [[sp + 4] + 4]
       , I32_load 2 4
       , I32_load 2 4
-      , Call_indirect $ typeNo (toWasmType <$> inTypes) []
+      , Call_indirect (toWasmType <$> inTypes, [])
       , Get_global sp  -- sp = sp + 16
       , I32_const 16
       , I32_add

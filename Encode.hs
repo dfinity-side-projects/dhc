@@ -1,5 +1,7 @@
 module Encode where
 
+import Control.Arrow
+import Control.Monad
 import Data.Bits
 import Data.Char
 import Data.List
@@ -14,8 +16,8 @@ data WasmFun = WasmFun
 wasmHeader :: [Int]
 wasmHeader = [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
 
-encWasmOp :: WasmOp -> [Int]
-encWasmOp op = case op of
+encWasmOp :: [([WasmType], [WasmType])] -> WasmOp -> [Int]
+encWasmOp wasmTypes op = case op of
   Get_local n -> 0x20 : leb128 n
   Set_local n -> 0x21 : leb128 n
   Tee_local n -> 0x22 : leb128 n
@@ -24,7 +26,10 @@ encWasmOp op = case op of
   I64_const n -> 0x42 : sleb128 n
   I32_const n -> 0x41 : sleb128 n
   Call n -> 0x10 : leb128 n
-  Call_indirect n -> 0x11 : leb128 n ++ [0]
+  Call_indirect sig
+    | Just n <- sigIndex -> 0x11 : leb128 n ++ [0]
+    | otherwise -> error "BUG! missing entry in type section"
+    where sigIndex = elemIndex (join (***) (standardType <$>) sig) wasmTypes
   I64_load m n -> [0x29, m, n]
   I64_store m n -> [0x37, m, n]
   I32_load m n -> [0x28, m, n]
@@ -35,17 +40,18 @@ encWasmOp op = case op of
   Br n -> 0xc : leb128 n
   Br_if n -> 0xd : leb128 n
   Br_table bs a -> 0xe : leb128 (length bs) ++ concatMap leb128 (bs ++ [a])
-  If t as [] -> [0x4, encType t] ++ concatMap encWasmOp as ++ [0xb]
+  If t as [] -> [0x4, encType t] ++ concatMap rec as ++ [0xb]
   If t as bs -> concat
     [ [0x4, encType t]
-    , concatMap encWasmOp as
+    , concatMap rec as
     , [0x5]
-    , concatMap encWasmOp bs
+    , concatMap rec bs
     , [0xb]
     ]
-  Block t as -> [2, encType t] ++ concatMap encWasmOp as ++ [0xb]
-  Loop t as -> [3, encType t] ++ concatMap encWasmOp as ++ [0xb]
+  Block t as -> [2, encType t] ++ concatMap rec as ++ [0xb]
+  Loop t as -> [3, encType t] ++ concatMap rec as ++ [0xb]
   _ -> maybe (error $ "unsupported: " ++ show op) pure $ lookup op rZeroOps
+  where rec = encWasmOp wasmTypes
 
 enc32 :: Int -> [Int]
 enc32 n = (`mod` 256) . (div n) . (256^) <$> [(0 :: Int)..3]
@@ -117,11 +123,11 @@ sectTable :: Int -> [Int]
 sectTable sz = sect 4 [[encType AnyFunc, 0] ++ leb128 sz]
 
 -- | Encodes code section (10).
-sectCode :: [WasmFun] -> [Int]
-sectCode fs = sect 10 $ encProcedure <$> fs where
+sectCode :: [([WasmType], [WasmType])] -> [WasmFun] -> [Int]
+sectCode wasmTypes fs = sect 10 $ encProcedure <$> fs where
   encProcedure wf = lenc $ leb128 (length $ localVars wf) ++
     concatMap (\t -> [1, encType $ standardType t]) (localVars wf) ++
-    concatMap encWasmOp (funBody wf)
+    concatMap (encWasmOp wasmTypes) (funBody wf)
 
 varlen :: [a] -> [Int]
 varlen xs = leb128 $ length xs
