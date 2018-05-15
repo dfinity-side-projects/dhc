@@ -143,12 +143,15 @@ encodeWasm p = concat
     (typeSig <$> functions p) ++  -- Types of functions.
     (concatMap (concatMap ciType . funBody) $ functions p) -- Types of Call_indirect types.
   ciType (Call_indirect t) = [t]
+  ciType (Block _ xs) = concatMap ciType xs
+  ciType (Loop _ xs) = concatMap ciType xs
+  ciType (If _ xs ys) = concatMap ciType $ xs ++ ys
   ciType _ = []
   encSig (ins, outs) = 0x60 : lenc (encType <$> ins) ++ lenc (encType <$> outs)
   findSig :: FuncType -> Int
   findSig sig
     | Just n <- sigIndex = n
-    | otherwise = error "BUG! missing entry in type section"
+    | otherwise = error $ "BUG! missing sig in type section: " ++ show sig
     where sigIndex = elemIndex (standardSig sig) sigs
   importFun ((m, f), ty) = encStr m ++ encStr f ++ [0, findSig ty]
   encMartinTypes ts = 0x60 : lenc (encMartinType <$> ts) ++ [0]
