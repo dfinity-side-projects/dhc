@@ -4,7 +4,7 @@
 module Asm
   ( hsToWasm
   , Ins(..)
-  , WasmType(Ref)  -- Re-export from WasmOp.
+  , WasmType(..)  -- Re-export from WasmOp.
   , hsToIns
   , hsToGMachine
   , tpGlobalIndex
