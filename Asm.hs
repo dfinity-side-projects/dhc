@@ -1,6 +1,9 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE NamedFieldPuns #-}
+#ifdef __HASTE__
+{-# LANGUAGE PackageImports #-}
+#endif
 module Asm
   ( hsToWasm
   , Ins(..)
@@ -152,41 +155,6 @@ toDfnType t = case t of
   TC s | elem s ["Port", "Databuf", "Actor", "Module"] -> Ref s
   _ -> error $ "BUG! type check failed to catch: " ++ show t
 
-followCalls :: [Int] -> Map Int [WasmOp] -> Set Int
-followCalls ns m = execState (go ns) $ S.fromList ns where
-  go (n:rest) = do
-    maybe (pure ()) tr $ M.lookup n m
-    go rest
-  go [] = pure ()
-  tr (w:rest) = do
-    case w of
-      Call i -> do
-        s <- get
-        when (S.notMember i s) $ do
-          put $ S.insert i s
-          go [i]
-      Loop _ b -> tr b
-      Block _ b -> tr b
-      If _ t f -> do
-        tr t
-        tr f
-      _ -> pure ()
-    tr rest
-  tr [] = pure ()
-
-renumberCalls :: Map Int Int -> [WasmOp] -> [WasmOp]
-renumberCalls m ws = case ws of
-  [] -> []
-  (w:rest) -> ren w:rec rest
-  where
-  rec = renumberCalls m
-  ren w = case w of
-    Call i -> Call $ m M.! i
-    Loop t b -> Loop t $ rec b
-    Block t b -> Block t $ rec b
-    If t a b -> If t (rec a) (rec b)
-    x -> x
-
 followGCalls :: [String] -> Set String -> Map String [Ins] -> Set String
 followGCalls fs prims m = execState (go fs) $ S.fromList fs where
   go (f:rest) = if S.member f prims
@@ -215,8 +183,10 @@ mk64 a b = fromIntegral a + shift (fromIntegral b) 32
 
 insToBin :: String -> Boost -> (WasmMeta, Map String [Ins]) -> [Int]
 insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, strAddrs, storeTypes}, gmachine) = wasm where
-  wasm = encodeWasm $ foldl' (flip ($)) (protoWasm liveImps $ M.elems liveFuns)
-    [ sectsMartin $ ((liveFunNo . ('@':)) *** map (toDfnType . fst)) <$> ees
+  wasm = encodeWasm $ foldl' (flip ($)) (protoWasm imps $ snd <$> wasmFuns)
+    [ sectElements [(0, wasmFunNo . ('@':) . fst <$> ees)]
+    , sectExports [(s, wasmFunNo ('@':s)) | (s, _) <- exports]
+    , sectsMartin $ ((wasmFunNo . ('@':)) *** map (toDfnType . fst)) <$> ees
     , sectPersist $ zip [mainCalled..] $ toDfnType <$> TC "I32":storeTypes
     , sectTable 256
     , sect 5 [0 : leb128 nPages]  -- Memory section (0 = no-maximum).
@@ -229,22 +199,8 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
       -- Global stores.
       -- First one records if `main` has been run yet.
       ++ map declareGlobal (TC "I32":storeTypes)
-    , sect 7 $  -- Export section.
-      -- The "public" functions.
-      [encStr s ++ (0 : leb128 (liveFunNo ('@':s))) | (s, _) <- exports] ++
-      [ encStr "memory" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
-      , encStr "table" ++ [1, 0]  -- 1 = external_kind Table, 0 = memory index.
-      ]
-    , if null ees then id else sect 9 [  -- Element section.
-      [ 0  -- Table 0 (only one in MVP).
-      -- Fill with public and secret functions, starting from 0.
-      -- Assumes these are never overwritten.
-      , 0x41, 0, 0xb]
-      ++ leb128 (length ees)
-      ++ concatMap (leb128 . liveFunNo . ('@':) . fst) ees]
     , sect 11 $ encStrConsts <$> M.assocs strAddrs  -- Data section.
-    , sectCustom "dfndbg" [ord <$> show (sort $ swp <$> M.assocs
-      ((liveRenames M.!) <$> M.filter (`M.member` liveRenames) wasmFunMap))]
+    , sectCustom "dfndbg" [ord <$> show (sort $ swp <$> M.assocs wasmFunMap)]
     , sectCustom "dfnhs" [ord <$> src]
     ]
   ees = exports ++ elements
@@ -261,14 +217,6 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
     , enc32 $ sbslen s
     , fromIntegral <$> unpack s
     ]
-  -- Preserve live wasm code only.
-  nonImports = M.fromList $ zip [length imps..] $ snd <$> wasmFuns
-  liveCalls = followCalls (wasmFunNo . ('@':) . fst <$> ees) $ funBody <$> nonImports
-  liveRenames = M.fromList $ zip (S.elems liveCalls) [0..]
-  liveImps = map snd $ filter ((`M.member` liveRenames) . fst) $ zip [0..] imps
-  liveFuns = (\wf -> wf { funBody = renumberCalls liveRenames $ funBody wf }) <$> restrictKeys nonImports (M.keysSet liveRenames)
-  liveFunNo = (liveRenames M.!) . wasmFunNo
-
   -- Returns arity and 0-indexed number of given global function.
   getGlobal s = case M.lookup s $ M.insert "main" 0 $ arities wm of
     Just arity -> (arity, wasmFunNo s - firstPrim)

@@ -1,9 +1,44 @@
-module Encode where
+{-# LANGUAGE CPP #-}
+#ifdef __HASTE__
+{-# LANGUAGE PackageImports #-}
+#endif
+module Encode
+  ( encodeWasm
+  , protoWasm
+  , sectsMartin
+  , sectExports
+  , sectElements
+  , sectPersist
+  , sectCustom
+  , sectTable
+  , sect
+  , leb128
+  , sleb128
+  , enc32
+  , encType
+  , WasmFun(..)
+  ) where
 
+import Control.Arrow
+#ifdef __HASTE__
+import "mtl" Control.Monad.State
+import Data.Map.Strict (Map)
+#else
+import Control.Monad.State
+import Data.Map.Strict (Map, restrictKeys)
+#endif
 import Data.Bits
 import Data.Char
 import Data.List
+import qualified Data.Map.Strict as M
+import Data.Set (Set)
+import qualified Data.Set as S
 import WasmOp
+
+#ifdef __HASTE__
+restrictKeys :: Ord k => Map k a -> Set k -> Map k a
+restrictKeys m s = M.filterWithKey (\k _ -> S.member k s) m
+#endif
 
 type FuncType = ([WasmType], [WasmType])
 data WasmFun = WasmFun
@@ -108,6 +143,8 @@ lenc xs = varlen xs ++ xs
 data ProtoWasm = ProtoWasm
   { imports :: [((String, String), FuncType)]
   , functions :: [WasmFun]
+  , tableEntries :: [(Int, [Int])]
+  , exports :: [(String, Int)]
   , sections :: [(Int, [[Int]])]
   , martinFuns :: [(Int, [WasmType])]
   , persists :: [(Int, WasmType)]
@@ -115,10 +152,16 @@ data ProtoWasm = ProtoWasm
   }
 
 protoWasm :: [((String, String), FuncType)] -> [WasmFun] -> ProtoWasm
-protoWasm is fs = ProtoWasm is fs [] [] [] []
+protoWasm is fs = ProtoWasm is fs [] [] [] [] [] []
+
+sectElements :: [(Int, [Int])] -> ProtoWasm -> ProtoWasm
+sectElements es p = p { tableEntries = es }
+
+sectExports :: [(String, Int)] -> ProtoWasm -> ProtoWasm
+sectExports es p = p { exports = es }
 
 encodeWasm :: ProtoWasm -> [Int]
-encodeWasm p = concat
+encodeWasm fatP = concat
   [ wasmHeader
   -- Custom sections using Martin's annotations.
   , encCustom "types" $ encMartinTypes . snd <$> martinFuns p
@@ -129,12 +172,28 @@ encodeWasm p = concat
   , encSect 1 $ encSig <$> sigs  -- Type section.
   , encSect 2 $ importFun <$> imports p  -- Import section.
   , encSect 3 $ pure . findSig . typeSig <$> functions p  -- Function section.
-  , concat $ concatMap getSect [4..9]
+  , concat $ concatMap getSect [4..6]
+  , encSect 7 $  -- Export section.
+    -- The "public" functions.
+    [encStr s ++ (0 : leb128 n) | (s, n) <- exports p] ++
+    [ encStr "memory" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
+    , encStr "table" ++ [1, 0]  -- 1 = external_kind Table, 0 = memory index.
+    ]
+  , concat $ getSect 8
+  -- Element section.
+  , if null $ tableEntries p then []
+    else encSect 9 $ encTableChunk <$> tableEntries p
   , encSect 10 $ encProcedure <$> functions p
   , concat $ getSect 11
   , concatMap (uncurry encCustom) $ customs p
   ]
   where
+  p = trim fatP
+  encTableChunk (offset, entries) =
+    [ 0  -- Table 0 (only one in MVP).
+    , 0x41] ++ leb128 offset ++ [0xb]
+    ++ leb128 (length entries)
+    ++ concatMap leb128 entries
   getSect k
     | Just ns <- lookup k $ sections p = [encSect k ns]
     | otherwise = []
@@ -176,3 +235,55 @@ sect t xs p = p { sections = (t, xs):sections p }
 
 sectCustom :: String -> [[Int]] -> ProtoWasm -> ProtoWasm
 sectCustom s xs p = p { customs = (s, xs):customs p }
+
+-- Trim unreachable wasm code.
+trim :: ProtoWasm -> ProtoWasm
+trim p = p
+  { imports = liveImps
+  , functions = M.elems $ liveFuns
+  , exports = second (liveRenames M.!) <$> exports p
+  , tableEntries = second (map (liveRenames M.!)) <$> tableEntries p
+  , martinFuns = first (liveRenames M.!) <$> martinFuns p
+  }
+  where
+  nonImports = M.fromList $ zip [length $ imports p..] $ functions p
+  liveCalls = followCalls ((snd <$> exports p) `union` concatMap snd (tableEntries p)) $ funBody <$> nonImports
+  liveRenames = M.fromList $ zip (S.elems liveCalls) [0..]
+  liveImps = map snd $ filter ((`M.member` liveRenames) . fst) $ zip [0..] $ imports p
+  liveFuns = (\wf -> wf { funBody = renumberCalls liveRenames $ funBody wf }) <$> restrictKeys nonImports (M.keysSet liveRenames)
+
+followCalls :: [Int] -> Map Int [WasmOp] -> Set Int
+followCalls ns m = execState (go ns) $ S.fromList ns where
+  go :: [Int] -> State (Set Int) ()
+  go (n:rest) = do
+    maybe (pure ()) tr $ M.lookup n m
+    go rest
+  go [] = pure ()
+  tr (w:rest) = do
+    case w of
+      Call i -> do
+        s <- get
+        when (S.notMember i s) $ do
+          put $ S.insert i s
+          go [i]
+      Loop _ b -> tr b
+      Block _ b -> tr b
+      If _ t f -> do
+        tr t
+        tr f
+      _ -> pure ()
+    tr rest
+  tr [] = pure ()
+
+renumberCalls :: Map Int Int -> [WasmOp] -> [WasmOp]
+renumberCalls m ws = case ws of
+  [] -> []
+  (w:rest) -> ren w:rec rest
+  where
+  rec = renumberCalls m
+  ren w = case w of
+    Call i -> Call $ m M.! i
+    Loop t b -> Loop t $ rec b
+    Block t b -> Block t $ rec b
+    If t a b -> If t (rec a) (rec b)
+    x -> x

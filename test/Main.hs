@@ -17,7 +17,6 @@ import DHC
 import Hero
 import SoloSyscall
 import Std
-import WasmOp
 import Demo
 
 data Node = NInt Int64 | NString ShortByteString | NAp Int Int | NGlobal Int String | NInd Int | NCon Int [Int] | RealWorld [String] deriving Show
