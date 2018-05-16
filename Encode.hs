@@ -85,7 +85,7 @@ encWasmOp findSig op = case op of
   where rec = encWasmOp findSig
 
 enc32 :: Int -> [Int]
-enc32 n = (`mod` 256) . (div n) . (256^) <$> [(0 :: Int)..3]
+enc32 n = (`mod` 256) . div n . (256^) <$> [(0 :: Int)..3]
 
 encMartinType :: WasmType -> Int
 encMartinType t = case t of
@@ -119,7 +119,7 @@ leb128 n | n < 128   = [n]
          | otherwise = 128 + (n `mod` 128) : leb128 (n `div` 128)
 
 sleb128 :: (Bits a, Integral a) => a -> [Int]
-sleb128 n | n < 0     = fromIntegral <$> (f (n .&. 127) $ shiftR n 7)
+sleb128 n | n < 0     = fromIntegral <$> f (n .&. 127) (shiftR n 7)
           | n < 64    = [fromIntegral n]
           | n < 128   = [128 + fromIntegral n, 0]
           | otherwise = 128 + (fromIntegral n `mod` 128) : sleb128 (n `div` 128)
@@ -200,7 +200,7 @@ encodeWasm fatP = concat
   sigs = nub $ fmap standardSig $
     (snd <$> imports p) ++  -- Types of imports.
     (typeSig <$> functions p) ++  -- Types of functions.
-    (concatMap (concatMap ciType . funBody) $ functions p) -- Types of Call_indirect types.
+    concatMap (concatMap ciType . funBody) (functions p) -- Types of Call_indirect types.
   ciType (Call_indirect t) = [t]
   ciType (Block _ xs) = concatMap ciType xs
   ciType (Loop _ xs) = concatMap ciType xs
@@ -240,7 +240,7 @@ sectCustom s xs p = p { customs = (s, xs):customs p }
 trim :: ProtoWasm -> ProtoWasm
 trim p = p
   { imports = liveImps
-  , functions = M.elems $ liveFuns
+  , functions = M.elems liveFuns
   , exports = second (liveRenames M.!) <$> exports p
   , tableEntries = second (map (liveRenames M.!)) <$> tableEntries p
   , martinFuns = first (liveRenames M.!) <$> martinFuns p

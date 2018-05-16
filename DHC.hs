@@ -1,5 +1,7 @@
 {-# LANGUAGE CPP #-}
+#ifdef __HASTE__
 {-# LANGUAGE PackageImports #-}
+#endif
 module DHC
   ( parseModule, AstF(..), Ast(..), Clay(..), Type(..)
   , inferType, parseDefs, lexOffside
@@ -20,6 +22,7 @@ import Data.List
 import qualified Data.Map.Strict as M
 import Data.Map.Strict (Map)
 import Data.Maybe
+import Data.Traversable
 import Text.Parsec hiding (State)
 
 import Ast
@@ -163,7 +166,7 @@ toplevels = foldl' (flip ($)) (Clay [] [] [] M.empty [] [] [] []) <$> topDecls w
   expr = caseExpr <|> letExpr <|> doExpr <|> bin 0 False
   bin 10 _ = molecule
   bin prec isR = rec False =<< bin (prec + 1) False where
-    rec isL m = (try $ do
+    rec isL m = try (do
       o <- varSym <|> between (want "`") (want "`") var
       let (a, p) = fixity o
       when (p /= prec) $ fail ""
@@ -272,7 +275,7 @@ varSym = do
   pure s
 
 var :: Parser String
-var = varId <|> (try $ between (want "(") (want ")") varSym)
+var = varId <|> try (between (want "(") (want ")") varSym)
 
 reservedIds :: [String]
 reservedIds = words "class data default deriving do else foreign if import in infix infixl infixr instance let module newtype of then type where _"
@@ -353,9 +356,7 @@ tok = do
       pure r
 
 rawTok :: Parser Lexeme
-rawTok = do
-  r <- oxford <|> symbol <|> qId <|> num <|> special <|> str
-  pure r
+rawTok = oxford <|> symbol <|> qId <|> num <|> special <|> str
   where
   oxford = do
     q <- try $ between (char '[') (char '|') $ many alphaNum
@@ -388,7 +389,7 @@ rawTok = do
     pure (LexCon, s)
   qId = do
     r@(_, m) <- lowId <|> uppId
-    (try $ do
+    try (do
       void $ char '.'
       (_, v) <- lowId <|> uppId
       pure (LexQual, m ++ '.':v)) <|> pure r
@@ -426,21 +427,18 @@ filler = void $ many $ void (char ' ') <|> nl <|> com
 contract :: Parser Clay
 contract = do
   ws <- option [] $ try $ want "public" >>
-    (between (want "(") (want ")") $ var `sepBy` want ",")
-  ss <- option [] $ try $ want "secret" >>
-    (between (want "(") (want ")") $ var `sepBy` want ",")
+    between (want "(") (want ")") (var `sepBy` want ",")
   ps <- option [] $ try $ want "store" >>
-    (between (want "(") (want ")") $ var `sepBy` want ",")
+    between (want "(") (want ")") (var `sepBy` want ",")
   putState (AwaitBrace, [])
   p <- toplevels
   when (isNothing $ mapM (`lookup` supers p) ws) $ fail "bad publics"
-  when (isNothing $ mapM (`lookup` supers p) ss) $ fail "bad secrets"
   let
     storeCons s
       | Just ty <- lookup s $ genDecls p = (s, ty)
       | otherwise = (s, TC "Store" `TApp` TV ('@':s))
     withNulls = (`zip` repeat [])
-  pure p { publics = withNulls ws, secrets = withNulls ss, stores = storeCons <$> ps }
+  pure p { publics = withNulls ws, stores = storeCons <$> ps }
 
 qParse :: Parser a
   -> (LayoutState, [Int])
@@ -471,7 +469,7 @@ parseModule = qParse contract (Boilerplate, []) ""
 -- The state consists of the set of constraints and next integer available
 -- for naming a free variable, and the contexts of each variable.
 data ConState = ConState Int [(Type, Type)] (Map String [String])
-data Constraints a = Constraints (ConState -> Either String (a, ConState))
+newtype Constraints a = Constraints (ConState -> Either String (a, ConState))
 
 buildConstraints :: Constraints a -> Either String (a, ConState)
 buildConstraints (Constraints f) = f $ ConState 0 [] M.empty
@@ -542,7 +540,7 @@ gather cl globs env (Ast ast) = case ast of
     pure $ AAst x $ a :@ b
   Lam args u -> do
     ts <- mapM (const newTV) args
-    a@(AAst tu _) <- rec ((zip (filter (/= "_") args) $ zip ts $ repeat []) ++ env) u
+    a@(AAst tu _) <- rec (zip (filter (/= "_") args) (zip ts $ repeat []) ++ env) u
     pure $ AAst (foldr (:->) tu ts) $ Lam args a
   Cas e as -> do
     aste@(AAst te _) <- rec env e
@@ -593,11 +591,11 @@ instantiate (ty, qs) = do
   f m (t :-> u) = do
     (m1, t') <- f m t
     (m2, u') <- f m1 u
-    pure $ (m2, t' :-> u')
+    pure (m2, t' :-> u')
   f m (t `TApp` u) = do
     (m1, t') <- f m t
     (m2, u') <- f m1 u
-    pure $ (m2, t' `TApp` u')
+    pure (m2, t' `TApp` u')
   f m t = pure (m, t)
 
 generalize
@@ -653,7 +651,7 @@ dictSolve :: [((String, String), String)] -> Map String Type -> Ast -> Ast
 dictSolve dsoln soln (Ast ast) = case ast of
   u :@ v  -> Ast $ rec u :@ rec v
   Lam ss a -> Ast $ Lam ss $ rec a
-  Cas e alts -> Ast $ Cas (rec e) $ (id *** rec) <$> alts
+  Cas e alts -> Ast $ Cas (rec e) $ second rec <$> alts
   Placeholder ">>=" t -> aVar "snd" @@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
   Placeholder "pure" t -> aVar "fst" @@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
   Placeholder "==" t -> rec $ Ast $ Placeholder "Eq" $ typeSolve soln t
@@ -767,7 +765,7 @@ unify :: [(Type, Type)] -> Map String [String] -> Either String Solution
 unify constraints ctx = execStateT (uni constraints) (M.empty, ctx)
 
 refine :: [(Type, Type)] -> Solution -> Either String Solution
-refine constraints soln = execStateT (uni constraints) soln
+refine constraints = execStateT (uni constraints)
 
 uni :: [(Type, Type)] -> StateT (Map String Type, Map String [String]) (Either String) ()
 uni [] = do
@@ -788,9 +786,9 @@ uni ((lhs, rhs):cs) = do
           Just q -> M.insert y q $ M.delete x qm
           _ -> qm)
       uni cs
-    (TV x, t) -> do
+    (TV x, t) -> if x `elem` freeTV t
       -- TODO: Test infinite type detection.
-      if x `elem` freeTV t then lift . Left $ "infinite: " ++ x ++ " = " ++ show t
+      then lift . Left $ "infinite: " ++ x ++ " = " ++ show t
       else do
         -- The `instantiateTyvar` function of "Implementing type classes".
         (_, qm) <- get
@@ -831,11 +829,23 @@ arityFromType = f 0 where
   f acc _ = acc
 
 boostTypes :: Boost -> Map String (Maybe (Int, Int), Type)
-boostTypes b = M.fromList $ second (((,) Nothing) . fst) <$> boostPrims b
+boostTypes b = M.fromList $ second ((,) Nothing . fst) <$> boostPrims b
+
+-- | Find functions used as funrefs but not declared public.
+extractSecrets :: Clay -> Clay
+extractSecrets cl = cl { secrets = zip (concatMap (filterSecrets . snd) $ supers cl) $ repeat [] }
+  where
+  filterSecrets = tfix $ \h (Ast ast) -> case ast of
+    Qual "my" f -> if elem f $ fst <$> publics cl then [] else [f]
+    _ -> h ast
+
+tfix :: (Traversable f, Monoid b) => ((f a -> b) -> a -> b) -> a -> b
+tfix f = f $ foldMapDefault $ tfix f
 
 hsToAst :: Boost -> QQuoter -> String -> Either String Clay
 hsToAst boost qq prog = do
-  cl <- showErr $ evalState (runParserT contract (Boilerplate, []) "" prog) (qq, M.empty)
+  cl0 <- showErr $ evalState (runParserT contract (Boilerplate, []) "" prog) (qq, M.empty)
+  let cl = extractSecrets cl0
   (inferred, storageCons) <- inferType boost cl
   let
     subbedDefs = (second expandCase <$>) . liftLambdas . (second snd <$>) $ inferred
@@ -851,14 +861,14 @@ hsToAst boost qq prog = do
   where
   showErr = either (Left . show) Right
 
-addDecoders :: (Map String QualType) -> String -> (String, [(Type, Ast)])
+addDecoders :: Map String QualType -> String -> (String, [(Type, Ast)])
 addDecoders types s = (s, addDec [] ty)
   where
   Just (ty, _) = M.lookup s types
   addDec acc t = case t of
     a :-> b -> addDec ((a, dictSolve [] M.empty $ aVar "p4of4" @@ Ast (Placeholder "Storage" a)) : acc) b
     TApp (TC "IO") (TC "()") -> reverse acc
-    _ -> error $ "exported functions must return IO ()"
+    _ -> error "exported functions must return IO ()"
   aVar = Ast . Var
   infixl 5 @@
   x @@ y = Ast $ x :@ y
@@ -890,7 +900,7 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJ
       t <- gather cl globs env d
       addConstraint (TV $ '*':s, annOf t)
       when (s == "main") $ addConstraint (TV $ '*':s, TApp (TC "IO") $ TC "()")
-      case (s `lookup` genDecls cl) of
+      case s `lookup` genDecls cl of
         Nothing -> pure ()
         Just gt -> do
           (ty, _) <- instantiate (gt, [])
@@ -904,7 +914,7 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJ
     where
       annOf (AAst a _) = a
       tvs = TV . ('*':) . fst <$> grp
-      env = zip (fst <$> grp) (zip tvs $ repeat $ []) ++ map (second fst) acc
+      env = zip (fst <$> grp) (zip tvs $ repeat []) ++ map (second fst) acc
 
 checkPubSecs :: Clay -> Solution -> String -> Either String Solution
 checkPubSecs cl (soln, ctx) s
@@ -929,7 +939,7 @@ callees ds s = snd $ execState (go s) ([], []) where
   go :: String -> State ([String], [String]) ()
   go f = do
     (env, acc) <- get
-    when (not $ elem f (env ++ acc) || M.member f methods) $ case lookup f ds of
+    unless (elem f (env ++ acc) || M.member f methods) $ case lookup f ds of
       -- TODO: If we knew the primitives (functions implemented in wasm, such
       -- as `*`), then we could detect out-of-scope identifiers here.
       Nothing -> pure ()  -- error $ "not in scope: " ++ f
@@ -973,7 +983,7 @@ topo suc vs = fst $ foldl' visit ([], []) vs where
       foldl' visit (done, v:doing) (suc v)
 
 freeV :: [(String, Ast)] -> [(String, AAst [String])]
-freeV scs = map f scs where
+freeV = map f where
   f (d, Ast ast) = (d, g [] ast)
   g :: [String] -> AstF Ast -> AAst [String]
   g cand (Lam ss (Ast a)) = AAst (vs \\ ss) $ Lam ss a1 where
@@ -1004,7 +1014,7 @@ caseVars _ = []
 liftLambdas :: [(String, Ast)] -> [(String, Ast)]
 liftLambdas scs = existingDefs ++ newDefs where
   (existingDefs, (_, newDefs)) = runState (mapM f $ freeV scs) ([], [])
-  f (s, (AAst _ (Lam args body))) = do
+  f (s, AAst _ (Lam args body)) = do
     modify $ first $ const [s]
     body1 <- g body
     pure (s, Ast $ Lam args body1)
@@ -1019,7 +1029,7 @@ liftLambdas scs = existingDefs ++ newDefs where
     pure n
   g (AAst _ (x :@ y)) = fmap Ast $ (:@) <$> g x <*> g y
   g (AAst _ (Let ds t)) = fmap Ast $ Let <$> mapM noLamb ds <*> g t where
-    noLamb (name, (AAst fvs (Lam ss body))) = do
+    noLamb (name, AAst fvs (Lam ss body)) = do
       n <- genName
       body1 <- g body
       modify $ second ((n, Ast $ Lam (fvs ++ ss) body1):)
@@ -1044,22 +1054,21 @@ expandCase = ffix $ \h (Ast ast) -> Ast $ case ast of
 
     -- TODO: Call `fromApList` only in last case alternative.
     expandAlt :: Maybe Ast -> [(Ast, Ast)] -> (Ast, Ast) -> State Int [(Ast, Ast)]
-    expandAlt onFail deeper (p, a) = do
-      case fromApList p of
-        [Ast (Var _)] -> (:moreCases) . (,) p <$> g deeper a
-        [Ast (S s)] -> do
-          v <- genVar
-          a1 <- g deeper a
-          pure [(Ast $ Var v, Ast $ Cas (Ast (Ast (Ast (Var "String-==") :@ Ast (Var v)) :@ Ast (S s))) $ (Ast $ Pack 1 0, a1):moreCases)]
-        [Ast (I n)] -> do
-          v <- genVar
-          a1 <- g deeper a
-          pure [(Ast $ Var v, Ast $ Cas (Ast (Ast (Ast (Var "Int-==") :@ Ast (Var v)) :@ Ast (I n))) $ (Ast $ Pack 1 0, a1):maybe [] ((pure . (,) (Ast $ Pack 0 0))) onFail)]
-        h@(Ast (Pack _ _)):xs -> (++ moreCases) <$> doPack [h] deeper xs a
-        _ -> error $ "bad case: " ++ show p
+    expandAlt onFail deeper (p, a) = case fromApList p of
+      [Ast (Var _)] -> (:moreCases) . (,) p <$> g deeper a
+      [Ast (S s)] -> do
+        v <- genVar
+        a1 <- g deeper a
+        pure [(Ast $ Var v, Ast $ Cas (Ast (Ast (Ast (Var "String-==") :@ Ast (Var v)) :@ Ast (S s))) $ (Ast $ Pack 1 0, a1):moreCases)]
+      [Ast (I n)] -> do
+        v <- genVar
+        a1 <- g deeper a
+        pure [(Ast $ Var v, Ast $ Cas (Ast (Ast (Ast (Var "Int-==") :@ Ast (Var v)) :@ Ast (I n))) $ (Ast $ Pack 1 0, a1):maybe [] (pure . (,) (Ast $ Pack 0 0)) onFail)]
+      h@(Ast (Pack _ _)):xs -> (++ moreCases) <$> doPack [h] deeper xs a
+      _ -> error $ "bad case: " ++ show p
 
       where
-      moreCases = maybe [] ((pure . (,) (Ast $ Var "_"))) onFail
+      moreCases = maybe [] (pure . (,) (Ast $ Var "_")) onFail
       doPack acc dpr [] body = (:moreCases) . (,) (foldl1 ((Ast .) . (:@)) acc) <$> g dpr body
       doPack acc dpr (h:rest) body = do
         gv <- Ast . Var <$> genVar
