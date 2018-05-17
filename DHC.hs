@@ -268,10 +268,7 @@ methods = M.fromList
     io = TApp (TC "IO")
 
 dictSolve :: [((String, String), String)] -> Map String Type -> Ast -> Ast
-dictSolve dsoln soln (Ast ast) = case ast of
-  u :@ v  -> Ast $ rec u :@ rec v
-  Lam ss a -> Ast $ Lam ss $ rec a
-  Cas e alts -> Ast $ Cas (rec e) $ second rec <$> alts
+dictSolve dsoln soln = ffix $ \h (Ast ast) -> case ast of
   Placeholder ">>=" t -> aVar "snd" @@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
   Placeholder "pure" t -> aVar "fst" @@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
   Placeholder "==" t -> rec $ Ast $ Placeholder "Eq" $ typeSolve soln t
@@ -285,7 +282,7 @@ dictSolve dsoln soln (Ast ast) = case ast of
   Placeholder d t -> case typeSolve soln t of
     TV v -> Ast $ Var $ fromMaybe (error $ "unsolvable: " ++ show (d, v)) $ lookup (d, v) dsoln
     u -> findInstance d u
-  _       -> Ast ast
+  _       -> Ast $ h ast
   where
     aVar = Ast . Var
     infixl 5 @@

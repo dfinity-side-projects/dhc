@@ -179,6 +179,8 @@ header = do
     between (want "(") (want ")") (var `sepBy` want ",")
   (,) [PublicDecl ps, StoreDecl ss] <$> getInput
 
+data Stmt = Stmt Ast | StmtArr String Ast | StmtLet [(String, Ast)]
+
 toplevels :: Parser [TopLevel]
 toplevels = topDecls where
   embrace p = do
@@ -235,11 +237,7 @@ toplevels = topDecls where
     <|> (parenType <$> between (want "(") (want ")") (typeExpr `sepBy` want ","))
   parenType [x] = x
   parenType xs  = foldr1 TApp $ TC "()":xs
-  sc = do
-    (fun:args) <- funlhs
-    want "="
-    x <- expr
-    pure $ Super (fun, if null args then x else Ast $ Lam args x)
+  sc = Super <$> letDefn
   funlhs = do
     v0 <- var
     scOp v0 <|> ((v0:) <$> many var)
@@ -277,20 +275,27 @@ toplevels = topDecls where
     ss <- embrace stmt
     case ss of
       [] -> fail "empty do block"
-      ((mv, x):t) -> desugarDo x mv t
-  desugarDo x Nothing [] = pure x
-  desugarDo _ _ [] = fail "do block ends with (<-) statement"
-  desugarDo x mv ((mv1, x1):rest) = do
-    body <- desugarDo x1 mv1 rest
-    pure $ Ast $ Ast (Ast (Var ">>=") :@ x) :@ Ast (Lam [fromMaybe "_" mv] body)
-  stmt = do
+      _ -> desugarDo ss
+  desugarDo [Stmt x] = pure x
+  desugarDo [] = fail "do block must end with expression"
+  desugarDo (h:rest) = do
+    body <- desugarDo rest
+    pure $ Ast $ case h of
+      Stmt x -> Ast (Ast (Var ">>=") :@ x) :@ Ast (Lam ["_"] body)
+      StmtArr v x -> Ast (Ast (Var ">>=") :@ x) :@ Ast (Lam [v] body)
+      StmtLet ds -> Let ds body
+  stmt = stmtLet <|> do
     v <- expr
-    lArrStmt v <|> pure (Nothing, v)
+    lArrStmt v <|> pure (Stmt v)
   lArrStmt v = want "<-" >> case v of
     Ast (Var s) -> do
       x <- expr
-      pure (Just s, x)
+      pure $ StmtArr s x
     _ -> fail "want variable on left of (<-)"
+  stmtLet = do
+    want "let"
+    ds <- embrace letDefn
+    (want "in" >> Stmt . Ast . Let ds <$> expr) <|> pure (StmtLet ds)
   letExpr = do
     ds <- between (want "let") (want "in") $ embrace letDefn
     Ast . Let ds <$> expr
