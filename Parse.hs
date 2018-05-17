@@ -25,7 +25,7 @@ sbs = toShort . B.pack
 #endif
 
 type QQuoter = String -> String -> Either String String
-data LexemeType = LexString | LexNumber | LexReserved | LexVar | LexCon | LexSpecial | LexVarSym | LexQual | IndCurly | IndAngle deriving (Eq, Show)
+data LexemeType = LexString | LexNumber | LexReserved | LexVar | LexCon | LexSpecial | LexVarSym | LexQual | IndError | IndCurly | IndAngle deriving (Eq, Show)
 type Lexeme = (SourcePos, (LexemeType, String))
 type Lexer = Parsec String QQuoter
 
@@ -141,7 +141,7 @@ algL ((p, (IndCurly, _)):ts) [] | n > 0 = insL p "{" $ algL ts [n]
   where n = sourceColumn p
 algL ((p, (IndCurly, _)):ts) ms = insL p "{" $ insL p "}" $ algL ((p, (IndAngle, "")):ts) ms
 algL ((p, (LexSpecial, "}")):ts) (0:ms) = insL p "}" $ algL ts ms
-algL ((_, (LexSpecial, "}")):_) _ = error "TODO: better parse error handling"
+algL ((p, (LexSpecial, "}")):_) _ = [(p, (IndError, "unmatched }"))]
 -- We zero the source column of explicit open braces.
 -- TODO: It should be the other way around: implicit open braces should have
 -- their source column zeroed, while explicit ones should have their true
@@ -152,7 +152,7 @@ algL ((p, (LexSpecial, "{")):ts) ms = insL (setSourceColumn p 0) "{" $ algL ts (
 algL (t:ts) ms = t : algL ts ms
 algL [] [] = []
 algL [] (m:ms) | m /= 0 = insL (newPos "" 0 0) "}" $ algL [] ms
-               | otherwise = error "TODO: better parse error handling"
+               | otherwise = [(newPos "" 0 0, (IndError, "unmatched {"))]
 
 insL :: SourcePos -> String -> [Lexeme] -> [Lexeme]
 insL p s = ((p, (LexSpecial, s)):)
@@ -187,7 +187,8 @@ toplevels = topDecls where
     let
       next = ((:) <$> p <*> sepNext) <|> sepNext
       sepNext = (want ";" >> next) <|> (want "}" >> pure []) <|> autoClose
-      autoClose = do  -- On error, we attempt to insert "}".
+      noMatch = obtain IndError >>= fail
+      autoClose = noMatch <|> do  -- Auto-insert "}".
         when (m == 0) $ fail "cannot implicitly close an explicit open brace"
         pure []
     next
