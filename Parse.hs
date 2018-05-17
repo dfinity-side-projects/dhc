@@ -288,9 +288,7 @@ toplevels = topDecls where
     v <- expr
     lArrStmt v <|> pure (Stmt v)
   lArrStmt v = want "<-" >> case v of
-    Ast (Var s) -> do
-      x <- expr
-      pure $ StmtArr s x
+    Ast (Var s) -> StmtArr s <$> expr
     _ -> fail "want variable on left of (<-)"
   stmtLet = do
     want "let"

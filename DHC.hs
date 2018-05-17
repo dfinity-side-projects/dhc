@@ -65,7 +65,10 @@ hsToAst boost qq prog = do
   let cl = extractSecrets cl0
   (inferred, storageCons) <- inferType boost cl
   let
-    subbedDefs = (second expandCase <$>) . liftLambdas . (second snd <$>) $ inferred
+    subbedDefs =
+        (second expandCase <$>)
+      . liftLambdas
+      . (second snd <$>) $ inferred
     types = M.fromList $ second fst <$> inferred
     stripStore (TApp (TC "Store") t) = t
     stripStore _ = error "expect Store"
@@ -452,12 +455,9 @@ boostTypes b = M.fromList $ second ((,) Nothing . fst) <$> boostPrims b
 extractSecrets :: Clay -> Clay
 extractSecrets cl = cl { secrets = zip (concatMap (filterSecrets . snd) $ supers cl) $ repeat [] }
   where
-  filterSecrets = tfix $ \h (Ast ast) -> case ast of
+  filterSecrets = fixate foldMapDefault $ \h (Ast ast) -> case ast of
     Qual "my" f -> if elem f $ fst <$> publics cl then [] else [f]
     _ -> h ast
-
-tfix :: (Traversable f, Monoid b) => ((f a -> b) -> a -> b) -> a -> b
-tfix f = f $ foldMapDefault $ tfix f
 
 addDecoders :: Map String QualType -> String -> (String, [(Type, Ast)])
 addDecoders types s = (s, addDec [] ty)
@@ -625,20 +625,19 @@ liftLambdas scs = existingDefs ++ newDefs where
         (++ ('$':last names)) . show <$> [(0::Int)..]
     put (n:names, ys)
     pure n
-  g (AAst _ (x :@ y)) = fmap Ast $ (:@) <$> g x <*> g y
-  g (AAst _ (Let ds t)) = fmap Ast $ Let <$> mapM noLamb ds <*> g t where
-    noLamb (name, AAst fvs (Lam ss body)) = do
+  g :: AAst [String] -> State ([String], [(String, Ast)]) Ast
+  g = fixate mapM $ \h (AAst fvs ast) -> case ast of
+    Let ds t -> fmap Ast $ Let <$> mapM noLamb ds <*> g t where
+      noLamb (name, AAst dfvs (Lam ss body)) = do
+        n <- genName
+        body1 <- g body
+        modify $ second ((n, Ast $ Lam (dfvs ++ ss) body1):)
+        pure (name, foldl' ((Ast .) . (:@)) (Ast $ Var n) $ Ast . Var <$> dfvs)
+      noLamb (name, a) = (,) name <$> g a
+    lam@(Lam _ _) -> do
       n <- genName
-      body1 <- g body
-      modify $ second ((n, Ast $ Lam (fvs ++ ss) body1):)
-      pure (name, foldl' ((Ast .) . (:@)) (Ast $ Var n) $ Ast . Var <$> fvs)
-    noLamb (name, a) = (,) name <$> g a
-  g (AAst fvs lam@(Lam _ _)) = do
-    n <- genName
-    g $ AAst fvs $ Let [(n, AAst fvs lam)] (AAst [n] $ Var n)
-  g (AAst _ (Cas expr as)) =
-    fmap Ast $ Cas <$> g expr <*> mapM (\(p, t) -> (,) <$> g p <*> g t) as
-  g ann = pure $ deAnn ann
+      g $ AAst fvs $ Let [(n, AAst fvs lam)] (AAst [n] $ Var n)
+    _ -> Ast <$> h ast
 
 expandCase :: Ast -> Ast
 expandCase = ffix $ \h (Ast ast) -> Ast $ case ast of
