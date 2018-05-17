@@ -65,9 +65,12 @@ hsToAst boost qq prog = do
   let cl = extractSecrets cl0
   (inferred, storageCons) <- inferType boost cl
   let
+    -- TODO: Handle non-strict case expressions.
     subbedDefs =
         (second expandCase <$>)
       . liftLambdas
+      -- Saturate constructors may create lambdas, so must occur before they're lifted.
+      . (second saturateCons <$>)
       . (second snd <$>) $ inferred
     types = M.fromList $ second fst <$> inferred
     stripStore (TApp (TC "Store") t) = t
@@ -608,6 +611,21 @@ caseVars :: AstF Ast -> [String]
 caseVars (Var v) = [v]
 caseVars (Ast x :@ Ast y) = caseVars x `union` caseVars y
 caseVars _ = []
+
+saturateCons :: Ast -> Ast
+saturateCons = ffix $ \h ast -> let
+  (t:spine) = spinal [] ast
+  in case t of
+    Pack m n | n > length spine -> Ast $ Lam vars body where
+      vars = show <$> [1..n - length spine]
+      aVars = Ast . Var <$> vars
+      body = foldl' ((Ast .) . (:@)) (Ast $ Pack m n) $ (++ aVars) $ getRs spine
+    _ -> foldl' ((Ast .) . (:@)) (Ast $ h t) $ getRs spine
+  where
+  spinal sp (Ast ast) = case ast of
+    (l :@ _) -> spinal (ast:sp) l
+    _ -> (ast:sp)
+  getRs = map (saturateCons . (\(_ :@ r) -> r))
 
 liftLambdas :: [(String, Ast)] -> [(String, Ast)]
 liftLambdas scs = existingDefs ++ newDefs where
