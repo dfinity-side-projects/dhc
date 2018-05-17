@@ -3,8 +3,8 @@
 {-# LANGUAGE PackageImports #-}
 #endif
 module DHC
-  ( parseModule, AstF(..), Ast(..), Clay(..), Type(..)
-  , inferType, parseDefs, lexOffside
+  ( AstF(..), Ast(..), Clay(..), Type(..)
+  , inferType, parseDefs
   , arityFromType, hsToAst, liftLambdas
   ) where
 import Control.Arrow
@@ -14,8 +14,6 @@ import "mtl" Control.Monad.State
 #else
 import Control.Monad.Reader
 import Control.Monad.State
-import qualified Data.ByteString.Char8 as B
-import Data.ByteString.Short (ShortByteString, toShort)
 #endif
 import Data.Char
 import Data.List
@@ -27,58 +25,7 @@ import Text.Parsec hiding (State)
 
 import Ast
 import Boost
-
-sbs :: String -> ShortByteString
-#ifdef __HASTE__
-sbs = id
-type ShortByteString = String
-#else
-sbs = toShort . B.pack
-#endif
-
-data LayoutState = IndentAgain Int | LineStart | LineMiddle | AwaitBrace | Boilerplate deriving (Eq, Show)
-
--- | For some reason (too much backtracking + strict evaluation somewhere?)
--- quasiquotation parsing repeatedly visits the same quasiquoted code.
--- We use a cache so we only compile code once.
-type QQCache = Map (String, String) (Either String String)
-type QQuoter = String -> String -> Either String String
-type QQMonad = State (QQuoter, QQCache)
-type Parser = ParsecT String (LayoutState, [Int]) QQMonad
-
-program :: Parser Clay
-program = do
-  filler
-  r <- toplevels
-  eof
-  pure r
-
-data Associativity = LAssoc | RAssoc | NAssoc deriving (Eq, Show)
-
-standardFixities :: Map String (Associativity, Int)
-standardFixities = M.fromList $ concatMap (f . words)
-  [ "infixl 9 !!"
-  , "infixr 9 ."
-  , "infixr 8 ^ ^^ **"
-  , "infixl 7 * / div mod rem quot"
-  , "infixl 6 + -"
-  , "infixr 5 : ++"
-  , "infix 4 == /= < <= > >= elem notElem"
-  , "infixr 3 &&"
-  , "infixr 2 ||"
-  , "infixl 1 >> >>="
-  , "infixr 0 $ $! seq"
-  ]
-  where
-    f (assoc:prec:ops) = flip (,) (parseAssoc assoc, read prec) <$> ops
-    f _ = undefined
-    parseAssoc "infix"  = NAssoc
-    parseAssoc "infixl" = LAssoc
-    parseAssoc "infixr" = RAssoc
-    parseAssoc _ = error "BUG! bad associativity"
-
-fixity :: String -> (Associativity, Int)
-fixity o = fromMaybe (LAssoc, 9) $ M.lookup o standardFixities
+import Parse
 
 data Clay = Clay
   -- Public and secret functions are accompanied by a list of their
@@ -93,377 +40,50 @@ data Clay = Clay
   , classes :: [(String, (Type, [(String, String)]))]
   } deriving Show
 
-addSuper :: (String, Ast) -> Clay -> Clay
-addSuper sc p = p { supers = sc:supers p }
+newClay :: [TopLevel] -> Clay
+newClay ts = p1 where
+  p0 = foldl' f emptyClay ts
+  emptyClay = Clay [] [] [] M.empty [] [] [] []
+  f p t = case t of
+    Super sc -> p { supers = sc:supers p }
+    ClassDecl xs -> p { classes = xs ++ classes p }
+    GenDecl x -> p { genDecls = x:genDecls p }
+    DataDecl xs -> p { datas = xs ++ datas p }
+    PublicDecl xs -> p { publics = zip xs $ repeat [] }
+    StoreDecl xs -> p { stores = zip xs $ repeat undefined }
+  -- TODO: Report missing public functions.
+  storeCons s
+    | Just ty <- lookup s $ genDecls p0 = (s, ty)
+    | otherwise = (s, TC "Store" `TApp` TV ('@':s))
+  p1 = p0 { stores = storeCons . fst <$> stores p0 }
 
-addData :: [(String, (Maybe (Int, Int), Type))] -> Clay -> Clay
-addData xs p = p { datas = xs ++ datas p }
-
-addClass :: [(String, (Type, [(String, String)]))] -> Clay -> Clay
-addClass xs p = p { classes = xs ++ classes p }
-
-addGenDecl :: [(String, Type)] -> Clay -> Clay
-addGenDecl xs p = p { genDecls = xs ++ genDecls p }
-
-toplevels :: Parser Clay
-toplevels = foldl' (flip ($)) (Clay [] [] [] M.empty [] [] [] []) <$> topDecls where
-  topDecls = between (want "{") (want "}") (topDecl `sepBy` want ";")
-  topDecl
-      = (want "data" >> simpleType)
-    <|> (want "class" >> classDecl)
-    <|> genDecl
-    <|> sc
-    <|> pure id
-  classDecl = do
-    s <- con
-    t <- tyVar
-    void $ want "where"
-    ms <- between (want "{") (want "}") $ cDecl `sepBy` want ";"
-    pure $ addClass $ second (flip (,) [(s, t)]) <$> ms
-  cDecl = do
-    v <- var
-    void $ want "::"
-    t <- typeExpr
-    pure (v, t)
-  genDecl = try $ do
-    v <- var
-    void $ want "::"
-    t <- typeExpr
-    pure $ addGenDecl [(v, t)]
-  simpleType = do
-    s <- con
-    args <- many tyVar
-    void $ want "="
-    let
-      t = foldl' TApp (TC s) $ GV <$> args
-      typeCon = do
-        c <- con
-        ts <- many atype
-        pure (c, foldr (:->) t ts)
-    typeCons <- typeCon `sepBy1` want "|"
-    pure $ addData [(c, (Just (i, arityFromType typ), typ))
-      | (i, (c, typ)) <- zip [0..] typeCons]
-  typeExpr = foldr1 (:->) <$> btype `sepBy1` want "->"
-  btype = foldl1' TApp <$> many1 atype
-  -- Unsupported: [] (->) (,{,}) constructors.
-  atype = (TC <$> con)
-    <|> (GV <$> tyVar)
-    <|> (TApp (TC "[]") <$> between (want "[") (want "]") typeExpr)
-    <|> (parenType <$> between (want "(") (want ")") (typeExpr `sepBy` want ","))
-  parenType [x] = x
-  parenType xs  = foldr1 TApp $ TC "()":xs
-  sc = try (do
-    (fun:args) <- funlhs
-    void $ want "="
-    x <- expr
-    pure $ addSuper (fun, if null args then x else Ast $ Lam args x))
-  funlhs = scOp <|> many1 var
-  scOp = try $ do
-    l <- var
-    op <- varSym
-    r <- var
-    pure [op, l, r]
-  expr = caseExpr <|> letExpr <|> doExpr <|> bin 0 False
-  bin 10 _ = molecule
-  bin prec isR = rec False =<< bin (prec + 1) False where
-    rec isL m = try (do
-      o <- varSym <|> between (want "`") (want "`") var
-      let (a, p) = fixity o
-      when (p /= prec) $ fail ""
-      case a of
-        LAssoc -> do
-          when isR $ fail "same precedence, mixed associativity"
-          n <- bin (prec + 1) False
-          rec True $ Ast $ Ast (Ast (Var o) :@ m) :@ n
-        NAssoc -> do
-          n <- bin (prec + 1) False
-          pure $ Ast $ Ast (Ast (Var o) :@ m) :@ n
-        RAssoc -> do
-          when isL $ fail "same precedence, mixed associativity"
-          n <- bin prec True
-          pure $ Ast $ Ast (Ast (Var o) :@ m) :@ n
-      ) <|> pure m
-  letDefn = do
-    (fun:args) <- funlhs
-    void $ want "="
-    ast <- expr
-    pure (fun, if null args then ast else Ast $ Lam args ast)
-  doExpr = do
-    void $ want "do"
-    ss <- between (want "{") (want "}") $ stmt `sepBy` want ";"
-    case ss of
-      [] -> fail "empty do block"
-      ((mv, x):t) -> desugarDo x mv t
-  desugarDo x Nothing [] = pure x
-  desugarDo _ _ [] = fail "do block ends with (<-) statement"
-  desugarDo x mv ((mv1, x1):rest) = do
-    body <- desugarDo x1 mv1 rest
-    pure $ Ast $ Ast (Ast (Var ">>=") :@ x) :@ Ast (Lam [fromMaybe "_" mv] body)
-  stmt = do
-    v <- expr
-    lArrStmt v <|> pure (Nothing, v)
-  lArrStmt v = want "<-" >> case v of
-    Ast (Var s) -> do
-      x <- expr
-      pure (Just s, x)
-    _ -> fail "want variable on left of (<-)"
-  letExpr = do
-    ds <- between (want "let") (want "in") $
-      between (want "{") (want "}") $ letDefn `sepBy` want ";"
-    Ast . Let ds <$> expr
-  caseExpr = do
-    x <- between (want "case") (want "of") expr
-    as <- catMaybes <$> between (want "{") (want "}") (alt `sepBy` want ";")
-    when (null as) $ fail "empty case"
-    pure $ Ast $ Cas x as
-  alt = try (do
-    p <- expr
-    void $ want "->"
-    x <- expr
-    pure $ Just (p, x)) <|> pure Nothing
-  -- TODO: Introduce patterns to deal with _.
-  lambda = fmap Ast $ Lam <$> between (want "\\") (want "->") (many1 (var <|> want "_")) <*> expr
-  molecule = lambda <|> foldl1' ((Ast .) . (:@)) <$> many1 atom
-  atom = tup <|> qvar
-    <|> (Ast . Var <$> want "_")
-    <|> (Ast . Var <$> var)
-    <|> (Ast . Var <$> con)
-    <|> num <|> str <|> lis <|> enumLis
-  tup = try $ do
-    xs <- between (want "(") (want ")") $ expr `sepBy` want ","
-    pure $ case xs of  -- Abuse Pack to represent tuples.
-      [] -> Ast $ Pack 0 0
-      [x] -> x
-      _ -> foldl' ((Ast .) . (:@)) (Ast $ Pack 0 $ length xs) xs
-  enumLis = try $ between (want "[") (want "]") $ do
-    a <- expr
-    void $ want ".."
-    b <- expr
-    pure $ Ast $ Ast (Ast (Var "enumFromTo") :@ a) :@ b
-  lis = try $ do
-    items <- between (want "[") (want "]") $ expr `sepBy` want ","
-    pure $ foldr (\a b -> Ast (Ast (Ast (Var ":") :@ a) :@ b)) (Ast $ Var "[]") items
-  splitDot s = second tail $ splitAt (fromJust $ elemIndex '.' s) s
-  qvar = try $ do
-    (t, s) <- tok
-    when (t /= LexQual) $ fail ""
-    pure $ Ast $ uncurry Qual $ splitDot s
-  num = try $ do
-    (t, s) <- tok
-    when (t /= LexNumber) $ fail ""
-    pure $ Ast $ I $ read s
-  str = try $ do
-    (t, s) <- tok
-    when (t /= LexString) $ fail ""
-    pure $ Ast $ S $ sbs s
-  con = try $ do
-    (t, s) <- tok
-    when (t /= LexCon) $ fail ""
-    pure s
-  tyVar = varId
-
-varId :: Parser String
-varId = try $ do
-  (t, s) <- tok
-  when (t /= LexVar) $ fail ""
-  pure s
-
-varSym :: Parser String
-varSym = do
-  (t, s) <- tok
-  when (t /= LexVarSym) $ fail ""
-  pure s
-
-var :: Parser String
-var = varId <|> try (between (want "(") (want ")") varSym)
-
-reservedIds :: [String]
-reservedIds = words "class data default deriving do else foreign if import in infix infixl infixr instance let module newtype of then type where _"
-
-reservedOps :: [String]
-reservedOps = ["..", "::", "=", "|", "<-", "->", "=>"]
-
-want :: String -> Parser String
-want t = expect <|> autoCloseBrace where
-  autoCloseBrace = if t /= "}" then fail "" else do
-    (ty, x) <- lookAhead tok
-    if ty == LexSpecial && x == ")" || x == "]" then do
-      (st, is) <- getState
-      case is of
-        (m:ms) | m /= 0 -> do
-          putState (st, ms)
-          pure "}"
-        _ -> fail "missing }"
-    else fail "missing }"
-  expect = try $ do
-    (ty, s) <- tok
-    unless (ty /= LexString && s == t) $ fail $ "expected " ++ t
-    pure s
-
-data LexemeType = LexString | LexNumber | LexReserved | LexVar | LexCon | LexSpecial | LexVarSym | LexQual | LexEOF deriving (Eq, Show)
-type Lexeme = (LexemeType, String)
-
--- | Layout-aware lexer.
--- See https://www.haskell.org/onlinereport/haskell2010/haskellch10.html
-tok :: Parser Lexeme
-tok = do
-  filler
-  (st, is) <- getState
+hsToAst :: Boost -> QQuoter -> String -> Either String Clay
+hsToAst boost qq prog = do
+  cl0 <- showErr $ newClay <$> parseDfnHs qq prog
+  let missing = (fst <$> publics cl0) \\ (fst <$> supers cl0)
+  unless (null missing) $ Left $ "missing public functions: " ++ show missing
+  let cl = extractSecrets cl0
+  (inferred, storageCons) <- inferType boost cl
   let
-    autoContinueBrace n = case is of
-      (m : _)  | m == n -> pure (LexSpecial, ";")
-      (m : ms) | n < m -> do
-        putState (IndentAgain n, ms)
-        pure (LexSpecial, "}")
-      _ -> rawTok
-    explicitBrace = try $ do
-      r <- rawTok
-      when (r /= (LexSpecial, "{")) $ fail "bad indentation"
-      putState (LineMiddle, 0:is)
-      pure r
-    end = do
-      eof
-      case is of
-        0:_ -> fail "unmatched '{'"
-        [] -> pure (LexEOF, "")
-        _:ms -> do
-          putState (st, ms)
-          pure (LexSpecial, "}")
-  end <|> case st of
-    IndentAgain col -> do
-      putState (LineMiddle, is)
-      autoContinueBrace col
-    LineStart -> do
-      col <- sourceColumn <$> getPosition
-      putState (LineMiddle, is)
-      autoContinueBrace col
-    AwaitBrace -> explicitBrace <|> do
-      n <- sourceColumn <$> getPosition
-      case is of
-        (m : _) | n > m -> do
-          putState (LineMiddle, n : is)
-          pure (LexSpecial, "{")
-        [] | n > 0 -> do
-          putState (LineMiddle, [n])
-          pure (LexSpecial, "{")
-        -- Empty blocks unsupported (see Note 2 in above link).
-        _ -> fail "TODO"
-    _ -> do
-      r <- rawTok
-      when (r == (LexSpecial, "}")) $ case is of
-        (0 : _) -> modifyState $ second tail
-        _ -> fail "unmatched }"
-      pure r
-
-rawTok :: Parser Lexeme
-rawTok = oxford <|> symbol <|> qId <|> num <|> special <|> str
+    subbedDefs = (second expandCase <$>) . liftLambdas . (second snd <$>) $ inferred
+    types = M.fromList $ second fst <$> inferred
+    stripStore (TApp (TC "Store") t) = t
+    stripStore _ = error "expect Store"
+  pure cl
+    { publics = addDecoders types . fst <$> publics cl
+    , secrets = addDecoders types . fst <$> secrets cl
+    , supers = subbedDefs
+    , funTypes = types
+    , stores = second (stripStore . typeSolve storageCons) <$> stores cl }
   where
-  oxford = do
-    q <- try $ between (char '[') (char '|') $ many alphaNum
-    s <- oxfordClose <|> more
-    (f, cache) <- get
-    answer <- case M.lookup (q, s) cache of
-      Nothing -> do
-        let x = f q s
-        put (f, M.insert (q, s) x cache)
-        pure x
-      Just x -> pure x
-    either (fail . ("quasiquotation: " ++)) (pure . (,) LexString) answer
-    where
-    oxfordClose = try (string "|]") >> pure ""
-    more = do
-      s <- innerOxford <|> (pure <$> anyChar)
-      (s ++) <$> (oxfordClose <|> more)
-    innerOxford = do
-      q <- try $ between (char '[') (char '|') $ many alphaNum
-      s <- oxfordClose <|> more
-      pure $ '[':q ++ ('|':s) ++ "|]"
-  lowId = do
-    s <- (:) <$> (lower <|> char '_') <*> many (alphaNum <|> oneOf "_'")
-    when (s `elem` ["let", "where", "do", "of"]) $ do
-      (_, is) <- getState
-      putState (AwaitBrace, is)
-    pure (if s `elem` reservedIds then LexReserved else LexVar, s)
-  uppId = do
-    s <- (:) <$> upper <*> many (alphaNum <|> oneOf "_'")
-    pure (LexCon, s)
-  qId = do
-    r@(_, m) <- lowId <|> uppId
-    try (do
-      void $ char '.'
-      (_, v) <- lowId <|> uppId
-      pure (LexQual, m ++ '.':v)) <|> pure r
-  num = do
-    s <- many1 digit
-    pure (LexNumber, s)
-  special = (,) LexSpecial <$> foldl1' (<|>) (string . pure <$> "(),;[]`{}")
-  symbol = do
-    s <- many1 (oneOf "!#$%&*+./<=>?@\\^|-~:")
-    pure (if s `elem` reservedOps then LexReserved else LexVarSym, s)
-  str = do
-    void $ char '"'
-    s <- many $ (char '\\' >> escapes) <|> noneOf "\""
-    void $ char '"'
-    pure (LexString, s)
-  escapes = foldl1' (<|>)
-    [ char '\\' >> pure '\\'
-    , char '"' >> pure '"'
-    , char 'n' >> pure '\n'
-    ]
-
-filler :: Parser ()
-filler = void $ many $ void (char ' ') <|> nl <|> com
-  where
-  hsNewline = (char '\r' >> optional (char '\n')) <|> void (oneOf "\n\f")
-  com = do
-    void $ between (try $ string "--") hsNewline $ many $ noneOf "\r\n\f"
-    (st, is) <- getState
-    when (st == LineMiddle) $ putState (LineStart, is)
-  nl = do
-    hsNewline
-    (st, is) <- getState
-    when (st == LineMiddle) $ putState (LineStart, is)
-
-contract :: Parser Clay
-contract = do
-  ws <- option [] $ try $ want "public" >>
-    between (want "(") (want ")") (var `sepBy` want ",")
-  ps <- option [] $ try $ want "store" >>
-    between (want "(") (want ")") (var `sepBy` want ",")
-  putState (AwaitBrace, [])
-  p <- toplevels
-  when (isNothing $ mapM (`lookup` supers p) ws) $ fail "bad publics"
-  let
-    storeCons s
-      | Just ty <- lookup s $ genDecls p = (s, ty)
-      | otherwise = (s, TC "Store" `TApp` TV ('@':s))
-    withNulls = (`zip` repeat [])
-  pure p { publics = withNulls ws, stores = storeCons <$> ps }
-
-qParse :: Parser a
-  -> (LayoutState, [Int])
-  -> String
-  -> String
-  -> Either ParseError a
-qParse a b c d = evalState (runParserT a b c d) (justHere, M.empty)
+  showErr = either (Left . show) Right
 
 justHere :: QQuoter
 justHere "here" s = Right s
 justHere _ _ = Left "bad scheme"
 
-lexOffside :: String -> Either ParseError [String]
-lexOffside = fmap (fmap snd) <$> qParse tokUntilEOF (AwaitBrace, []) "" where
-  tokUntilEOF = do
-    t <- tok
-    case fst t of
-      LexEOF -> pure []
-      _ -> (t:) <$> tokUntilEOF
-
 parseDefs :: String -> Either ParseError Clay
-parseDefs = qParse program (AwaitBrace, []) ""
-
-parseModule :: String -> Either ParseError Clay
-parseModule = qParse contract (Boilerplate, []) ""
+parseDefs s = newClay <$> parseDfnHs justHere s
 
 -- The Constraints monad combines a State monad and an Either monad.
 -- The state consists of the set of constraints and next integer available
@@ -841,25 +461,6 @@ extractSecrets cl = cl { secrets = zip (concatMap (filterSecrets . snd) $ supers
 
 tfix :: (Traversable f, Monoid b) => ((f a -> b) -> a -> b) -> a -> b
 tfix f = f $ foldMapDefault $ tfix f
-
-hsToAst :: Boost -> QQuoter -> String -> Either String Clay
-hsToAst boost qq prog = do
-  cl0 <- showErr $ evalState (runParserT contract (Boilerplate, []) "" prog) (qq, M.empty)
-  let cl = extractSecrets cl0
-  (inferred, storageCons) <- inferType boost cl
-  let
-    subbedDefs = (second expandCase <$>) . liftLambdas . (second snd <$>) $ inferred
-    types = M.fromList $ second fst <$> inferred
-    stripStore (TApp (TC "Store") t) = t
-    stripStore _ = error "expect Store"
-  pure cl
-    { publics = addDecoders types . fst <$> publics cl
-    , secrets = addDecoders types . fst <$> secrets cl
-    , supers = subbedDefs
-    , funTypes = types
-    , stores = second (stripStore . typeSolve storageCons) <$> stores cl }
-  where
-  showErr = either (Left . show) Right
 
 addDecoders :: Map String QualType -> String -> (String, [(Type, Ast)])
 addDecoders types s = (s, addDec [] ty)

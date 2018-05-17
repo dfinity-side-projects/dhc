@@ -15,6 +15,7 @@ import Asm
 import Boost
 import DHC
 import Hero
+import Parse
 import SoloSyscall
 import Std
 import Demo
