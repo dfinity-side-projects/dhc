@@ -624,7 +624,7 @@ saturateCons = ffix $ \h ast -> let
   where
   spinal sp (Ast ast) = case ast of
     (l :@ _) -> spinal (ast:sp) l
-    _ -> (ast:sp)
+    _ -> ast:sp
   getRs = map (saturateCons . (\(_ :@ r) -> r))
 
 liftLambdas :: [(String, Ast)] -> [(String, Ast)]

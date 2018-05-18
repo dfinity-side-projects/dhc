@@ -1,7 +1,4 @@
 {-# LANGUAGE CPP #-}
-#ifdef __HASTE__
-{-# LANGUAGE PackageImports #-}
-#endif
 module Encode
   ( encodeWasm
   , protoWasm
@@ -21,31 +18,26 @@ module Encode
 
 import Control.Arrow
 #ifdef __HASTE__
-import "mtl" Control.Monad.State
-import Data.Map.Strict (Map)
+import qualified Data.Set as IS
+import qualified Data.Map.Strict as IM
 #else
-import Control.Monad.State
-import Data.Map.Strict (Map, restrictKeys)
+import Data.IntMap.Strict (restrictKeys)
+import qualified Data.IntSet as IS
+import qualified Data.IntMap.Strict as IM
 #endif
 import Data.Bits
 import Data.Char
 import Data.List
-import qualified Data.Map.Strict as M
-import Data.Set (Set)
-import qualified Data.Set as S
 import WasmOp
 
 #ifdef __HASTE__
-restrictKeys :: Ord k => Map k a -> Set k -> Map k a
-restrictKeys m s = M.filterWithKey (\k _ -> S.member k s) m
+type IntMap = IM.Map Int
+type IntSet = IS.Set Int
+restrictKeys :: IntMap a -> IntSet -> IntMap a
+restrictKeys m s = IM.filterWithKey (\k _ -> IS.member k s) m
 #endif
 
 type FuncType = ([WasmType], [WasmType])
-data WasmFun = WasmFun
-  { typeSig :: FuncType
-  , localVars :: [WasmType]
-  , funBody :: [WasmOp]
-  } deriving Show
 
 wasmHeader :: [Int]
 wasmHeader = [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]  -- Magic string, version.
@@ -240,50 +232,14 @@ sectCustom s xs p = p { customs = (s, xs):customs p }
 trim :: ProtoWasm -> ProtoWasm
 trim p = p
   { imports = liveImps
-  , functions = M.elems liveFuns
-  , exports = second (liveRenames M.!) <$> exports p
-  , tableEntries = second (map (liveRenames M.!)) <$> tableEntries p
-  , martinFuns = first (liveRenames M.!) <$> martinFuns p
+  , functions = IM.elems liveFuns
+  , exports = second (liveRenames IM.!) <$> exports p
+  , tableEntries = second (map (liveRenames IM.!)) <$> tableEntries p
+  , martinFuns = first (liveRenames IM.!) <$> martinFuns p
   }
   where
-  nonImports = M.fromList $ zip [length $ imports p..] $ functions p
+  nonImports = IM.fromList $ zip [length $ imports p..] $ functions p
   liveCalls = followCalls ((snd <$> exports p) `union` concatMap snd (tableEntries p)) $ funBody <$> nonImports
-  liveRenames = M.fromList $ zip (S.elems liveCalls) [0..]
-  liveImps = map snd $ filter ((`M.member` liveRenames) . fst) $ zip [0..] $ imports p
-  liveFuns = (\wf -> wf { funBody = renumberCalls liveRenames $ funBody wf }) <$> restrictKeys nonImports (M.keysSet liveRenames)
-
-followCalls :: [Int] -> Map Int [WasmOp] -> Set Int
-followCalls ns m = execState (go ns) $ S.fromList ns where
-  go :: [Int] -> State (Set Int) ()
-  go (n:rest) = do
-    maybe (pure ()) tr $ M.lookup n m
-    go rest
-  go [] = pure ()
-  tr (w:rest) = do
-    case w of
-      Call i -> do
-        s <- get
-        when (S.notMember i s) $ do
-          put $ S.insert i s
-          go [i]
-      Loop _ b -> tr b
-      Block _ b -> tr b
-      If _ t f -> do
-        tr t
-        tr f
-      _ -> pure ()
-    tr rest
-  tr [] = pure ()
-
-renumberCalls :: Map Int Int -> [WasmOp] -> [WasmOp]
-renumberCalls m ws = case ws of
-  [] -> []
-  (w:rest) -> ren w:rec rest
-  where
-  rec = renumberCalls m
-  ren w = case w of
-    Call i -> Call $ m M.! i
-    Loop t b -> Loop t $ rec b
-    Block t b -> Block t $ rec b
-    If t a b -> If t (rec a) (rec b)
-    x -> x
+  liveRenames = IM.fromList $ zip (IS.elems liveCalls) [0..]
+  liveImps = map snd $ filter ((`IM.member` liveRenames) . fst) $ zip [0..] $ imports p
+  liveFuns = (\wf -> wf { funBody = renumberCalls liveRenames $ funBody wf }) <$> restrictKeys nonImports (IM.keysSet liveRenames)

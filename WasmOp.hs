@@ -1,15 +1,44 @@
+{-# LANGUAGE CPP #-}
+#ifdef __HASTE__
+{-# LANGUAGE PackageImports #-}
+#endif
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DeriveGeneric #-}
-module WasmOp (WasmType(..), CustomWasmOp(..), WasmOp, zeroOperandOps, rZeroOps) where
+module WasmOp
+  ( WasmType(..), CustomWasmOp(..), WasmOp, zeroOperandOps, rZeroOps
+  , followCalls, renumberCalls, WasmFun(..)
+  ) where
+#ifdef __HASTE__
+import "mtl" Control.Monad.State
+import qualified Data.Set as IS
+import qualified Data.Map.Strict as IM
+#else
+import Control.Monad.State
+import Data.IntMap.Strict (IntMap)
+import qualified Data.IntMap.Strict as IM
+import Data.IntSet (IntSet)
+import qualified Data.IntSet as IS
+#endif
 import Data.Binary (Binary)
 import Data.Int
 import Data.Void
 import GHC.Generics (Generic)
 
+#ifdef __HASTE__
+type IntMap = IM.Map Int
+type IntSet = IS.Set Int
+#endif
+
 data WasmType = I32 | I64 | F32 | F64 | Func | AnyFunc | Nada
   | Ref String  -- Custom types used by Dfinity.
   deriving (Read, Show, Eq, Ord, Generic)
 instance Binary WasmType
+
+data WasmFun = WasmFun
+  { typeSig :: ([WasmType], [WasmType])
+  , localVars :: [WasmType]
+  , funBody :: [WasmOp]
+  } deriving Show
 
 -- Much of this file was generated from:
 --   http://webassembly.org/docs/binary-encoding/
@@ -40,3 +69,39 @@ zeroOperandOps = cmpOps ++ ariOps ++ crops ++ others ++ parametrics where
 
 rZeroOps :: [(WasmOp, Int)]
 rZeroOps = (\(a, b) -> (b, a)) <$> zeroOperandOps
+
+followCalls :: [Int] -> IntMap [WasmOp] -> IntSet
+followCalls ns m = execState (go ns) $ IS.fromList ns where
+  go :: [Int] -> State IntSet ()
+  go (n:rest) = do
+    maybe (pure ()) tr $ IM.lookup n m
+    go rest
+  go [] = pure ()
+  tr (w:rest) = do
+    case w of
+      Call i -> do
+        s <- get
+        when (IS.notMember i s) $ do
+          put $ IS.insert i s
+          go [i]
+      Loop _ b -> tr b
+      Block _ b -> tr b
+      If _ t f -> do
+        tr t
+        tr f
+      _ -> pure ()
+    tr rest
+  tr [] = pure ()
+
+renumberCalls :: IntMap Int -> [WasmOp] -> [WasmOp]
+renumberCalls m ws = case ws of
+  [] -> []
+  (w:rest) -> ren w:rec rest
+  where
+  rec = renumberCalls m
+  ren w = case w of
+    Call i -> Call $ m IM.! i
+    Loop t b -> Loop t $ rec b
+    Block t b -> Block t $ rec b
+    If t a b -> If t (rec a) (rec b)
+    x -> x
