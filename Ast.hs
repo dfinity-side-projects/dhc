@@ -8,7 +8,7 @@ module Ast
   , AAst(..)
   , AstF(..)
   , deAnn
-  , fixate
+  , bifix
   , ffix
   , Type(..)
   ) where
@@ -42,11 +42,11 @@ data AAst a = AAst a (AstF (AAst a)) deriving (Show, Functor)
 deAnn :: AAst a -> Ast
 deAnn = ffix $ \h (AAst _ ast) -> Ast $ h ast
 
-fixate :: (a -> b) -> (b -> a) -> a
-fixate g f = f $ g $ fixate g f
+bifix :: (a -> b) -> (b -> a) -> a
+bifix g f = f $ g $ bifix g f
 
 ffix :: Functor f => ((f a -> f b) -> a -> b) -> a -> b
-ffix = fixate fmap
+ffix = bifix fmap
 
 infixr 5 :->
 data Type = TC String | TApp Type Type | Type :-> Type

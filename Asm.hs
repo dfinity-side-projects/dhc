@@ -132,15 +132,14 @@ astToIns cl = (WasmMeta
   , strEndHP = hp1
   , strAddrs = addrs
   , storeTypes = snd <$> stores cl
-  , callEncoders = M.fromList helps
-  }, ins) where
-  compilerOut = second (compile $ fst <$> stores cl) <$> supers cl
-  ciTypes = foldl' union [] $ callIndirectTypes . snd . snd <$> compilerOut
-  helps = concat $ helpers . snd . snd <$> compilerOut
-  ins = M.fromList $ second fst <$> compilerOut
-  (hp1, addrs) = mkStrConsts $ nub $ concat $ stringConstants . snd . snd <$> compilerOut
-  funs = M.fromList $ ((\(name, Ast (Lam as _)) -> (name, length as)) <$> supers cl)
-    ++ concatMap (\n -> [("#set-" ++ show n, 1), ("#get-" ++ show n, 0)]) [0..length (stores cl) - 1]
+  , callEncoders = M.fromList $ concatMap helpers cs
+  }, fst <$> compilerOut) where
+  compilerOut = (compile $ fst <$> stores cl) <$> supers cl
+  cs = snd <$> M.elems compilerOut
+  ciTypes = foldl' union [] $ callIndirectTypes <$> cs
+  (hp1, addrs) = mkStrConsts $ nub $ concatMap stringConstants cs
+  funs = M.union ((\(Ast (Lam as _)) -> length as) <$> supers cl) $
+    M.fromList $ concatMap (\n -> [("#set-" ++ show n, 1), ("#get-" ++ show n, 0)]) [0..length (stores cl) - 1]
   -- Argument decoders only use a certain subset of functions.
   compileDecoders = second $ fmap $ second (fst . compile [])
 

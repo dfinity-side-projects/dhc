@@ -33,16 +33,16 @@ data Clay = Clay
   , secrets :: [(String, [(Type, Ast)])]
   , stores :: [(String, Type)]
   , funTypes :: Map String QualType
-  , supers :: [(String, Ast)]
+  , supers :: Map String Ast
   , genDecls :: [(String, Type)]
-  , datas :: [(String, (Maybe (Int, Int), Type))]
+  , datas :: Map String (Maybe (Int, Int), Type)
   , methods :: Map String (Type, [(String, String)])
   } deriving Show
 
 newClay :: [TopLevel] -> Either String Clay
 newClay ts = do
   p0 <- foldM f emptyClay ts
-  let missing = (fst <$> publics p0) \\ (fst <$> supers p0)
+  let missing = (fst <$> publics p0) \\ (M.keys $ supers p0)
   unless (null missing) $ Left $ "missing public functions: " ++ show missing
   let
     storeCons s
@@ -50,16 +50,16 @@ newClay ts = do
       | otherwise = (s, TC "Store" `TApp` TV ('@':s))
   pure $ p0 { stores = storeCons . fst <$> stores p0 }
   where
-  emptyClay = Clay [] [] [] M.empty [] [] [] M.empty
+  emptyClay = Clay [] [] [] M.empty M.empty [] M.empty M.empty
   f p t = Right $ case t of
-    Super sc -> p { supers = sc:supers p }
+    Super (name, ast) -> p { supers = M.insert name ast $ supers p }
     ClassDecl s ty xs -> p { methods = m1 }
       where
       m1 = foldl' addMethod (methods p) xs
       addMethod m (mName, mType) = M.insert mName (mType, [(s, ty)]) m
     InstanceDecl _ _ _ -> error "TODO: instance"
     GenDecl x -> p { genDecls = x:genDecls p }
-    DataDecl xs -> p { datas = xs ++ datas p }
+    DataDecl xs -> p { datas = foldl' (\m (k, v) -> M.insert k v m) (datas p) xs }
     PublicDecl xs -> p { publics = zip xs $ repeat [] }
     StoreDecl xs -> p { stores = zip xs $ repeat undefined }
 
@@ -69,8 +69,8 @@ hsToAst boost qq prog = do
   preludeDefs <- parseDefs $ boostPrelude boost
   let
     cl = extractSecrets cl0
-      { supers = supers preludeDefs ++ supers cl0
-      , datas = datas preludeDefs ++ datas cl0
+      { supers = supers preludeDefs `M.union` supers cl0
+      , datas = datas preludeDefs `M.union` datas cl0
       , methods = methods preludeDefs `M.union` methods cl0
       }
   (inferred, storageCons) <- inferType boost cl
@@ -88,7 +88,7 @@ hsToAst boost qq prog = do
   pure cl
     { publics = addDecoders types . fst <$> publics cl
     , secrets = addDecoders types . fst <$> secrets cl
-    , supers = subbedDefs
+    , supers = M.fromList subbedDefs
     , funTypes = types
     , stores = second (stripStore . typeSolve storageCons) <$> stores cl }
   where
@@ -451,9 +451,9 @@ boostTypes b = M.fromList $ second ((,) Nothing . fst) <$> boostPrims b
 
 -- | Find functions used as funrefs but not declared public.
 extractSecrets :: Clay -> Clay
-extractSecrets cl = cl { secrets = zip (concatMap (filterSecrets . snd) $ supers cl) $ repeat [] }
+extractSecrets cl = cl { secrets = zip (concatMap filterSecrets $ M.elems $ supers cl) $ repeat [] }
   where
-  filterSecrets = fixate foldMapDefault $ \h (Ast ast) -> case ast of
+  filterSecrets = bifix foldMapDefault $ \h (Ast ast) -> case ast of
     Qual "my" f -> if elem f $ fst <$> publics cl then [] else [f]
     _ -> h ast
 
@@ -474,10 +474,10 @@ inferType
   -> Clay
   -- Returns types of definitions and stores.
   -> Either String ([(String, (QualType, Ast))], Map String Type)
-inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJust $ lookup k ds))) sortedDefs where
+inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, ds M.! k))) sortedDefs where
   ds = supers cl
   -- Groups of definitions, sorted in the order we should infer their types.
-  sortedDefs = reverse $ scc (callees cl ds) $ fst <$> ds
+  sortedDefs = reverse $ scc (callees cl ds) $ M.keys ds
   -- List notation is a special case in Haskell.
   -- This is "data [a] = [] | a : [a]" in spirit.
   listPresets = M.fromList
@@ -485,7 +485,7 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJ
     , (":",  (Just (1, 2), a :-> TApp (TC "[]") a :-> TApp (TC "[]") a))
     ] where a = GV "a"
   globs = listPresets
-    `M.union` M.fromList (datas cl)
+    `M.union` datas cl
     `M.union` boostTypes boost
     `M.union` M.fromList (second ((,) Nothing) <$> stores cl)
   inferMutual :: ([(String, (QualType, Ast))], Map String Type) -> [(String, Ast)] -> Either String ([(String, (QualType, Ast))], Map String Type)
@@ -528,12 +528,12 @@ checkPubSecs cl (soln, ctx) s
 -- all dependencies. If a node has already been processed, we should avoid
 -- finding all its dependencies again. We can do this by passing in a list of
 -- nodes that have already been explored.
-callees :: Clay -> [(String, Ast)] -> String -> [String]
+callees :: Clay -> Map String Ast -> String -> [String]
 callees cl ds s = snd $ execState (go s) ([], []) where
   go :: String -> State ([String], [String]) ()
   go f = do
     (env, acc) <- get
-    unless (elem f (env ++ acc) || M.member f (methods cl)) $ case lookup f ds of
+    unless (elem f (env ++ acc) || M.member f (methods cl)) $ case M.lookup f ds of
       -- TODO: If we knew the primitives (functions implemented in wasm, such
       -- as `*`), then we could detect out-of-scope identifiers here.
       Nothing -> pure ()  -- error $ "not in scope: " ++ f
@@ -637,7 +637,7 @@ liftLambdas scs = existingDefs ++ newDefs where
     put (n:names, ys)
     pure n
   g :: AAst [String] -> State ([String], [(String, Ast)]) Ast
-  g = fixate mapM $ \h (AAst fvs ast) -> case ast of
+  g = bifix mapM $ \h (AAst fvs ast) -> case ast of
     Let ds t -> fmap Ast $ Let <$> mapM noLamb ds <*> g t where
       noLamb (name, AAst dfvs (Lam ss body)) = do
         n <- genName
