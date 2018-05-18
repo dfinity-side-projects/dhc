@@ -159,7 +159,8 @@ insL p s = ((p, (LexSpecial, s)):)
 
 type Parser = Parsec [Lexeme] ()
 data TopLevel = Super (String, Ast)
-  | ClassDecl [(String, (Type, [(String, String)]))]
+  | ClassDecl String String [(String, Type)]
+  | InstanceDecl String String [(String, Ast)]
   | GenDecl (String, Type)
   | DataDecl [(String, (Maybe (Int, Int), Type))]
   | PublicDecl [String]
@@ -197,24 +198,32 @@ toplevels = topDecls where
   topDecls = embrace topDecl
   topDecl = (want "data" >> simpleType)
     <|> (want "class" >> classDecl)
+    <|> (want "instance" >> instanceDecl)
     -- TODO: Left-factor genDecl and sc.
-    <|> genDecl <|> sc
+    <|> (GenDecl <$> genDecl) <|> sc
   classDecl = do
     s <- con
     t <- tyVar
     want "where"
     ms <- embrace cDecl
-    pure $ ClassDecl $ second (flip (,) [(s, t)]) <$> ms
-  cDecl = do
-    v <- var
-    want "::"
-    t <- typeExpr
-    pure (v, t)
+    pure $ ClassDecl s t ms
+  instanceDecl = do
+    s <- con
+    t <- tyVar
+    want "where"
+    ms <- embrace iDecl
+    pure $ InstanceDecl s t ms
+  cDecl = genDecl
+  iDecl = do
+    (fun:args) <- funlhs
+    want "="
+    ast <- expr
+    pure (fun, if null args then ast else Ast $ Lam args ast)
   genDecl = try $ do
     v <- var
     want "::"
     t <- typeExpr
-    pure $ GenDecl (v, t)
+    pure (v, t)
   simpleType = do
     s <- con
     args <- many tyVar

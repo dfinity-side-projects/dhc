@@ -11,7 +11,7 @@ stdBoost :: Boost
 stdBoost = Boost
   -- No Wasm Imports
   []
-  -- Prelude functions.
+  -- Prelude definitions.
   (unlines
   [ "data Bool = False | True"
   , "data Maybe a = Nothing | Just a"
@@ -21,7 +21,7 @@ stdBoost = Boost
   , "f . g = \\x -> f (g x)"
   , "flip f = \\x y -> f y x"
   , "fromJust m = case m of {Just x -> x}"
-  -- TODO: Add `class` and `instance` keywords to clean up the following:
+  -- TODO: Use `instance` to clean up the following:
   , "maybe_pure x = Just x"
   , "maybe_monad x f = case x of { Nothing -> Nothing; Just a -> f a }"
   , "io_pure x rw = (x, rw)"
@@ -32,6 +32,15 @@ stdBoost = Boost
   , "when b t = bool (pure ()) t b"
   , "f $ x = f x"
   , "id x = x"
+  , "class Eq a where (==) :: a -> a -> Bool"
+  , "class Monad m where"
+  , "  (>>=) :: m a -> (a -> m b) -> m b"
+  , "  pure :: a -> m a"
+  -- Generates call_indirect ops.
+  , "class Message a where callSlot :: I32 -> a -> IO ()"
+  , "class Storage a where"
+  , "  set :: Store a -> a -> IO ()"
+  , "  get :: Store a -> IO a"
   ])
   -- Haskell functions defined in wasm.
   [ ("+", (TC "Int" :-> TC "Int" :-> TC "Int", intAsm I64_add))

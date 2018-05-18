@@ -4,7 +4,7 @@
 #endif
 module DHC
   ( AstF(..), Ast(..), Clay(..), Type(..)
-  , inferType, parseDefs
+  , parseDefs
   , arityFromType, hsToAst, liftLambdas
   ) where
 import Control.Arrow
@@ -21,7 +21,6 @@ import qualified Data.Map.Strict as M
 import Data.Map.Strict (Map)
 import Data.Maybe
 import Data.Traversable
-import Text.Parsec hiding (State)
 
 import Ast
 import Boost
@@ -37,32 +36,43 @@ data Clay = Clay
   , supers :: [(String, Ast)]
   , genDecls :: [(String, Type)]
   , datas :: [(String, (Maybe (Int, Int), Type))]
-  , classes :: [(String, (Type, [(String, String)]))]
+  , methods :: Map String (Type, [(String, String)])
   } deriving Show
 
-newClay :: [TopLevel] -> Clay
-newClay ts = p1 where
-  p0 = foldl' f emptyClay ts
-  emptyClay = Clay [] [] [] M.empty [] [] [] []
-  f p t = case t of
+newClay :: [TopLevel] -> Either String Clay
+newClay ts = do
+  p0 <- foldM f emptyClay ts
+  let missing = (fst <$> publics p0) \\ (fst <$> supers p0)
+  unless (null missing) $ Left $ "missing public functions: " ++ show missing
+  let
+    storeCons s
+      | Just ty <- lookup s $ genDecls p0 = (s, ty)
+      | otherwise = (s, TC "Store" `TApp` TV ('@':s))
+  pure $ p0 { stores = storeCons . fst <$> stores p0 }
+  where
+  emptyClay = Clay [] [] [] M.empty [] [] [] M.empty
+  f p t = Right $ case t of
     Super sc -> p { supers = sc:supers p }
-    ClassDecl xs -> p { classes = xs ++ classes p }
+    ClassDecl s ty xs -> p { methods = m1 }
+      where
+      m1 = foldl' addMethod (methods p) xs
+      addMethod m (mName, mType) = M.insert mName (mType, [(s, ty)]) m
+    InstanceDecl _ _ _ -> error "TODO: instance"
     GenDecl x -> p { genDecls = x:genDecls p }
     DataDecl xs -> p { datas = xs ++ datas p }
     PublicDecl xs -> p { publics = zip xs $ repeat [] }
     StoreDecl xs -> p { stores = zip xs $ repeat undefined }
-  -- TODO: Report missing public functions.
-  storeCons s
-    | Just ty <- lookup s $ genDecls p0 = (s, ty)
-    | otherwise = (s, TC "Store" `TApp` TV ('@':s))
-  p1 = p0 { stores = storeCons . fst <$> stores p0 }
 
 hsToAst :: Boost -> QQuoter -> String -> Either String Clay
 hsToAst boost qq prog = do
-  cl0 <- showErr $ newClay <$> parseDfnHs qq prog
-  let missing = (fst <$> publics cl0) \\ (fst <$> supers cl0)
-  unless (null missing) $ Left $ "missing public functions: " ++ show missing
-  let cl = extractSecrets cl0
+  cl0 <- showErr $ newClay =<< either (Left . show) Right (parseDfnHs qq prog)
+  preludeDefs <- parseDefs $ boostPrelude boost
+  let
+    cl = extractSecrets cl0
+      { supers = supers preludeDefs ++ supers cl0
+      , datas = datas preludeDefs ++ datas cl0
+      , methods = methods preludeDefs `M.union` methods cl0
+      }
   (inferred, storageCons) <- inferType boost cl
   let
     -- TODO: Handle non-strict case expressions.
@@ -88,8 +98,8 @@ justHere :: QQuoter
 justHere "here" s = Right s
 justHere _ _ = Left "bad scheme"
 
-parseDefs :: String -> Either ParseError Clay
-parseDefs s = newClay <$> parseDfnHs justHere s
+parseDefs :: String -> Either String Clay
+parseDefs s = newClay =<< either (Left . show) Right (parseDfnHs justHere s)
 
 -- The Constraints monad combines a State monad and an Either monad.
 -- The state consists of the set of constraints and next integer available
@@ -151,7 +161,7 @@ gather cl globs env (Ast ast) = case ast of
     Just qt  -> do
       (t1, qs1) <- instantiate qt
       pure $ foldl' ((AAst t1 .) . (:@)) (AAst t1 $ Var v) $ (\(a, b) -> AAst (TC $ "Dict-" ++ a) $ Placeholder a (TV b)) <$> qs1
-    Nothing -> case M.lookup v methods of
+    Nothing -> case M.lookup v $ methods cl of
       Just qt -> do
         (t1, [(_, x)]) <- instantiate qt
         pure $ AAst t1 $ Placeholder v $ TV x
@@ -257,21 +267,6 @@ generalize' ctx ty = case ty of
   u :-> v  -> (:->) <$> generalize' ctx u <*> generalize' ctx v
   TApp u v -> TApp  <$> generalize' ctx u <*> generalize' ctx v
   _        -> pure ty
-
-methods :: Map String (Type, [(String, String)])
-methods = M.fromList
-  [ ("==", (a :-> a :-> TC "Bool", [("Eq", "a")]))
-  , (">>=", (TApp m a :-> (a :-> TApp m b)  :-> TApp m b, [("Monad", "m")]))
-  , ("pure", (a :-> TApp m a, [("Monad", "m")]))
-  -- Generates call_indirect ops.
-  , ("callSlot", (TC "I32" :-> a :-> TApp (TC "IO") (TC "()"), [("Message", "a")]))
-  , ("set", (TApp (TC "Store") a :-> a :-> io (TC "()"), [("Storage", "a")]))
-  , ("get", (TApp (TC "Store") a :-> io a, [("Storage", "a")]))
-  ] where
-    a = GV "a"
-    b = GV "b"
-    m = GV "m"
-    io = TApp (TC "IO")
 
 dictSolve :: [((String, String), String)] -> Map String Type -> Ast -> Ast
 dictSolve dsoln soln = ffix $ \h (Ast ast) -> case ast of
@@ -480,8 +475,9 @@ inferType
   -- Returns types of definitions and stores.
   -> Either String ([(String, (QualType, Ast))], Map String Type)
 inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJust $ lookup k ds))) sortedDefs where
+  ds = supers cl
   -- Groups of definitions, sorted in the order we should infer their types.
-  sortedDefs = reverse $ scc (callees ds) $ fst <$> ds
+  sortedDefs = reverse $ scc (callees cl ds) $ fst <$> ds
   -- List notation is a special case in Haskell.
   -- This is "data [a] = [] | a : [a]" in spirit.
   listPresets = M.fromList
@@ -489,12 +485,9 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, fromJ
     , (":",  (Just (1, 2), a :-> TApp (TC "[]") a :-> TApp (TC "[]") a))
     ] where a = GV "a"
   globs = listPresets
-    `M.union` M.fromList (datas preludeDefs)
     `M.union` M.fromList (datas cl)
     `M.union` boostTypes boost
     `M.union` M.fromList (second ((,) Nothing) <$> stores cl)
-  Right preludeDefs = parseDefs $ boostPrelude boost
-  ds = supers cl ++ supers preludeDefs
   inferMutual :: ([(String, (QualType, Ast))], Map String Type) -> [(String, Ast)] -> Either String ([(String, (QualType, Ast))], Map String Type)
   inferMutual (acc, accStorage) grp = do
     (typedAsts, ConState _ cs m) <- buildConstraints $ forM grp $ \(s, d) -> do
@@ -535,12 +528,12 @@ checkPubSecs cl (soln, ctx) s
 -- all dependencies. If a node has already been processed, we should avoid
 -- finding all its dependencies again. We can do this by passing in a list of
 -- nodes that have already been explored.
-callees :: [(String, Ast)] -> String -> [String]
-callees ds s = snd $ execState (go s) ([], []) where
+callees :: Clay -> [(String, Ast)] -> String -> [String]
+callees cl ds s = snd $ execState (go s) ([], []) where
   go :: String -> State ([String], [String]) ()
   go f = do
     (env, acc) <- get
-    unless (elem f (env ++ acc) || M.member f methods) $ case lookup f ds of
+    unless (elem f (env ++ acc) || M.member f (methods cl)) $ case lookup f ds of
       -- TODO: If we knew the primitives (functions implemented in wasm, such
       -- as `*`), then we could detect out-of-scope identifiers here.
       Nothing -> pure ()  -- error $ "not in scope: " ++ f
