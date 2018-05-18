@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE NamedFieldPuns #-}
 
 module Hero
@@ -16,21 +17,29 @@ module Hero
   , permaGlobalVM
   , getNumVM, putNumVM
   , stateVM, putStateVM
+  , ripWasm
   ) where
 
+#ifdef __HASTE__
+import qualified Data.Map.Strict as IM
+#else
+import Data.IntMap.Strict (IntMap)
+import qualified Data.IntMap.Strict as IM
+#endif
 import Control.Arrow
 import Data.Bits
 import Data.Char (ord)
 import Data.Int
-import Data.IntMap.Strict (IntMap)
-import qualified Data.IntMap.Strict as IM
 import Data.List
 import Data.Maybe
 import Data.Word
 
 import Network.DFINITY.Parse
-
 import WasmOp
+
+#ifdef __HASTE__
+type IntMap = IM.Map Int
+#endif
 
 type VMFun a = HeroVM a -> [WasmOp] -> IO ([WasmOp], HeroVM a)
 
@@ -120,6 +129,11 @@ take' :: Int -> [a] -> [a]
 take' n as | n > length as = error "BAD TAKE"
            | otherwise = take n as
 
+initLocal :: WasmType -> WasmOp
+initLocal I32 = I32_const 0
+initLocal I64 = I64_const 0
+initLocal _ = error "TODO"
+
 run :: HeroVM a -> IO ([WasmOp], HeroVM a)
 run vm@HeroVM {insts, stack} | null insts = pure (stack, vm)
 run vm@HeroVM {insts} | null $ head insts = case tail insts of
@@ -134,7 +148,7 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
     (results, vm1) <- (table vm IM.! fromIntegral i) (step $ drop' (inCount + 1) stack) (reverse params)
     run $ setArgsVM results vm1
   Call i -> let
-    Wasm {imports, decls, code} = wasm vm
+    Wasm {imports, functions} = wasm vm
     fCount = length imports
     in if i < fCount then do
       let
@@ -144,12 +158,13 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
       run $ setArgsVM results vm1
     else do
       let
-        (locals, body) = code!!(i - fCount)
-        k = length $ fst $ decls !! (i - fCount)
+        WasmFun {typeSig, localVars, funBody} = functions IM.! i
+        locals = initLocal <$> localVars
+        k = length $ fst typeSig
       -- The `End` opcode is reintroduced at the ends of function calls, so
       -- we know when to pop locals, and when to stop popping instructions
       -- for `Return`.
-      run vm { stack = drop' k stack, locs = IM.fromList (zip [0..] $ reverse (take' k stack) ++ locals):locs, insts = body:(End:head i1):tail i1 }
+      run vm { stack = drop' k stack, locs = IM.fromList (zip [0..] $ reverse (take' k stack) ++ locals):locs, insts = funBody:(End:head i1):tail i1 }
   Return -> run vm { insts = dropWhile ((End /=) . head) insts }
   End -> run vm { locs = tail locs, insts = i1 }
   Set_local i -> run vm {locs = IM.insert i (head stack) (head locs):tail locs, stack = tail stack, insts = i1}

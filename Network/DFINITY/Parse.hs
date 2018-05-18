@@ -1,9 +1,18 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Network.DFINITY.Parse (parseWasm, Wasm(..)) where
+module Network.DFINITY.Parse (parseWasm, Wasm(..), ripWasm) where
 
+#ifdef __HASTE__
+import qualified Data.Map.Strict as IM
+import qualified Data.Set as IS
+#else
+import Data.IntMap.Strict (IntMap)
+import qualified Data.IntMap.Strict as IM
+import qualified Data.IntSet as IS
+#endif
 import Control.Arrow
 import Control.Monad
 import qualified Data.ByteString.Char8 as B8
@@ -13,14 +22,16 @@ import Data.Int
 import Data.Maybe
 import WasmOp
 
+#ifdef __HASTE__
+type IntMap = IM.Map Int
+#endif
+
 data ExternalKind = Function | Table | Memory | Global
 type FuncType = ([WasmType], [WasmType])
-type Body = ([WasmOp], [WasmOp])
-type Import = ((String, String), FuncType)
 
 data Wasm = Wasm
   { types :: [FuncType]
-  , imports :: [Import]
+  , imports :: [((String, String), FuncType)]
   , decls :: [FuncType]
   , tableSize :: Int
   , memory :: [(Int, Maybe Int)]
@@ -28,7 +39,7 @@ data Wasm = Wasm
   , exports :: [(String, Int)]
   , start :: Maybe Int
   , elemSection :: [(Int, [Int])]
-  , code :: [Body]
+  , functions :: IntMap WasmFun
   , dataSection :: [([WasmOp], String)]
   , dfnExports :: [(String, [WasmType])]
   , martinTypes :: [[WasmType]]
@@ -39,7 +50,7 @@ data Wasm = Wasm
   } deriving Show
 
 emptyWasm :: Wasm
-emptyWasm = Wasm [] [] [] 0 [] [] [] Nothing [] [] [] [] [] [] [] [] ""
+emptyWasm = Wasm [] [] [] 0 [] [] [] Nothing [] IM.empty [] [] [] [] [] [] ""
 
 data ByteParser a = ByteParser (ByteString -> Either String (a, ByteString))
 
@@ -72,11 +83,6 @@ byteParse (ByteParser f) s = f s >>= (\(w, t) ->
 
 remainder :: ByteParser ByteString
 remainder = ByteParser $ \s -> Right (s, "")
-
-initLocal :: WasmType -> WasmOp
-initLocal I32 = I32_const 0
-initLocal I64 = I64_const 0
-initLocal _ = error "TODO"
 
 wasm :: ByteParser Wasm
 wasm = do
@@ -241,15 +247,13 @@ wasm = do
       pure w { elemSection = es }
 
     sectCode w = do
-      bodies <- rep varuint32 $ do
+      fs <- rep varuint32 $ do
         _ <- varuint32  -- Size.
-        locals <- concat <$> rep varuint32 (do
-          n <- varuint32
-          t <- initLocal <$> valueType
-          pure $ replicate n t)
+        locals <- concat <$> rep varuint32 (replicate <$> varuint32 <*> valueType)
         ops <- codeBlock w
         pure (locals, ops)
-      pure w { code = bodies}
+      pure w { functions = IM.fromList $ zip [length (imports w)..]
+        $ zipWith (\a (b, c) -> WasmFun a b c) (decls w) fs }
 
     sectData w = do
       ds <- rep varuint32 $ do
@@ -392,10 +396,15 @@ parseWasm b = do
   let
     findType k
       | Just mt <- lookup (k - length imports) martinTypeMap = martinTypes!!mt
-      -- TODO: Check there are no outputs below.
-      -- Also, does it make sense to export an import?
-      -- Syscalls are synchronous, but exports are not. And where are their
-      -- types annotated?
+      -- Outputs make no sense for dfn, but we support them so we can use this
+      -- code more generally.
       | k < length imports = fst $ snd $ imports !! k
       | otherwise = fst $ decls w !! (k - length imports)
   pure w { dfnExports = second findType <$> exports }
+
+ripWasm :: [String] -> Wasm -> ([(String, Int)], [(Int, WasmFun)])
+ripWasm es w = (zip es idxs, fMap)
+  where
+  Just idxs = mapM (`lookup` exports w) es
+  reachable = IS.elems $ followCalls idxs $ funBody <$> functions w
+  fMap = (\i -> (i, functions w IM.! i)) <$> reachable
