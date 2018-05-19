@@ -219,6 +219,11 @@ demoCases = second ("public (main)\n" ++) <$>
     , "f :: Int -> Int"
     , "f x = x"
     ])
+  , ("123", unlines
+    [ "main = maybe undefined putInt $ do"
+    , "  x <- (Just 5 >>= (\\x -> Just $ x * 24))"
+    , "  pure (x + 3)"
+    ])
   , ("314", unlines
     [ "data List x = Nil | Cons x (List x)"
     , "main = f (Cons 3 (Cons 1 (Cons 4 Nil)))"

@@ -21,6 +21,7 @@ stdBoost = Boost
   , "f . g = \\x -> f (g x)"
   , "flip f = \\x y -> f y x"
   , "fromJust m = case m of {Just x -> x}"
+  , "maybe n j m = case m of {Just x -> j x; Nothing -> n}"
   -- TODO: Use `instance` to clean up the following:
   , "maybe_pure x = Just x"
   , "maybe_monad x f = case x of { Nothing -> Nothing; Just a -> f a }"
@@ -41,6 +42,9 @@ stdBoost = Boost
   , "class Storage a where"
   , "  set :: Store a -> a -> IO ()"
   , "  get :: Store a -> IO a"
+  , "instance Monad Maybe where"
+  , "  x >>= f = case x of { Nothing -> Nothing; Just a -> f a }"
+  , "  pure x = Just x"
   ])
   -- Haskell functions defined in wasm.
   [ ("+", (TC "Int" :-> TC "Int" :-> TC "Int", intAsm I64_add))

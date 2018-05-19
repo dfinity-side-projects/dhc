@@ -36,7 +36,18 @@ data Clay = Clay
   , supers :: Map String Ast
   , genDecls :: [(String, Type)]
   , datas :: Map String (Maybe (Int, Int), Type)
+  -- | e.g. "==" -> type "a -> a -> Bool", [("Eq", "a")]
   , methods :: Map String (Type, [(String, String)])
+  -- | e.g. "Monad" -> [">>=", "pure"]. List is sorted.
+  , classes :: Map String [String]
+  -- We delay processing instance declarations until after all class
+  -- definitions have been handled, including those from the prelude.
+  , preInstances :: [(String, Type, [(String, Ast)])]
+  -- | e.g. "Monad" ->
+  --   [ (TC "Maybe", Ast of tuple (maybe->>=, maybe-pure)
+  --   , (TC "IO", Ast of tuple (io->>=, io->pure)
+  --   ]
+  , instances :: Map String [(Type, Ast)]
   } deriving Show
 
 newClay :: [TopLevel] -> Either String Clay
@@ -50,29 +61,47 @@ newClay ts = do
       | otherwise = (s, TC "Store" `TApp` TV ('@':s))
   pure $ p0 { stores = storeCons . fst <$> stores p0 }
   where
-  emptyClay = Clay [] [] [] M.empty M.empty [] M.empty M.empty
-  f p t = Right $ case t of
-    Super (name, ast) -> p { supers = M.insert name ast $ supers p }
-    ClassDecl s ty xs -> p { methods = m1 }
+  emptyClay = Clay [] [] [] M.empty M.empty [] M.empty M.empty M.empty [] M.empty
+  f p t = case t of
+    Super (name, ast) -> Right p { supers = M.insert name ast $ supers p }
+    ClassDecl s ty xs -> Right p
+      { methods = m1
+      , classes = M.insert s (sort $ fst <$> xs) $ classes p
+      }
       where
       m1 = foldl' addMethod (methods p) xs
       addMethod m (mName, mType) = M.insert mName (mType, [(s, ty)]) m
-    InstanceDecl _ _ _ -> error "TODO: instance"
-    GenDecl x -> p { genDecls = x:genDecls p }
-    DataDecl xs -> p { datas = foldl' (\m (k, v) -> M.insert k v m) (datas p) xs }
-    PublicDecl xs -> p { publics = zip xs $ repeat [] }
-    StoreDecl xs -> p { stores = zip xs $ repeat undefined }
+    InstanceDecl cl tyStr is -> Right p
+      { preInstances = (cl, TC tyStr, sortOn fst is):preInstances p }
+    GenDecl x -> Right p { genDecls = x:genDecls p }
+    DataDecl xs -> Right p { datas = foldl' (\m (k, v) -> M.insert k v m) (datas p) xs }
+    PublicDecl xs -> Right p { publics = zip xs $ repeat [] }
+    StoreDecl xs -> Right p { stores = zip xs $ repeat undefined }
+
+mkDict :: Clay -> (String, Type, [(String, Ast)]) -> Either String Clay
+mkDict p (cl, ty, is) = case M.lookup cl $ classes p of
+  Nothing -> Left $ "class declaration must appear before instance: " ++ cl
+  Just ms -> do
+    when (sort (fst <$> is) /= ms) $ Left $ "instance methods disagree with class: " ++ cl ++ " " ++ show ty
+    Right p
+      { instances = M.insertWith (++) cl [(ty, dict)] $ instances p
+      }
+    where
+    dict = foldl' ((Ast .) . (:@)) (Ast $ Pack 0 $ length is) (snd <$> sortOn fst is)
 
 hsToAst :: Boost -> QQuoter -> String -> Either String Clay
 hsToAst boost qq prog = do
   cl0 <- showErr $ newClay =<< either (Left . show) Right (parseDfnHs qq prog)
   preludeDefs <- parseDefs $ boostPrelude boost
   let
-    cl = extractSecrets cl0
+    cl1 = extractSecrets cl0
       { supers = supers preludeDefs `M.union` supers cl0
       , datas = datas preludeDefs `M.union` datas cl0
       , methods = methods preludeDefs `M.union` methods cl0
+      , classes = classes preludeDefs `M.union` classes cl0
+      , preInstances = preInstances preludeDefs ++ preInstances cl0
       }
+  cl <- foldM mkDict cl1 $ preInstances cl1
   (inferred, storageCons) <- inferType boost cl
   let
     -- TODO: Handle non-strict case expressions.
@@ -111,10 +140,7 @@ buildConstraints :: Constraints a -> Either String (a, ConState)
 buildConstraints (Constraints f) = f $ ConState 0 [] M.empty
 
 instance Functor Constraints where fmap = liftM
-instance Applicative Constraints where
-  (<*>) = ap
-  pure = return
-
+instance Applicative Constraints where { (<*>) = ap ; pure = return }
 instance Monad Constraints where
   Constraints c1 >>= fc2 = Constraints $ \cs -> case c1 cs of
     Left err -> Left err
@@ -338,27 +364,28 @@ typeSolve soln t = case t of
 
 -- | The `propagateClasses` and `propagateClassTyCon` functions of
 -- "Implementing type classes".
-propagate :: [String] -> Type -> Either String [(String, [String])]
-propagate [] _ = Right []
-propagate cs (TV y) = Right [(y, cs)]
-propagate cs t = concat <$> mapM propagateTyCon cs where
+propagate :: Clay -> [String] -> Type -> Either String [(String, [String])]
+propagate _ [] _ = Right []
+propagate _ cs (TV y) = Right [(y, cs)]
+propagate cl cs t = concat <$> mapM propagateTyCon cs where
+  propagateTyCon s | Just m <- M.lookup s $ instances cl, Just _ <- lookup t m = Right []
   propagateTyCon "Eq" = case t of
     TC "Int" -> Right []
     TC "String" -> Right []
-    TApp (TC "[]") a -> propagate ["Eq"] a
+    TApp (TC "[]") a -> rec ["Eq"] a
     _ -> Left $ "no Eq instance: " ++ show t
   propagateTyCon "Monad" = case t of
-    TC "Maybe" -> Right []
     TC "IO" -> Right []
     _ -> Left $ "no Monad instance: " ++ show t
   propagateTyCon "Storage" = case t of
-    TApp (TC "()") (TApp a b) -> (++) <$> propagate ["Storage"] a <*> propagate ["Storage"] b
-    TApp (TC "[]") a -> propagate ["Storage"] a
+    TApp (TC "()") (TApp a b) -> (++) <$> rec ["Storage"] a <*> rec ["Storage"] b
+    TApp (TC "[]") a -> rec ["Storage"] a
     TC s | elem s messageTypes -> Right []
     _ -> Left $ "no Storage instance: " ++ show t
   propagateTyCon "Message" =
-    concat <$> (mapM (propagate ["Storage"]) =<< listFromTupleType t)
+    concat <$> (mapM (rec ["Storage"]) =<< listFromTupleType t)
   propagateTyCon c = error $ "TODO: " ++ c
+  rec = propagate cl
 
 -- | Returns list of types from a tuple.
 -- e.g. (String, Int) becomes [String, Int]
@@ -379,23 +406,23 @@ listFromTupleType ty = case ty of
 
 type Solution = (Map String Type, Map String [String])
 
-unify :: [(Type, Type)] -> Map String [String] -> Either String Solution
-unify constraints ctx = execStateT (uni constraints) (M.empty, ctx)
+unify :: Clay -> [(Type, Type)] -> Map String [String] -> Either String Solution
+unify cl constraints ctx = execStateT (uni cl constraints) (M.empty, ctx)
 
-refine :: [(Type, Type)] -> Solution -> Either String Solution
-refine constraints = execStateT (uni constraints)
+refine :: Clay -> [(Type, Type)] -> Solution -> Either String Solution
+refine cl constraints = execStateT (uni cl constraints)
 
-uni :: [(Type, Type)] -> StateT (Map String Type, Map String [String]) (Either String) ()
-uni [] = do
+uni :: Clay -> [(Type, Type)] -> StateT (Map String Type, Map String [String]) (Either String) ()
+uni _ [] = do
   (tm, qm) <- get
   as <- forM (M.keys tm) $ follow . TV
   put (M.fromList $ zip (M.keys tm) as, qm)
-uni ((GV _, _):_) = lift $ Left "BUG! generalized variable in constraint"
-uni ((_, GV _):_) = lift $ Left "BUG! generalized variable in constraint"
-uni ((lhs, rhs):cs) = do
+uni _ ((GV _, _):_) = lift $ Left "BUG! generalized variable in constraint"
+uni _ ((_, GV _):_) = lift $ Left "BUG! generalized variable in constraint"
+uni cl ((lhs, rhs):cs) = do
   z <- (,) <$> follow lhs <*> follow rhs
   case z of
-    (s, t) | s == t -> uni cs
+    (s, t) | s == t -> rec cs
     (TV x, TV y) -> do
       when (x /= y) $ do
         (tm, qm) <- get
@@ -403,7 +430,7 @@ uni ((lhs, rhs):cs) = do
         put (M.insert x (TV y) tm, case M.lookup x qm of
           Just q -> M.insert y q $ M.delete x qm
           _ -> qm)
-      uni cs
+      rec cs
     (TV x, t) -> if x `elem` freeTV t
       -- TODO: Test infinite type detection.
       then lift . Left $ "infinite: " ++ x ++ " = " ++ show t
@@ -411,14 +438,16 @@ uni ((lhs, rhs):cs) = do
         -- The `instantiateTyvar` function of "Implementing type classes".
         (_, qm) <- get
         -- For example, Eq [a] propagates to Eq a, which we record.
-        either (lift . Left) addQuals $ propagate (fromMaybe [] $ M.lookup x qm) t
+        either (lift . Left) addQuals $ propagate cl (fromMaybe [] $ M.lookup x qm) t
         modify' $ first $ M.insert x t
-        uni cs
-    (s, t@(TV _)) -> uni $ (t, s):cs
-    (TApp s1 s2, TApp t1 t2) -> uni $ (s1, t1):(s2, t2):cs
-    (s1 :-> s2, t1 :-> t2) -> uni ((s1, t1):(s2, t2):cs)
+        rec cs
+    (s, t@(TV _)) -> rec $ (t, s):cs
+    (TApp s1 s2, TApp t1 t2) -> rec $ (s1, t1):(s2, t2):cs
+    (s1 :-> s2, t1 :-> t2) -> rec ((s1, t1):(s2, t2):cs)
     (s, t) -> lift . Left $ "mismatch: " ++ show s ++ " /= " ++ show t
-  where addQuals = modify' . second . M.unionWith union . M.fromList
+  where
+  addQuals = modify' . second . M.unionWith union . M.fromList
+  rec = uni cl
 
 -- Galler-Fischer-esque Data.Map (path compression).
 follow :: Type -> StateT (Map String Type, a) (Either String) Type
@@ -500,7 +529,7 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, ds M.
           (ty, _) <- instantiate (gt, [])
           addConstraint (TV $ '*':s, ty)
       pure (s, t)
-    initSol <- unify cs m
+    initSol <- unify cl cs m
     sol@(solt, _) <- foldM (checkPubSecs cl) initSol (fst <$> grp)
     let storageCons = M.filterWithKey (\k _ -> head k == '@') solt
     -- TODO: Look for conflicting storage constraints.
@@ -515,7 +544,7 @@ checkPubSecs cl (soln, ctx) s
   | s /= "main" &&  -- Already handled.
       (s `elem` (fst <$> publics cl ++ secrets cl)) =
     -- Require `public` and `secret` functions to return IO ().
-    refine [(retType t, TApp (TC "IO") (TC "()"))] (soln, ctx)
+    refine cl [(retType t, TApp (TC "IO") (TC "()"))] (soln, ctx)
     -- TODO: Check no free variables are left, and
     -- propagate ["Storage"] succeeds (returns []) for each argument type.
   | otherwise = Right (soln, ctx)

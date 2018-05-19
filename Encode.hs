@@ -173,8 +173,8 @@ encodeWasm fatP = concat
     ]
   , concat $ getSect 8
   -- Element section.
-  , if null $ tableEntries p then []
-    else encSect 9 $ encTableChunk <$> tableEntries p
+  , if null $ tableEntries p then [] else
+    encSect 9 $ encTableChunk <$> tableEntries p
   , encSect 10 $ encProcedure <$> functions p
   , concat $ getSect 11
   , concatMap (uncurry encCustom) $ customs p
@@ -234,7 +234,7 @@ trim p = p
   { imports = liveImps
   , functions = IM.elems liveFuns
   , exports = second (liveRenames IM.!) <$> exports p
-  , tableEntries = second (map (liveRenames IM.!)) <$> tableEntries p
+  , tableEntries = filter (not . null . snd) $ second (map (liveRenames IM.!)) <$> tableEntries p
   , martinFuns = first (liveRenames IM.!) <$> martinFuns p
   }
   where

@@ -209,7 +209,7 @@ toplevels = topDecls where
     pure $ ClassDecl s t ms
   instanceDecl = do
     s <- con
-    t <- tyVar
+    t <- con
     want "where"
     ms <- embrace iDecl
     pure $ InstanceDecl s t ms
@@ -254,8 +254,9 @@ toplevels = topDecls where
     op <- varSym
     r <- var
     pure [op, l, r]
-  expr = caseExpr <|> letExpr <|> doExpr <|> bin 0 False
-  bin 10 _ = molecule
+  expr = infixExp
+  infixExp = bin 0 False
+  bin 10 _ = lexp
   bin prec isR = rec False =<< bin (prec + 1) False where
     rec isL m = try (do
       o <- varSym <|> between (want "`") (want "`") var
@@ -318,7 +319,7 @@ toplevels = topDecls where
     pure (p, x)
   -- TODO: Introduce patterns to deal with _.
   lambda = fmap Ast $ Lam <$> between (want "\\") (want "->") (many1 $ var <|> uscore) <*> expr
-  molecule = lambda <|> foldl1' ((Ast .) . (:@)) <$> many1 atom
+  lexp = lambda <|> caseExpr <|> letExpr <|> doExpr <|> foldl1' ((Ast .) . (:@)) <$> many1 atom
   uscore = want "_" >> pure "_"
   atom = qvar
     <|> (Ast . Var <$> uscore)
