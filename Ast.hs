@@ -32,7 +32,8 @@ data AstF a = Qual String String
   | Pack Int Int | I Int64 | S ShortByteString | Var String
   | a :@ a | Cas a [(a, a)]
   | Lam [String] a | Let [(String, a)] a
-  | Placeholder String Type deriving (Read, Show, Functor, Foldable, Traversable, Generic)
+  | DictIndex Int | Placeholder String Type
+  deriving (Read, Show, Functor, Foldable, Traversable, Generic)
 
 newtype Ast = Ast (AstF Ast) deriving (Show, Generic)
 

@@ -22,11 +22,6 @@ stdBoost = Boost
   , "flip f = \\x y -> f y x"
   , "fromJust m = case m of {Just x -> x}"
   , "maybe n j m = case m of {Just x -> j x; Nothing -> n}"
-  -- TODO: Use `instance` to clean up the following:
-  , "maybe_pure x = Just x"
-  , "maybe_monad x f = case x of { Nothing -> Nothing; Just a -> f a }"
-  , "io_pure x rw = (x, rw)"
-  , "io_monad f g rw = let {p = f rw} in case p of (a, rw1) -> g a rw1"
   , "f >> g = f >>= \\_ -> g"
   , "list_eq_instance d a b = case a of { [] -> case b of {[] -> True; w -> False}; (x:xs) -> case b of { [] -> False; (y:ys)-> (d x y) && list_eq_instance d xs ys } }"
   , "bool f t b = case b of {False -> f; True ->t}"
@@ -39,12 +34,27 @@ stdBoost = Boost
   , "  pure :: a -> m a"
   -- Generates call_indirect ops.
   , "class Message a where callSlot :: I32 -> a -> IO ()"
+
+  -- TODO: This is way off:
+  --   * The type `Store a` should be `(AnyRef -> IO (), IO AnyRef)`.
+  --   * Storage has 4 methods; see comments in DHC.
+  --   * The methods `set` and `get` should really be functions.
+  -- We declare `Storage` wrongly here so our legacy code works, and even then
+  -- it requires `dictSolve` to skip handling the `Storage` case.
   , "class Storage a where"
   , "  set :: Store a -> a -> IO ()"
   , "  get :: Store a -> IO a"
+
   , "instance Monad Maybe where"
   , "  x >>= f = case x of { Nothing -> Nothing; Just a -> f a }"
   , "  pure x = Just x"
+  , "io_pure x rw = (x, rw)"
+  , "io_bind f g rw = let {p = f rw} in case p of (a, rw1) -> g a rw1"
+  , "instance Monad IO where"
+  , "  (>>=) = io_bind"
+  , "  pure = io_pure"
+  , "instance Eq Int where (==) = eq_Int"
+  , "instance Eq String where (==) = eq_String"
   ])
   -- Haskell functions defined in wasm.
   [ ("+", (TC "Int" :-> TC "Int" :-> TC "Int", intAsm I64_add))
@@ -62,10 +72,13 @@ stdBoost = Boost
   , ("slice", (TC "Int" :-> TC "String" :-> TApp (TC "()") (TApp (TC "String") (TC "String")), sliceAsm))
   , ("undefined", (a, [Unreachable, End]))
 
+  -- It'd be nice if these two were somehow only available internally to DHC.
+  , ("eq_Int", (TC "Int" :-> TC "Int" :-> TC "Bool", cmpAsm I64_eq))
+  , ("eq_String", (TC "String" :-> TC "String" :-> TC "Bool", strEqAsm))
+
   -- Programmers cannot call the following directly.
   -- We keep their types around for various checks.
-  , ("Int-==", (TC "Int" :-> TC "Int" :-> TC "Bool", cmpAsm I64_eq))
-  , ("String-==", (TC "String" :-> TC "String" :-> TC "Bool", strEqAsm))
+  , ("#rundict", (TC "I32" :-> GV "a" :-> GV "b", runDictAsm))
   ]
   -- Internal wasm helpers.
   [ ("#memcpyhp", (([I32, I32], []), memcpyhpAsm))
@@ -194,7 +207,7 @@ catAsm =
   , Get_global sp
   , I32_load 2 4
   , I32_load 2 12
-  , Custom$ CallSym "#memcpyhp"
+  , Custom $ CallSym "#memcpyhp"
   , Get_global sp  -- memcpyhp ([[sp + 8] + 4] + [[sp + 8] + 8]) [[sp + 8] + 12]
   , I32_load 2 8
   , I32_load 2 4
@@ -409,5 +422,31 @@ sliceAsm =
   , Set_global hp
   , I32_const 12  -- UpdatePopEval 2
   , Custom $ CallSym "#updatepopeval"
+  , End
+  ]
+
+-- | Runs a method at a given index of a given dictionary.
+-- Expects [I32, Coproduct] on top of the stack (both in normal form).
+-- The coproduct represents a dictionary of methods for an instance of a
+-- typeclass, e.g. the dictionary for the Monad instace of Maybe is:
+--
+--   Copro 0 [Maybe->>=, Maybe-pure]
+runDictAsm :: [QuasiWasm]
+runDictAsm =
+  [ Get_global sp  -- [sp + 12] = [[sp + 8] + [[sp + 4] + 4]]
+  , Get_global sp
+  , I32_load 2 8
+  , Get_global sp
+  , I32_load 2 4
+  , I32_load 2 4
+  , I32_add
+  , I32_load 2 0
+
+  , I32_store 2 12
+  , Get_global sp  -- sp = sp + 8
+  , I32_const 8
+  , I32_add
+  , Set_global sp
+  , Custom $ CallSym "#eval"
   , End
   ]

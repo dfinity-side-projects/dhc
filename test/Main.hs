@@ -39,9 +39,8 @@ gmachine prog = if "main_" `M.member` funs then
     ] []
   arity "putStr" = 1
   arity "putInt" = 1
-  arity s = case M.lookup s funs of
-    Just a -> a
-    Nothing -> arityFromType $ fst $ fromJust $ lookup s $ boostPrims stdBoost
+  arity s | Just a <- M.lookup s funs = a
+  arity s = arityFromType $ fst $ fromJust $ lookup s $ boostPrims stdBoost
   go (fOrIns:rest) s h = either prim exec fOrIns where
     k = M.size h
     heapAdd x = M.insert k x h
@@ -60,29 +59,40 @@ gmachine prog = if "main_" `M.member` funs then
     rwAdd msg heap | RealWorld ms <- heap M.! 0 =
       M.insert 0 (RealWorld $ ms ++ [msg]) heap
     rwAdd _ _ = error "BUG! Expect RealWorld at 0 on heap"
-    prim "+" = intInt (+)
-    prim "-" = intInt (-)
-    prim "*" = intInt (*)
-    prim "div" = intInt div
-    prim "mod" = intInt mod
-    prim "Int-==" = intCmp (==)
-    prim "<" = intCmp (<)
-    prim ">" = intCmp (>)
-    prim "&&" = boolOp min
-    prim "||" = boolOp max
-    prim "++" = go rest (k:srest) $ heapAdd $ NString t where
-      (s0:s1:srest) = s
-      NString str0 = h M.! s0
-      NString str1 = h M.! s1
-      t = toShort $ fromShort str0 <> fromShort str1
-    prim "putStr" = go rest (k:srest) $ rwAdd (unpack $ fromShort str) $ M.insert k1 (NCon 0 []) $ heapAdd $ NCon 0 [k1, 0] where
-      k1 = k + 1
-      (s0:srest) = s
-      NString str = h M.! s0
-    prim g   = error $ "unsupported: " ++ g
+    prims = M.fromList
+      [ ("+", intInt (+))
+      , ("-", intInt (-))
+      , ("*", intInt (*))
+      , ("div", intInt div)
+      , ("mod", intInt mod)
+      , ("eq_Int", intCmp (==))
+      , ("<", intCmp (<))
+      , (">", intCmp (>))
+      , ("&&", boolOp min)
+      , ("||", boolOp max)
+      , ("++", let
+        (s0:s1:srest) = s
+        NString str0 = h M.! s0
+        NString str1 = h M.! s1
+        t = toShort $ fromShort str0 <> fromShort str1
+        in go rest (k:srest) $ heapAdd $ NString t)
+      , ("putStr", let
+        k1 = k + 1
+        (s0:srest) = s
+        NString str = h M.! s0
+        in go rest (k:srest) $ rwAdd (unpack $ fromShort str) $ M.insert k1 (NCon 0 []) $ heapAdd $ NCon 0 [k1, 0])
+      , ("#rundict", let
+        (s0:s1:srest) = s
+        NInt n = h M.! s0
+        NCon _ as = h M.! s1
+        in go rest (as!!(fromIntegral (n - 8) `div` 4):srest) h)
+      ]
+    prim g | Just f <- M.lookup g prims = f
+           | otherwise = error $ "unsupported: " ++ g
     exec ins = case ins of
       Trap -> "UNREACHABLE"
       PushInt n -> go rest (k:s) $ heapAdd $ NInt n
+      PushRef n -> go rest (k:s) $ heapAdd $ NInt $ fromIntegral n
       PushString str -> go rest (k:s) $ heapAdd $ NString str
       Push n -> go rest (s!!n:s) h
       PushGlobal v -> go rest (k:s) $ heapAdd $ NGlobal (arity v) v
@@ -101,10 +111,10 @@ gmachine prog = if "main_" `M.member` funs then
         NAp a _ -> go (Right Eval:rest) (a:s) h
         NGlobal n g -> let
           p | g == "putStr" = [Right $ Push 0, Right Eval, Left "putStr", Right $ Slide 3]
-            | otherwise  = case M.lookup g m of
-            Just is -> Right <$> is
-            Nothing -> (Right <$> [Push 1, Eval, Push 1, Eval]) ++
-              [Left g, Right $ UpdatePopEval 2]
+            | Just is <- M.lookup g m = Right <$> is
+            | M.member g prims = (Right <$> concat (replicate n [Push $ n - 1, Eval]))
+              ++ [Left g, Right $ UpdatePopEval n]
+            | otherwise = error $ "unsupported: " ++ g
           debone i = r where NAp _ r = h M.! i
           in go (p ++ rest) ((debone <$> take n (tail s)) ++ drop' n s) h
         _ -> go rest s h
@@ -282,7 +292,7 @@ runDemo src = case hsToWasm demoBoost src of
   Left err -> error err
   Right ints -> let
     wasm = either error id $ parseWasm $ B.pack $ fromIntegral <$> ints
-    in stateVM . snd <$> (runWasm "main" [] $ mkHeroVM "" syscall wasm [])
+    in stateVM . snd <$> runWasm "main" [] (mkHeroVM "" syscall wasm [])
   where
   syscall ("system", "putStr") vm [I32_const ptr, I32_const len] = pure ([],
     putStateVM (stateVM vm ++ [chr $ getNumVM 1 (ptr + i) vm | i <- [0..len - 1]]) vm)
@@ -309,7 +319,7 @@ runAltWeb src = case hsToWasm altWebBoost src of
   Left err -> error err
   Right ints -> let
     Right wasm = parseWasm $ B.pack $ fromIntegral <$> ints
-    in stateVM . snd <$> (runWasm "main" [] $ mkHeroVM "" altWebSys wasm [])
+    in stateVM . snd <$> runWasm "main" [] (mkHeroVM "" altWebSys wasm [])
 
 altWebSys :: (String, String) -> HeroVM String -> [WasmOp] -> IO ([WasmOp], HeroVM String)
 altWebSys ("dhc", "system") vm [I32_const n, I32_const sp, I32_const hp]

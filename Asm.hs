@@ -134,7 +134,7 @@ astToIns cl = (WasmMeta
   , storeTypes = snd <$> stores cl
   , callEncoders = M.fromList $ concatMap helpers cs
   }, fst <$> compilerOut) where
-  compilerOut = (compile $ fst <$> stores cl) <$> supers cl
+  compilerOut = compile (fst <$> stores cl) <$> supers cl
   cs = snd <$> M.elems compilerOut
   ciTypes = foldl' union [] $ callIndirectTypes <$> cs
   (hp1, addrs) = mkStrConsts $ nub $ concatMap stringConstants cs
@@ -671,6 +671,7 @@ mk1 pglobals (Ast ast) = case ast of
     b <- rec body
     putBindings orig
     pure $ Alloc n : concat (zipWith (++) dsAsm (pure . UpdateInd <$> [n-1,n-2..0])) ++ b ++ [Slide n]
+  DictIndex n -> pure [PushRef $ fromIntegral $ 4*n + 8, PushGlobal "#rundict", MkAp]
   _ -> error $ "TODO: compile: " ++ show ast
   where
     bump n = modifyBindings $ fmap $ second (+n)

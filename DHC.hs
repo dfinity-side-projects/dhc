@@ -36,8 +36,9 @@ data Clay = Clay
   , supers :: Map String Ast
   , genDecls :: [(String, Type)]
   , datas :: Map String (Maybe (Int, Int), Type)
-  -- | e.g. "==" -> type "a -> a -> Bool", [("Eq", "a")]
-  , methods :: Map String (Type, [(String, String)])
+  -- | e.g. "==" -> (type "a -> a -> Bool", 0, ("Eq", "a"))
+  -- The number is the method's index in the sorted list of methods.
+  , methods :: Map String (Type, Int, (String, String))
   -- | e.g. "Monad" -> [">>=", "pure"]. List is sorted.
   , classes :: Map String [String]
   -- We delay processing instance declarations until after all class
@@ -53,7 +54,7 @@ data Clay = Clay
 newClay :: [TopLevel] -> Either String Clay
 newClay ts = do
   p0 <- foldM f emptyClay ts
-  let missing = (fst <$> publics p0) \\ (M.keys $ supers p0)
+  let missing = (fst <$> publics p0) \\ M.keys (supers p0)
   unless (null missing) $ Left $ "missing public functions: " ++ show missing
   let
     storeCons s
@@ -64,13 +65,14 @@ newClay ts = do
   emptyClay = Clay [] [] [] M.empty M.empty [] M.empty M.empty M.empty [] M.empty
   f p t = case t of
     Super (name, ast) -> Right p { supers = M.insert name ast $ supers p }
-    ClassDecl s ty xs -> Right p
+    ClassDecl s ty unsorted -> Right p
       { methods = m1
-      , classes = M.insert s (sort $ fst <$> xs) $ classes p
+      , classes = M.insert s (fst <$> xs) $ classes p
       }
       where
-      m1 = foldl' addMethod (methods p) xs
-      addMethod m (mName, mType) = M.insert mName (mType, [(s, ty)]) m
+      xs = sortOn fst unsorted
+      m1 = foldl' addMethod (methods p) $ zip [0..] xs
+      addMethod m (idx, (mName, mType)) = M.insert mName (mType, idx, (s, ty)) m
     InstanceDecl cl tyStr is -> Right p
       { preInstances = (cl, TC tyStr, sortOn fst is):preInstances p }
     GenDecl x -> Right p { genDecls = x:genDecls p }
@@ -78,16 +80,41 @@ newClay ts = do
     PublicDecl xs -> Right p { publics = zip xs $ repeat [] }
     StoreDecl xs -> Right p { stores = zip xs $ repeat undefined }
 
+-- | Adds a dictionary object for a given instance, along with supercombinators
+-- for each of the method implementations.
+--
+-- A dictionary is a tuple of `Var` nodes that refer to this instance's
+-- implementation of the methods, ordered lexicographically.
+-- Must be run after processing class declarations.
+--
+-- If there is only one method in the typeclass, then instead of a tuple of
+-- size 1, we generate a single Var node.
+--
+-- For example, the Maybe Monad instance results in the tuple:
+--
+--   (Var "Maybe->>=", Var "Maybe-pure")
+--
+-- along with the supercombinators:
+--
+--   (Maybe->>=) x f = case x of { Nothing -> Nothing; Just a -> f a }
+--   (Maybe-pure) x = Just x"
+--
+-- Actually, the generated prefixes are uglier because we just use `show`,
+-- which produces "TC \"Maybe\"" instead of "Maybe".
 mkDict :: Clay -> (String, Type, [(String, Ast)]) -> Either String Clay
 mkDict p (cl, ty, is) = case M.lookup cl $ classes p of
-  Nothing -> Left $ "class declaration must appear before instance: " ++ cl
+  Nothing -> Left $ "unknown typeclass: " ++ cl
   Just ms -> do
-    when (sort (fst <$> is) /= ms) $ Left $ "instance methods disagree with class: " ++ cl ++ " " ++ show ty
+    when (sorted /= ms) $ Left $ "instance methods disagree with class: " ++ cl ++ " " ++ show ty
     Right p
       { instances = M.insertWith (++) cl [(ty, dict)] $ instances p
+      , supers = supers p `M.union` M.fromList (first prefix <$> is)
       }
     where
-    dict = foldl' ((Ast .) . (:@)) (Ast $ Pack 0 $ length is) (snd <$> sortOn fst is)
+    dict | [one] <- sorted = Ast $ Var $ prefix one
+         | otherwise = foldl' ((Ast .) . (:@)) (Ast $ Pack 0 $ length is) $ Ast . Var . prefix <$> sorted
+    sorted = sort $ fst <$> is
+    prefix = ((show ty ++ "-") ++)
 
 hsToAst :: Boost -> QQuoter -> String -> Either String Clay
 hsToAst boost qq prog = do
@@ -114,9 +141,19 @@ hsToAst boost qq prog = do
     types = M.fromList $ second fst <$> inferred
     stripStore (TApp (TC "Store") t) = t
     stripStore _ = error "expect Store"
+    addDecoders :: String -> (String, [(Type, Ast)])
+    addDecoders s = (s, addDec [] ty)
+      where
+      Just (ty, _) = M.lookup s types
+      addDec acc t = case t of
+        a :-> b -> addDec ((a, dictSolve cl [] M.empty $ Ast (DictIndex 3) @@ Ast (Placeholder "Storage" a)) : acc) b
+        TApp (TC "IO") (TC "()") -> reverse acc
+        _ -> error "exported functions must return IO ()"
+      infixl 5 @@
+      x @@ y = Ast $ x :@ y
   pure cl
-    { publics = addDecoders types . fst <$> publics cl
-    , secrets = addDecoders types . fst <$> secrets cl
+    { publics = addDecoders . fst <$> publics cl
+    , secrets = addDecoders . fst <$> secrets cl
     , supers = M.fromList subbedDefs
     , funTypes = types
     , stores = second (stripStore . typeSolve storageCons) <$> stores cl }
@@ -183,17 +220,16 @@ gather cl globs env (Ast ast) = case ast of
   Var "_" -> do
     x <- newTV
     pure $ AAst x $ Var "_"
-  Var v -> case lookup v env of
-    Just qt  -> do
+  Var v
+    | Just qt <- lookup v env -> do
       (t1, qs1) <- instantiate qt
       pure $ foldl' ((AAst t1 .) . (:@)) (AAst t1 $ Var v) $ (\(a, b) -> AAst (TC $ "Dict-" ++ a) $ Placeholder a (TV b)) <$> qs1
-    Nothing -> case M.lookup v $ methods cl of
-      Just qt -> do
-        (t1, [(_, x)]) <- instantiate qt
-        pure $ AAst t1 $ Placeholder v $ TV x
-      Nothing -> case M.lookup v globs of
-        Just (ma, gt) -> flip AAst (maybe (Var v) (uncurry Pack) ma) . fst <$> instantiate (gt, [])
-        Nothing       -> bad $ "undefined: " ++ v
+    | Just (ty, _, typeClass) <- M.lookup v $ methods cl -> do
+      (t1, [(_, x)]) <- instantiate (ty, [typeClass])
+      pure $ AAst t1 $ Placeholder v $ TV x
+    | Just (ma, gt) <- M.lookup v globs ->
+      flip AAst (maybe (Var v) (uncurry Pack) ma) . fst <$> instantiate (gt, [])
+    | otherwise -> bad $ "undefined: " ++ v
   t :@ u -> do
     a@(AAst tt _) <- rec env t
     b@(AAst uu _) <- rec env u
@@ -261,15 +297,16 @@ instantiate (ty, qs) = do
   f m t = pure (m, t)
 
 generalize
-  :: Solution
+  :: Clay
+  -> Solution
   -> (String, AAst Type)
   -> (String, (QualType, Ast))
-generalize (soln, ctx) (fun, a0@(AAst t0 _)) = (fun, (qt, a1)) where
+generalize cl (soln, ctx) (fun, a0@(AAst t0 _)) = (fun, (qt, a1)) where
   qt@(_, qs) = runState (generalize' ctx $ typeSolve soln t0) []
   -- TODO: Here, and elsewhere: need to sort qs?
   dsoln = zip qs $ ("#d" ++) . show <$> [(0::Int)..]
   -- TODO: May be useful to preserve type annotations?
-  a1 = dictSolve dsoln soln ast
+  a1 = dictSolve cl dsoln soln ast
   dvars = snd <$> dsoln
   ast = case deAnn a0 of
     Ast (Lam ss body) -> Ast $ Lam (dvars ++ ss) $ expandFun body
@@ -294,38 +331,35 @@ generalize' ctx ty = case ty of
   TApp u v -> TApp  <$> generalize' ctx u <*> generalize' ctx v
   _        -> pure ty
 
-dictSolve :: [((String, String), String)] -> Map String Type -> Ast -> Ast
-dictSolve dsoln soln = ffix $ \h (Ast ast) -> case ast of
-  Placeholder ">>=" t -> aVar "snd" @@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
-  Placeholder "pure" t -> aVar "fst" @@ rec (Ast $ Placeholder "Monad" $ typeSolve soln t)
-  Placeholder "==" t -> rec $ Ast $ Placeholder "Eq" $ typeSolve soln t
-  Placeholder "callSlot" t -> rec $ Ast $ Placeholder "Message" $ typeSolve soln t
+dictSolve :: Clay -> [((String, String), String)] -> Map String Type -> Ast -> Ast
+dictSolve cl dsoln soln = ffix $ \h (Ast ast) -> case ast of
+  -- Replace method Placeholders with selection function and dictionary
+  -- Placeholder.
+  Placeholder s t | Just (_, idx, (typeClass, _)) <- M.lookup s $ methods cl, typeClass /= "Storage" ->
+    case length $ classes cl M.! typeClass of
+      1 -> rec (Ast $ Placeholder typeClass $ typeSolve soln t)
+      _ -> aDI idx @@ rec (Ast $ Placeholder typeClass $ typeSolve soln t)
   -- A storage variable x compiles to a pair (#set-n, #get-n) where n is the
   -- global variable assigned to hold x.
   --   set x y = fst x (toAny y)
-  Placeholder "set" t -> Ast $ Lam ["x", "y"] $ aVar "fst" @@ aVar "x" @@ (aVar "p3of4" @@ rec (Ast $ Placeholder "Storage" $ typeSolve soln t) @@ aVar "y")
+  Placeholder "set" t -> Ast $ Lam ["x", "y"] $ aVar "fst" @@ aVar "x" @@ (aDI 2 @@ rec (Ast $ Placeholder "Storage" $ typeSolve soln t) @@ aVar "y")
   --   get x = snd x >>= pure . fromAny
-  Placeholder "get" t -> Ast $ Lam ["x"] $ aVar "io_monad" @@ (aVar "snd" @@ aVar "x") @@ (aVar "." @@ aVar "io_pure" @@ (aVar "p4of4" @@ rec (Ast $ Placeholder "Storage" $ typeSolve soln t)))
+  Placeholder "get" t -> Ast $ Lam ["x"] $ aVar "io_bind" @@ (aVar "snd" @@ aVar "x") @@ (aVar "." @@ aVar "io_pure" @@ (aDI 3 @@ rec (Ast $ Placeholder "Storage" $ typeSolve soln t)))
+
   Placeholder d t -> case typeSolve soln t of
     TV v -> Ast $ Var $ fromMaybe (error $ "unsolvable: " ++ show (d, v)) $ lookup (d, v) dsoln
     u -> findInstance d u
   _       -> Ast $ h ast
   where
+    aDI = Ast . DictIndex
     aVar = Ast . Var
     infixl 5 @@
     x @@ y = Ast $ x :@ y
-    rec = dictSolve dsoln soln
-    findInstance "Message" t = Ast . CallSlot tu $ (aVar "p3of4" @@) . findInstance "Storage" <$> tu
+    rec = dictSolve cl dsoln soln
+    findInstance typeClass t | Just ast <- lookup t =<< M.lookup typeClass (instances cl) = ast
+    findInstance "Eq" (TApp (TC "[]") a) = aVar "list_eq_instance" @@ rec (Ast $ Placeholder "Eq" a)
+    findInstance "Message" t = Ast . CallSlot tu $ (aDI 2 @@) . findInstance "Storage" <$> tu
       where tu = either (error "want tuple") id (listFromTupleType t)
-    findInstance "Eq" t = case t of
-      TC "String"        -> aVar "String-=="
-      TC "Int"           -> aVar "Int-=="
-      TApp (TC "[]") a -> aVar "list_eq_instance" @@ rec (Ast $ Placeholder "Eq" a)
-      e -> error $ "BUG! no Eq for " ++ show e
-    findInstance "Monad" t = case t of
-      TC "Maybe" -> Ast (Pack 0 2) @@ aVar "maybe_pure" @@ aVar "maybe_monad"
-      TC "IO" -> Ast (Pack 0 2) @@ aVar "io_pure" @@ aVar "io_monad"
-      e -> error $ "BUG! no Monad for " ++ show e
     -- The "Storage" typeclass has four methods:
     --  1. toAnyRef
     --  2. fromAnyRef
@@ -370,13 +404,8 @@ propagate _ cs (TV y) = Right [(y, cs)]
 propagate cl cs t = concat <$> mapM propagateTyCon cs where
   propagateTyCon s | Just m <- M.lookup s $ instances cl, Just _ <- lookup t m = Right []
   propagateTyCon "Eq" = case t of
-    TC "Int" -> Right []
-    TC "String" -> Right []
     TApp (TC "[]") a -> rec ["Eq"] a
     _ -> Left $ "no Eq instance: " ++ show t
-  propagateTyCon "Monad" = case t of
-    TC "IO" -> Right []
-    _ -> Left $ "no Monad instance: " ++ show t
   propagateTyCon "Storage" = case t of
     TApp (TC "()") (TApp a b) -> (++) <$> rec ["Storage"] a <*> rec ["Storage"] b
     TApp (TC "[]") a -> rec ["Storage"] a
@@ -486,18 +515,6 @@ extractSecrets cl = cl { secrets = zip (concatMap filterSecrets $ M.elems $ supe
     Qual "my" f -> if elem f $ fst <$> publics cl then [] else [f]
     _ -> h ast
 
-addDecoders :: Map String QualType -> String -> (String, [(Type, Ast)])
-addDecoders types s = (s, addDec [] ty)
-  where
-  Just (ty, _) = M.lookup s types
-  addDec acc t = case t of
-    a :-> b -> addDec ((a, dictSolve [] M.empty $ aVar "p4of4" @@ Ast (Placeholder "Storage" a)) : acc) b
-    TApp (TC "IO") (TC "()") -> reverse acc
-    _ -> error "exported functions must return IO ()"
-  aVar = Ast . Var
-  infixl 5 @@
-  x @@ y = Ast $ x :@ y
-
 inferType
   :: Boost
   -> Clay
@@ -533,7 +550,7 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, ds M.
     sol@(solt, _) <- foldM (checkPubSecs cl) initSol (fst <$> grp)
     let storageCons = M.filterWithKey (\k _ -> head k == '@') solt
     -- TODO: Look for conflicting storage constraints.
-    pure ((++ acc) $ generalize sol <$> typedAsts, accStorage `M.union` storageCons)
+    pure ((++ acc) $ generalize cl sol <$> typedAsts, accStorage `M.union` storageCons)
     where
       annOf (AAst a _) = a
       tvs = TV . ('*':) . fst <$> grp
@@ -696,11 +713,11 @@ expandCase = ffix $ \h (Ast ast) -> Ast $ case ast of
       [Ast (S s)] -> do
         v <- genVar
         a1 <- g deeper a
-        pure [(Ast $ Var v, Ast $ Cas (Ast (Ast (Ast (Var "String-==") :@ Ast (Var v)) :@ Ast (S s))) $ (Ast $ Pack 1 0, a1):moreCases)]
+        pure [(Ast $ Var v, Ast $ Cas (Ast (Ast (Ast (Var "eq_String") :@ Ast (Var v)) :@ Ast (S s))) $ (Ast $ Pack 1 0, a1):moreCases)]
       [Ast (I n)] -> do
         v <- genVar
         a1 <- g deeper a
-        pure [(Ast $ Var v, Ast $ Cas (Ast (Ast (Ast (Var "Int-==") :@ Ast (Var v)) :@ Ast (I n))) $ (Ast $ Pack 1 0, a1):maybe [] (pure . (,) (Ast $ Pack 0 0)) onFail)]
+        pure [(Ast $ Var v, Ast $ Cas (Ast (Ast (Ast (Var "eq_Int") :@ Ast (Var v)) :@ Ast (I n))) $ (Ast $ Pack 1 0, a1):maybe [] (pure . (,) (Ast $ Pack 0 0)) onFail)]
       h@(Ast (Pack _ _)):xs -> (++ moreCases) <$> doPack [h] deeper xs a
       _ -> error $ "bad case: " ++ show p
 
