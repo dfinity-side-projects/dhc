@@ -276,7 +276,7 @@ gather cl globs env (Ast ast) = case ast of
 -- been instantiated with the same generated names.
 instantiate :: QualType -> Constraints (Type, [(String, String)])
 instantiate (ty, qs) = do
-  (gvmap, result) <- f [] ty
+  (gvmap, result) <- f [] $ subStore ty
   let qInstances = second (getVar gvmap) <$> qs
   forM_ qInstances $ uncurry addContext
   pure (result, qInstances)
@@ -295,6 +295,18 @@ instantiate (ty, qs) = do
     (m2, u') <- f m1 u
     pure (m2, t' `TApp` u')
   f m t = pure (m, t)
+
+-- Change "Store a" -> "(AnyDfn -> IO (), IO AnyDfn)".
+subStore :: Type -> Type
+subStore ty = case ty of
+  t :-> u -> subStore t :-> subStore u
+  TC "Store" `TApp` u -> TApp (TC "()") $
+    (unboxed (subStore u) :-> io (TC "()")) `TApp` (io $ unboxed $ subStore u)
+  t `TApp` u -> subStore t `TApp` subStore u
+  _ -> ty
+  where
+  io = TApp $ TC "IO"
+  unboxed = TApp $ TC "Unboxed"
 
 generalize
   :: Clay
@@ -335,17 +347,10 @@ dictSolve :: Clay -> [((String, String), String)] -> Map String Type -> Ast -> A
 dictSolve cl dsoln soln = ffix $ \h (Ast ast) -> case ast of
   -- Replace method Placeholders with selection function and dictionary
   -- Placeholder.
-  Placeholder s t | Just (_, idx, (typeClass, _)) <- M.lookup s $ methods cl, typeClass /= "Storage" ->
+  Placeholder s t | Just (_, idx, (typeClass, _)) <- M.lookup s $ methods cl ->
     case length $ classes cl M.! typeClass of
       1 -> rec (Ast $ Placeholder typeClass $ typeSolve soln t)
       _ -> aDI idx @@ rec (Ast $ Placeholder typeClass $ typeSolve soln t)
-  -- A storage variable x compiles to a pair (#set-n, #get-n) where n is the
-  -- global variable assigned to hold x.
-  --   set x y = fst x (toAny y)
-  Placeholder "set" t -> Ast $ Lam ["x", "y"] $ aVar "fst" @@ aVar "x" @@ (aDI 2 @@ rec (Ast $ Placeholder "Storage" $ typeSolve soln t) @@ aVar "y")
-  --   get x = snd x >>= pure . fromAny
-  Placeholder "get" t -> Ast $ Lam ["x"] $ aVar "io_bind" @@ (aVar "snd" @@ aVar "x") @@ (aVar "." @@ aVar "io_pure" @@ (aDI 3 @@ rec (Ast $ Placeholder "Storage" $ typeSolve soln t)))
-
   Placeholder d t -> case typeSolve soln t of
     TV v -> Ast $ Var $ fromMaybe (error $ "unsolvable: " ++ show (d, v)) $ lookup (d, v) dsoln
     u -> findInstance d u

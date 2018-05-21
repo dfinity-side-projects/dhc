@@ -34,17 +34,13 @@ stdBoost = Boost
   , "  pure :: a -> m a"
   -- Generates call_indirect ops.
   , "class Message a where callSlot :: I32 -> a -> IO ()"
-
-  -- TODO: This is way off:
-  --   * The type `Store a` should be `(AnyRef -> IO (), IO AnyRef)`.
-  --   * Storage has 4 methods; see comments in DHC.
-  --   * The methods `set` and `get` should really be functions.
-  -- We declare `Storage` wrongly here so our legacy code works, and even then
-  -- it requires `dictSolve` to skip handling the `Storage` case.
   , "class Storage a where"
-  , "  set :: Store a -> a -> IO ()"
-  , "  get :: Store a -> IO a"
-
+  , "  atoAnyRef :: a -> AnyRef"
+  , "  bfromAnyRef :: AnyRef -> a"
+  , "  ctoUnboxed :: a -> Unboxed a"
+  , "  dfromUnboxed :: Unboxed a -> a"
+  , "set x y = fst x $ ctoUnboxed y"
+  , "get x = snd x >>= pure . dfromUnboxed"
   , "instance Monad Maybe where"
   , "  x >>= f = case x of { Nothing -> Nothing; Just a -> f a }"
   , "  pure x = Just x"
