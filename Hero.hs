@@ -112,8 +112,14 @@ shiftL32 a b = fromIntegral $ shiftL a $ fromIntegral (b `mod` 32)
 shiftR32U :: Word32 -> Word32 -> Int32
 shiftR32U a b = fromIntegral $ shiftR a $ fromIntegral (b `mod` 32)
 
+shiftR32S :: Int32 -> Int32 -> Int32
+shiftR32S a b = fromIntegral $ shiftR a $ fromIntegral (b `mod` 32)
+
 shiftR64U :: Int64 -> Int64 -> Int64
 shiftR64U a b = fromIntegral $ shiftR ((fromIntegral a) :: Word64) $ fromIntegral ((fromIntegral b :: Word64) `mod` 64)
+
+shiftR64S :: Int64 -> Int64 -> Int64
+shiftR64S a b = fromIntegral $ shiftR ((fromIntegral a) :: Int64) $ fromIntegral ((fromIntegral b :: Int64) `mod` 64)
 
 shiftL64 :: Int64 -> Int64 -> Int64
 shiftL64 a b = shiftL a $ fromIntegral ((fromIntegral b :: Word64) `mod` 64)
@@ -188,11 +194,15 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
   I32_rotl -> binOp32U rotateL32
   I32_rotr -> binOp32U rotateR32
   I32_shr_u -> binOp32U shiftR32U
-  I32_lt_u -> binOp32U $ ((fromIntegral . fromEnum) .) . (<)
+  I32_shr_s -> binOp32 shiftR32S
   I32_ge_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (>=)
   I32_gt_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (>)
   I32_le_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (<=)
   I32_lt_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (<)
+  I32_gt_u -> binOp32U $ ((fromIntegral . fromEnum) .) . (>)
+  I32_ge_u -> binOp32U $ ((fromIntegral . fromEnum) .) . (>=)
+  I32_lt_u -> binOp32U $ ((fromIntegral . fromEnum) .) . (<)
+  I32_le_u -> binOp32U $ ((fromIntegral . fromEnum) .) . (<=)
   I32_ne -> binOp32 $ ((fromIntegral . fromEnum) .) . (/=)
   I32_eq -> binOp32 $ ((fromIntegral . fromEnum) .) . (==)
   I32_eqz -> let
@@ -210,6 +220,7 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
   I64_and -> binOp64 (.&.)
   I64_or -> binOp64 (.|.)
   I64_shr_u -> binOp64 shiftR64U
+  I64_shr_s -> binOp64 shiftR64S
   I64_shl -> binOp64 shiftL64
   I64_rotr -> binOp64 rotateR64
   I64_extend_s_i32 -> let

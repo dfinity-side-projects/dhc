@@ -55,7 +55,7 @@ emptyWasm = Wasm [] [] [] 0 [] [] [] Nothing [] IM.empty [] [] [] [] [] [] ""
 data ByteParser a = ByteParser (ByteString -> Either String (a, ByteString))
 
 instance Functor     ByteParser where fmap = liftM
-instance Applicative ByteParser where {pure  = return; (<*>) = ap}
+instance Applicative ByteParser where {pure = return; (<*>) = ap}
 instance Monad       ByteParser where
   ByteParser f >>= g = ByteParser $ (good =<<) . f
     where good (r, t) = let ByteParser gg = g r in gg t
