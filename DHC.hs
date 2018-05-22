@@ -146,11 +146,9 @@ hsToAst boost qq prog = do
       where
       Just (ty, _) = M.lookup s types
       addDec acc t = case t of
-        a :-> b -> addDec ((a, dictSolve cl [] M.empty $ Ast (DictIndex 3) @@ Ast (Placeholder "Storage" a)) : acc) b
+        a :-> b -> addDec ((a, dictSolve cl [] M.empty $ Ast (Placeholder "dfromUnboxed" a)) : acc) b
         TApp (TC "IO") (TC "()") -> reverse acc
         _ -> error "exported functions must return IO ()"
-      infixl 5 @@
-      x @@ y = Ast $ x :@ y
   pure cl
     { publics = addDecoders . fst <$> publics cl
     , secrets = addDecoders . fst <$> secrets cl
@@ -315,7 +313,7 @@ generalize
   -> (String, (QualType, Ast))
 generalize cl (soln, ctx) (fun, a0@(AAst t0 _)) = (fun, (qt, a1)) where
   qt@(_, qs) = runState (generalize' ctx $ typeSolve soln t0) []
-  -- TODO: Here, and elsewhere: need to sort qs?
+  -- TODO: Compute nub of qs?
   dsoln = zip qs $ ("#d" ++) . show <$> [(0::Int)..]
   -- TODO: May be useful to preserve type annotations?
   a1 = dictSolve cl dsoln soln ast
@@ -345,25 +343,24 @@ generalize' ctx ty = case ty of
 
 dictSolve :: Clay -> [((String, String), String)] -> Map String Type -> Ast -> Ast
 dictSolve cl dsoln soln = ffix $ \h (Ast ast) -> case ast of
-  -- Replace method Placeholders with selection function and dictionary
-  -- Placeholder.
+  -- Replace method Placeholders with selector and dictionary Placeholder.
   Placeholder s t | Just (_, idx, (typeClass, _)) <- M.lookup s $ methods cl ->
     case length $ classes cl M.! typeClass of
       1 -> rec (Ast $ Placeholder typeClass $ typeSolve soln t)
-      _ -> aDI idx @@ rec (Ast $ Placeholder typeClass $ typeSolve soln t)
+      _ -> Ast (DictIndex idx) @@ rec (Ast $ Placeholder typeClass $ typeSolve soln t)
+  -- Replace dictionary Placeholders.
   Placeholder d t -> case typeSolve soln t of
     TV v -> Ast $ Var $ fromMaybe (error $ "unsolvable: " ++ show (d, v)) $ lookup (d, v) dsoln
     u -> findInstance d u
   _       -> Ast $ h ast
   where
-    aDI = Ast . DictIndex
     aVar = Ast . Var
     infixl 5 @@
     x @@ y = Ast $ x :@ y
     rec = dictSolve cl dsoln soln
     findInstance typeClass t | Just ast <- lookup t =<< M.lookup typeClass (instances cl) = ast
     findInstance "Eq" (TApp (TC "[]") a) = aVar "list_eq_instance" @@ rec (Ast $ Placeholder "Eq" a)
-    findInstance "Message" t = Ast . CallSlot tu $ (aDI 2 @@) . findInstance "Storage" <$> tu
+    findInstance "Message" t = Ast . CallSlot tu $ rec . Ast . Placeholder "ctoUnboxed" <$> tu
       where tu = either (error "want tuple") id (listFromTupleType t)
     -- The "Storage" typeclass has four methods:
     --  1. toAnyRef
@@ -386,8 +383,10 @@ dictSolve cl dsoln soln = ffix $ \h (Ast ast) -> case ast of
         lfai = aVar "list_from_any_instance" @@ rec (Ast $ Placeholder "Storage" a)
         in boxy ltai lfai
       TApp (TC "()") (TApp a b) -> let
-        ptai = aVar "pair_to_any_instance" @@ rec (Ast $ Placeholder "Storage" a) @@ rec (Ast $ Placeholder "Storage" b)
-        pfai = aVar "pair_from_any_instance" @@ rec (Ast $ Placeholder "Storage" a) @@ rec (Ast $ Placeholder "Storage" b)
+        -- TODO: Brittle. Relies on order constraints are found.
+        -- Implement contexts for instance declarations.
+        ptai = aVar "pair_to_any_instance" @@ rec (Ast $ Placeholder "Storage" b) @@ rec (Ast $ Placeholder "Storage" a)
+        pfai = aVar "pair_from_any_instance" @@ rec (Ast $ Placeholder "Storage" b) @@ rec (Ast $ Placeholder "Storage" a)
         in boxy ptai pfai
       e -> error $ "BUG! no Storage for " ++ show e
       where boxy to from = Ast (Pack 0 4) @@ to @@ from @@ to @@ from
