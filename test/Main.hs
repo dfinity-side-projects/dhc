@@ -14,7 +14,7 @@ import Text.Heredoc (here, there)
 import Asm
 import Boost
 import DHC
-import Hero
+import Hero.Hero
 import Parse
 import SoloSyscall
 import Std

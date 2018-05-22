@@ -1,0 +1,56 @@
+= Dfinity Haskell Compiler =
+
+https://jenkins.london.dfinity.build/job/dhc/badge/icon)](https://jenkins.london.dfinity.build/job/dhc/[Build Status]
+
+== Summary ==
+
+DHC is a Haskell compiler that produces WebAssembly.
+
+It accepts only a tiny subset of the language.
+
+== Live demo ==
+
+https://dhc.dfinity.org
+
+== Installation / Dependencies ==
+
+Run `nix build`.
+
+== Usage / Examples ==
+
+The `dhc` program takes Haskell source on standard input and compiles it to
+WebAssembly on standard output. Two IO functions are defined:
+
+------------------------------------------------------------------------------
+putStr :: String -> IO ()
+putInt :: Int -> IO ()  -- `Int` means 64-bit integer.
+------------------------------------------------------------------------------
+
+which respectively call WebAssembly imports:
+
+------------------------------------------------------------------------------
+system.putStr (ptr : i32, len : i32)
+system.putInt (lo : i32, hi : i32)
+------------------------------------------------------------------------------
+
+In `system.putInt`, we split the integer into 32-bit halves to make life easier
+for JavaScript.
+
+The `rundhc` tool can interpret the output of `dhc`. It expects the input
+WebAssembly binary to export a function named `main`, that takes no arguments
+and returns no arguments.
+
+For example:
+
+------------------------------------------------------------------------------
+$ echo 'public(main) main=putStr"Hello, World!\n"' | ./dhc | ./rundhc
+Hello, World!
+------------------------------------------------------------------------------
+
+== License ==
+
+http://dfinity.network[*(C) 2017 DFINITY STIFTUNG*].
+
+All code and designs are open sourced under GPL V3.
+
+image::https://user-images.githubusercontent.com/6457089/32753794-10f4cbc2-c883-11e7-8dcf-ff8088b38f9f.png[dfinity logo]

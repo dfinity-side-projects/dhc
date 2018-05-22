@@ -23,8 +23,8 @@ library
   default-language:
     Haskell2010
   exposed-modules:
-    Hero
-    Network.DFINITY.Parse
+    Hero.Hero
+    Hero.Parse
   ghc-options:
     -O2
     -Wall

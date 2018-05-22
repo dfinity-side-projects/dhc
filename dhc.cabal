@@ -16,7 +16,6 @@ library
     bimap,
     bytestring,
     containers,
-    deepseq,
     mtl,
     parsec
   default-language:
@@ -27,8 +26,85 @@ library
     Boost
     DHC
     Encode
+    Parse
     Std
     WasmOp
   ghc-options:
     -O2
     -Wall
+
+executable dhc
+  default-language:
+    Haskell2010
+  main-is:
+    dhc.hs
+  other-modules:
+    Asm
+    Ast
+    Boost
+    Demo
+    DHC
+    Encode
+    Parse
+    Std
+    WasmOp
+  build-depends:
+    base,
+    binary,
+    bytestring,
+    containers,
+    dhc,
+    mtl,
+    parsec
+  ghc-options:
+   -O2
+   -Wall
+   -threaded
+
+executable rundhc
+  default-language:
+    Haskell2010
+  main-is:
+    rundhc.hs
+  build-depends:
+    base,
+    binary,
+    bytestring,
+    containers,
+    dhc,
+    mtl
+  other-modules:
+    Hero.Hero
+    Hero.Parse
+  ghc-options:
+   -O2
+   -Wall
+   -threaded
+
+test-suite test
+  default-language:
+    Haskell2010
+  type: exitcode-stdio-1.0
+  main-is: test/Main.hs
+  build-depends:
+    base,
+    binary,
+    bytestring,
+    containers,
+    dhc,
+    heredoc,
+    HUnit,
+    mtl,
+    parsec
+  other-modules:
+    Asm
+    Ast
+    Boost
+    DHC
+    Encode
+    Parse
+    SoloSyscall
+    Std
+    WasmOp
+    Hero.Hero
+    Hero.Parse

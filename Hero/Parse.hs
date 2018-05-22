@@ -3,7 +3,7 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Network.DFINITY.Parse (parseWasm, Wasm(..), ripWasm) where
+module Hero.Parse (parseWasm, Wasm(..), ripWasm) where
 
 #ifdef __HASTE__
 import qualified Data.Map.Strict as IM

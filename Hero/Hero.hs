@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE NamedFieldPuns #-}
 
-module Hero
+module Hero.Hero
   ( Wasm(dfnExports, haskell)
   , CustomWasmOp(I32_const, I64_const), WasmOp
   , HeroVM
@@ -34,7 +34,7 @@ import Data.List
 import Data.Maybe
 import Data.Word
 
-import Network.DFINITY.Parse
+import Hero.Parse
 import WasmOp
 
 #ifdef __HASTE__

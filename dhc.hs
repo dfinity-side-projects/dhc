@@ -8,6 +8,6 @@ import Demo
 main :: IO ()
 main = do
   s <- getContents
-  case hsToWasm demoBoost s of
+  case hsToWasm jsDemoBoost s of
     Left err -> error err
     Right bin -> B.putStr $ B.pack $ fromIntegral <$> bin

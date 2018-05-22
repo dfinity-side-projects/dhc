@@ -299,7 +299,7 @@ subStore :: Type -> Type
 subStore ty = case ty of
   t :-> u -> subStore t :-> subStore u
   TC "Store" `TApp` u -> TApp (TC "()") $
-    (unboxed (subStore u) :-> io (TC "()")) `TApp` (io $ unboxed $ subStore u)
+    (unboxed (subStore u) :-> io (TC "()")) `TApp` io (unboxed $ subStore u)
   t `TApp` u -> subStore t `TApp` subStore u
   _ -> ty
   where
