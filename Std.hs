@@ -23,7 +23,6 @@ stdBoost = Boost
   , "fromJust m = case m of {Just x -> x}"
   , "maybe n j m = case m of {Just x -> j x; Nothing -> n}"
   , "f >> g = f >>= \\_ -> g"
-  , "list_eq_instance a b = case a of { [] -> case b of {[] -> True; w -> False}; (x:xs) -> case b of { [] -> False; (y:ys) -> (x == y) && list_eq_instance xs ys } }"
   , "bool f t b = case b of {False -> f; True ->t}"
   , "when b t = bool (pure ()) t b"
   , "f $ x = f x"
@@ -51,6 +50,7 @@ stdBoost = Boost
   , "  pure = io_pure"
   , "instance Eq Int where (==) = eq_Int"
   , "instance Eq String where (==) = eq_String"
+  , "instance Eq a => Eq [a] where a == b = case a of { [] -> case b of {[] -> True; w -> False}; (x:xs) -> case b of { [] -> False; (y:ys) -> (x == y) && (xs == ys) } }"
   ])
   -- Haskell functions defined in wasm.
   [ ("+", (TC "Int" :-> TC "Int" :-> TC "Int", intAsm I64_add))

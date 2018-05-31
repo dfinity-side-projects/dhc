@@ -1,9 +1,5 @@
 = Dfinity Haskell Compiler =
 
-https://jenkins.london.dfinity.build/job/dhc/badge/icon)](https://jenkins.london.dfinity.build/job/dhc/[Build Status]
-
-== Summary ==
-
 DHC is a Haskell compiler that produces WebAssembly.
 
 It accepts only a tiny subset of the language.
@@ -37,7 +33,7 @@ In `system.putInt`, we split the integer into 32-bit halves to make life easier
 for JavaScript.
 
 The `rundhc` tool can interpret the output of `dhc`. It expects the input
-WebAssembly binary to export a function named `main`, that takes no arguments
+WebAssembly binary to export a function named `main` that takes no arguments
 and returns no arguments.
 
 For example:

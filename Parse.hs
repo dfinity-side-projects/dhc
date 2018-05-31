@@ -160,7 +160,7 @@ insL p s = ((p, (LexSpecial, s)):)
 type Parser = Parsec [Lexeme] ()
 data TopLevel = Super (String, Ast)
   | ClassDecl String String [(String, Type)]
-  | InstanceDecl String String [(String, Ast)]
+  | InstanceDecl [(String, String)] String Type [(String, Ast)]
   | GenDecl (String, Type)
   | DataDecl [(String, (Maybe (Int, Int), Type))]
   | PublicDecl [String]
@@ -208,11 +208,18 @@ toplevels = topDecls where
     ms <- embrace cDecl
     pure $ ClassDecl s t ms
   instanceDecl = do
+    ctx <- option [] $ try $ do
+      ctxCls <- con
+      ctxVar <- tyVar
+      want "=>"
+      pure [(ctxCls, ctxVar)]
     s <- con
-    t <- con
+    t <- inst
     want "where"
     ms <- embrace iDecl
-    pure $ InstanceDecl s t ms
+    pure $ InstanceDecl ctx s t ms
+  inst = (TC <$> con)
+    <|> (TApp (TC "[]") . GV <$> between (want "[") (want "]") tyVar)
   cDecl = genDecl
   iDecl = do
     (fun:args) <- funlhs

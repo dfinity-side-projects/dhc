@@ -26,6 +26,7 @@ import Ast
 import Boost
 import Parse
 
+type QualType = (Type, [(String, String)])
 data Clay = Clay
   -- Public and secret functions are accompanied by a list of their
   -- arguments types and a program for decoding them from the heap.
@@ -43,12 +44,12 @@ data Clay = Clay
   , classes :: Map String [String]
   -- We delay processing instance declarations until after all class
   -- definitions have been handled, including those from the prelude.
-  , preInstances :: [(String, Type, [(String, Ast)])]
+  , preInstances :: [([(String, String)], String, Type, [(String, Ast)])]
   -- | e.g. "Monad" ->
-  --   [ (TC "Maybe", Ast of tuple (maybe->>=, maybe-pure)
-  --   , (TC "IO", Ast of tuple (io->>=, io->pure)
+  --   [ (TC "Maybe", Ast of tuple (maybe->>=, maybe-pure))
+  --   , (TC "IO", Ast of tuple (io->>=, io-pure))
   --   ]
-  , instances :: Map String [(Type, Ast)]
+  , instances :: Map String [(QualType, Ast)]
   } deriving Show
 
 newClay :: [TopLevel] -> Either String Clay
@@ -73,8 +74,8 @@ newClay ts = do
       xs = sortOn fst unsorted
       m1 = foldl' addMethod (methods p) $ zip [0..] xs
       addMethod m (idx, (mName, mType)) = M.insert mName (mType, idx, (s, ty)) m
-    InstanceDecl cl tyStr is -> Right p
-      { preInstances = (cl, TC tyStr, sortOn fst is):preInstances p }
+    InstanceDecl ctx cl ty is -> Right p
+      { preInstances = (ctx, cl, ty, sortOn fst is):preInstances p }
     GenDecl x -> Right p { genDecls = x:genDecls p }
     DataDecl xs -> Right p { datas = foldl' (\m (k, v) -> M.insert k v m) (datas p) xs }
     PublicDecl xs -> Right p { publics = zip xs $ repeat [] }
@@ -101,20 +102,22 @@ newClay ts = do
 --
 -- Actually, the generated prefixes are uglier because we just use `show`,
 -- which produces "TC \"Maybe\"" instead of "Maybe".
-mkDict :: Clay -> (String, Type, [(String, Ast)]) -> Either String Clay
-mkDict p (cl, ty, is) = case M.lookup cl $ classes p of
-  Nothing -> Left $ "unknown typeclass: " ++ cl
+mkDict :: Clay -> ([(String, String)], String, Type, [(String, Ast)]) -> Either String Clay
+mkDict p (ctx, cls, ty, is) = case M.lookup cls $ classes p of
+  Nothing -> Left $ "unknown typeclass: " ++ cls
   Just ms -> do
-    when (sorted /= ms) $ Left $ "instance methods disagree with class: " ++ cl ++ " " ++ show ty
+    when (sorted /= ms) $ Left $ "instance methods disagree with class: " ++ cls ++ " " ++ show ty
     Right p
-      { instances = M.insertWith (++) cl [(ty, dict)] $ instances p
-      , supers = supers p `M.union` M.fromList (first prefix <$> is)
+      { instances = M.insertWith (++) cls [((ty, ctx), dict)] $ instances p
+      , supers = supers p `M.union` M.fromList (first (methodPrefix ty) <$> is)
       }
     where
-    dict | [one] <- sorted = Ast $ Var $ prefix one
-         | otherwise = foldl' ((Ast .) . (:@)) (Ast $ Pack 0 $ length is) $ Ast . Var . prefix <$> sorted
+    dict | [one] <- sorted = Ast $ Var $ methodPrefix ty one
+         | otherwise = foldl' ((Ast .) . (:@)) (Ast $ Pack 0 $ length is) $ Ast . Var . methodPrefix ty <$> sorted
     sorted = sort $ fst <$> is
-    prefix = ((show ty ++ "-") ++)
+
+methodPrefix :: Type -> String -> String
+methodPrefix ty method = concat [show ty, "-", method]
 
 hsToAst :: Boost -> QQuoter -> String -> Either String Clay
 hsToAst boost qq prog = do
@@ -135,7 +138,8 @@ hsToAst boost qq prog = do
     subbedDefs =
         (second expandCase <$>)
       . liftLambdas
-      -- Saturate constructors may create lambdas, so must occur before they're lifted.
+      -- Saturating constructors may create lambdas, so must occur before
+      -- we lift lambdas.
       . (second saturateCons <$>)
       . (second snd <$>) $ inferred
     types = M.fromList $ second fst <$> inferred
@@ -146,7 +150,7 @@ hsToAst boost qq prog = do
       where
       Just (ty, _) = M.lookup s types
       addDec acc t = case t of
-        a :-> b -> addDec ((a, dictSolve cl [] M.empty $ Ast (Placeholder "dfromUnboxed" a)) : acc) b
+        a :-> b -> addDec ((a, dictSolve inferred cl [] M.empty $ Ast (Placeholder "dfromUnboxed" a)) : acc) b
         TApp (TC "IO") (TC "()") -> reverse acc
         _ -> error "exported functions must return IO ()"
   pure cl
@@ -168,11 +172,15 @@ parseDefs s = newClay =<< either (Left . show) Right (parseDfnHs justHere s)
 -- The Constraints monad combines a State monad and an Either monad.
 -- The state consists of the set of constraints and next integer available
 -- for naming a free variable, and the contexts of each variable.
-data ConState = ConState Int [(Type, Type)] (Map String [String])
+data ConState = ConState
+  String -- Prefix for generated free variables.
+  Int  -- Integer for next free variable name.
+  [(Type, Type)]  -- Constraints added so far.
+  (Map String [String])  -- Contexts of each variable.
 newtype Constraints a = Constraints (ConState -> Either String (a, ConState))
 
-buildConstraints :: Constraints a -> Either String (a, ConState)
-buildConstraints (Constraints f) = f $ ConState 0 [] M.empty
+buildConstraints :: String -> Constraints a -> Either String (a, ConState)
+buildConstraints pre (Constraints f) = f $ ConState pre 0 [] M.empty
 
 instance Functor Constraints where fmap = liftM
 instance Applicative Constraints where { (<*>) = ap ; pure = return }
@@ -183,16 +191,15 @@ instance Monad Constraints where
   return a = Constraints $ \p -> Right (a, p)
 
 newTV :: Constraints Type
-newTV = Constraints $ \(ConState i cs m) -> Right (TV $ "_" ++ show i, ConState (i + 1) cs m)
+newTV = Constraints $ \(ConState pre i cs m) -> Right (TV $ pre ++ show i, ConState pre (i + 1) cs m)
 
 addConstraint :: (Type, Type) -> Constraints ()
-addConstraint c = Constraints $ \(ConState i cs m) -> Right ((), ConState i (c:cs) m)
+addConstraint c = Constraints $ \(ConState pre i cs m) -> Right ((), ConState pre i (c:cs) m)
 
 addContext :: String -> String -> Constraints ()
-addContext s x = Constraints $ \(ConState i cs m) -> Right ((), ConState i cs $ M.insertWith union x [s] m)
+addContext s x = Constraints $ \(ConState pre i cs m) -> Right ((), ConState pre i cs $ M.insertWith union x [s] m)
 
 type Globals = Map String (Maybe (Int, Int), Type)
-type QualType = (Type, [(String, String)])
 
 -- | Gathers constraints.
 -- Replaces overloaded methods with Placeholder.
@@ -307,16 +314,17 @@ subStore ty = case ty of
   unboxed = TApp $ TC "Unboxed"
 
 generalize
-  :: Clay
+  :: [(String, (QualType, Ast))]
+  -> Clay
   -> Solution
   -> (String, AAst Type)
   -> (String, (QualType, Ast))
-generalize cl (soln, ctx) (fun, a0@(AAst t0 _)) = (fun, (qt, a1)) where
+generalize scs cl (soln, ctx) (fun, a0@(AAst t0 _)) = (fun, (qt, a1)) where
   qt@(_, qs) = runState (generalize' ctx $ typeSolve soln t0) []
   -- TODO: Compute nub of qs?
   dsoln = zip qs $ ("#d" ++) . show <$> [(0::Int)..]
   -- TODO: May be useful to preserve type annotations?
-  a1 = dictSolve cl dsoln soln ast
+  a1 = dictSolve scs cl dsoln soln ast
   dvars = snd <$> dsoln
   ast = case deAnn a0 of
     Ast (Lam ss body) -> Ast $ Lam (dvars ++ ss) $ expandFun body
@@ -341,8 +349,14 @@ generalize' ctx ty = case ty of
   TApp u v -> TApp  <$> generalize' ctx u <*> generalize' ctx v
   _        -> pure ty
 
-dictSolve :: Clay -> [((String, String), String)] -> Map String Type -> Ast -> Ast
-dictSolve cl dsoln soln = ffix $ \h (Ast ast) -> case ast of
+dictSolve
+  :: [(String, (QualType, Ast))]
+  -> Clay
+  -> [((String, String), String)]
+  -> Map String Type
+  -> Ast
+  -> Ast
+dictSolve scs cl dsoln soln = ffix $ \h (Ast ast) -> case ast of
   -- Replace method Placeholders with selector and dictionary Placeholder.
   Placeholder s t | Just (_, idx, (typeClass, _)) <- M.lookup s $ methods cl ->
     case length $ classes cl M.! typeClass of
@@ -354,43 +368,62 @@ dictSolve cl dsoln soln = ffix $ \h (Ast ast) -> case ast of
     u -> findInstance d u
   _       -> Ast $ h ast
   where
-    aVar = Ast . Var
-    infixl 5 @@
-    x @@ y = Ast $ x :@ y
-    rec = dictSolve cl dsoln soln
-    findInstance typeClass t | Just ast <- lookup t =<< M.lookup typeClass (instances cl) = ast
-    findInstance "Eq" (TApp (TC "[]") a) = aVar "list_eq_instance" @@ rec (Ast $ Placeholder "Eq" a)
-    findInstance "Message" t = Ast . CallSlot tu $ rec . Ast . Placeholder "ctoUnboxed" <$> tu
-      where tu = either (error "want tuple") id (listFromTupleType t)
-    -- The "Storage" typeclass has four methods:
-    --  1. toAnyRef
-    --  2. fromAnyRef
-    --  3. toUnboxed
-    --  4. fromUnboxed
-    -- For boxed types such as databufs, 1 and 2 are the same as 3 and 4.
-    -- For unboxed types, such as integers, 1 encodes to a databuf, 2 decodes
-    -- from a databuf, and 3 and 4 leave the input unchanged.
-    findInstance "Storage" t = case t of
-      TC "Databuf" -> boxy (aVar "#reduce") (aVar "#reduce")
-      TC "String" -> boxy (aVar "." @@ aVar "#reduce" @@ aVar "toD") (aVar "." @@ aVar "#reduce" @@ aVar "fromD")
-      TC "Port" -> boxy (aVar "#reduce") (aVar "#reduce")
-      TC "Actor" -> boxy (aVar "#reduce") (aVar "#reduce")
-      TC "Module" -> boxy (aVar "#reduce") (aVar "#reduce")
-      TC "Int" -> Ast (Pack 0 4) @@ aVar "Int-toAny" @@ aVar "Int-fromAny" @@ aVar "#reduce" @@ aVar "#reduce"
-      TC "Bool" -> Ast (Pack 0 4) @@ aVar "Bool-toAny" @@ aVar "Bool-fromAny" @@ aVar "Bool-toUnboxed" @@ aVar "Bool-fromUnboxed"
-      TApp (TC "[]") a -> let
-        ltai = aVar "list_to_any_instance" @@ rec (Ast $ Placeholder "Storage" a)
-        lfai = aVar "list_from_any_instance" @@ rec (Ast $ Placeholder "Storage" a)
-        in boxy ltai lfai
-      TApp (TC "()") (TApp a b) -> let
-        -- TODO: Brittle. Relies on order constraints are found.
-        -- Implement contexts for instance declarations.
-        ptai = aVar "pair_to_any_instance" @@ rec (Ast $ Placeholder "Storage" b) @@ rec (Ast $ Placeholder "Storage" a)
-        pfai = aVar "pair_from_any_instance" @@ rec (Ast $ Placeholder "Storage" b) @@ rec (Ast $ Placeholder "Storage" a)
-        in boxy ptai pfai
-      e -> error $ "BUG! no Storage for " ++ show e
-      where boxy to from = Ast (Pack 0 4) @@ to @@ from @@ to @@ from
-    findInstance d t = error $ "BUG! bad class: " ++ show (d, t)
+  aVar = Ast . Var
+  infixl 5 @@
+  x @@ y = Ast $ x :@ y
+  rec = dictSolve scs cl dsoln soln
+  findInstance typeClass t | Just insts <- M.lookup typeClass $ instances cl
+    = case matchInstance typeClass t insts of
+      Nothing -> error "BUG! missing instance"
+      Just ast -> rec ast
+  findInstance "Message" t = Ast . CallSlot tu $ rec . Ast . Placeholder "ctoUnboxed" <$> tu
+    where tu = either (error "want tuple") id $ listFromTupleType t
+  -- The "Storage" typeclass has four methods:
+  --  1. toAnyRef
+  --  2. fromAnyRef
+  --  3. toUnboxed
+  --  4. fromUnboxed
+  -- For boxed types such as databufs, 1 and 2 are the same as 3 and 4.
+  -- For unboxed types, such as integers, 1 encodes to a databuf, 2 decodes
+  -- from a databuf, and 3 and 4 leave the input unchanged.
+  findInstance "Storage" t = case t of
+    TC "Databuf" -> boxy (aVar "#reduce") (aVar "#reduce")
+    TC "String" -> boxy (aVar "." @@ aVar "#reduce" @@ aVar "toD") (aVar "." @@ aVar "#reduce" @@ aVar "fromD")
+    TC "Port" -> boxy (aVar "#reduce") (aVar "#reduce")
+    TC "Actor" -> boxy (aVar "#reduce") (aVar "#reduce")
+    TC "Module" -> boxy (aVar "#reduce") (aVar "#reduce")
+    TC "Int" -> Ast (Pack 0 4) @@ aVar "Int-toAny" @@ aVar "Int-fromAny" @@ aVar "#reduce" @@ aVar "#reduce"
+    TC "Bool" -> Ast (Pack 0 4) @@ aVar "Bool-toAny" @@ aVar "Bool-fromAny" @@ aVar "Bool-toUnboxed" @@ aVar "Bool-fromUnboxed"
+    TApp (TC "[]") a -> let
+      ltai = aVar "list_to_any_instance" @@ rec (Ast $ Placeholder "Storage" a)
+      lfai = aVar "list_from_any_instance" @@ rec (Ast $ Placeholder "Storage" a)
+      in boxy ltai lfai
+    TApp (TC "()") (TApp a b) -> let
+      -- TODO: Brittle. Relies on order constraints are found.
+      -- Implement contexts for instance declarations.
+      ptai = aVar "pair_to_any_instance" @@ rec (Ast $ Placeholder "Storage" b) @@ rec (Ast $ Placeholder "Storage" a)
+      pfai = aVar "pair_from_any_instance" @@ rec (Ast $ Placeholder "Storage" b) @@ rec (Ast $ Placeholder "Storage" a)
+      in boxy ptai pfai
+    e -> error $ "BUG! no Storage for " ++ show e
+    where boxy to from = Ast (Pack 0 4) @@ to @@ from @@ to @@ from
+  findInstance d t = error $ "BUG! bad class: " ++ show (d, t)
+
+  matchInstance typeClass t candidates = do
+    ((sol, ctx), (qt, ast)) <- lookupType cl t candidates
+    let
+      Just classMethods = M.lookup typeClass $ classes cl
+      mAsts = mkDictEntry <$> classMethods
+      -- TODO: Respect the order of the clauses in the context of `qt`.
+      mkDictEntry moo = foldl' addDict (Ast $ Var $ methodPrefix (fst qt) moo) $ M.assocs ctx
+      addDict a (zzz, [xxx]) = case typeSolve sol (TV zzz) of
+        TV v -> let Just dv = lookup (xxx, v) dsoln
+          in Ast $ a :@ Ast (Var dv)
+        tt -> Ast $ a :@ Ast (Placeholder xxx tt)
+      addDict _ _ = error "TODO: more than one constraint per type variable"
+    case () of
+      () | M.null sol -> Just ast
+         | [mAst] <- mAsts -> Just mAst
+         | otherwise -> Just $ foldl' ((Ast .) . (:@)) (Ast $ Pack 0 $ length classMethods) mAsts
 
 typeSolve :: Map String Type -> Type -> Type
 typeSolve soln t = case t of
@@ -400,16 +433,27 @@ typeSolve soln t = case t of
   _             -> t
   where rec = typeSolve soln
 
+lookupType :: Clay -> Type -> [(QualType, Ast)] -> Maybe (Solution, (QualType, Ast))
+lookupType _ _ [] = Nothing
+lookupType cl t ((qt, ast):rest) = case unify cl cs m of
+  Left _ -> lookupType cl t rest
+  Right zzz -> Just (zzz, (qt, ast))
+  where
+  Right (_, ConState _ _ cs m) = buildConstraints "#" $ do
+    (ty, _) <- instantiate qt
+    addConstraint (ty, t)
+    pure ()
+
 -- | The `propagateClasses` and `propagateClassTyCon` functions of
 -- "Implementing type classes".
 propagate :: Clay -> [String] -> Type -> Either String [(String, [String])]
 propagate _ [] _ = Right []
 propagate _ cs (TV y) = Right [(y, cs)]
 propagate cl cs t = concat <$> mapM propagateTyCon cs where
-  propagateTyCon s | Just m <- M.lookup s $ instances cl, Just _ <- lookup t m = Right []
-  propagateTyCon "Eq" = case t of
-    TApp (TC "[]") a -> rec ["Eq"] a
-    _ -> Left $ "no Eq instance: " ++ show t
+  propagateTyCon s | Just insts <- M.lookup s $ instances cl = case lookupType cl t insts of
+    Nothing -> Left $ unwords ["no", s, "instance:", show t]
+    -- For example, given `Eq [a]`, returns `Eq a`.
+    Just ((_, ctx), _) -> Right $ M.assocs ctx
   propagateTyCon "Storage" = case t of
     TApp (TC "()") (TApp a b) -> (++) <$> rec ["Storage"] a <*> rec ["Storage"] b
     TApp (TC "[]") a -> rec ["Storage"] a
@@ -437,6 +481,7 @@ listFromTupleType ty = case ty of
     TApp h@(TV _) rest -> (h:) <$> weirdList rest
     _ -> Left $ "want tuple: " ++ show tup
 
+-- e.g. [TV 'a' -> TC "Int", ...], [TV 'b', ["Eq", "Ord"], ...]
 type Solution = (Map String Type, Map String [String])
 
 unify :: Clay -> [(Type, Type)] -> Map String [String] -> Either String Solution
@@ -540,7 +585,7 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, ds M.
     `M.union` M.fromList (second ((,) Nothing) <$> stores cl)
   inferMutual :: ([(String, (QualType, Ast))], Map String Type) -> [(String, Ast)] -> Either String ([(String, (QualType, Ast))], Map String Type)
   inferMutual (acc, accStorage) grp = do
-    (typedAsts, ConState _ cs m) <- buildConstraints $ forM grp $ \(s, d) -> do
+    (typedAsts, ConState _ _ cs m) <- buildConstraints "_" $ forM grp $ \(s, d) -> do
       t <- gather cl globs env d
       addConstraint (TV $ '*':s, annOf t)
       when (s == "main") $ addConstraint (TV $ '*':s, TApp (TC "IO") $ TC "()")
@@ -554,11 +599,11 @@ inferType boost cl = foldM inferMutual ([], M.empty) $ map (map (\k -> (k, ds M.
     sol@(solt, _) <- foldM (checkPubSecs cl) initSol (fst <$> grp)
     let storageCons = M.filterWithKey (\k _ -> head k == '@') solt
     -- TODO: Look for conflicting storage constraints.
-    pure ((++ acc) $ generalize cl sol <$> typedAsts, accStorage `M.union` storageCons)
+    pure ((++ acc) $ generalize acc cl sol <$> typedAsts, accStorage `M.union` storageCons)
     where
-      annOf (AAst a _) = a
-      tvs = TV . ('*':) . fst <$> grp
-      env = zip (fst <$> grp) (zip tvs $ repeat []) ++ map (second fst) acc
+    annOf (AAst a _) = a
+    tvs = TV . ('*':) . fst <$> grp
+    env = zip (fst <$> grp) (zip tvs $ repeat []) ++ map (second fst) acc
 
 checkPubSecs :: Clay -> Solution -> String -> Either String Solution
 checkPubSecs cl (soln, ctx) s
