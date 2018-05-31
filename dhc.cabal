@@ -26,12 +26,15 @@ library
     Boost
     DHC
     Encode
+    Hero.Hero
     Parse
     Std
     WasmOp
   ghc-options:
     -O2
     -Wall
+  other-modules:
+    Hero.Parse
 
 executable dhc
   default-language:
