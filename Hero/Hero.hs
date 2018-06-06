@@ -12,9 +12,7 @@ module Hero.Hero
   , mkHeroVM
   , setArgsVM
   , setTable
-  , origElements
-  , globalVM, setGlobalVM
-  , permaGlobalVM
+  , globalVM
   , getNumVM, putNumVM
   , stateVM, putStateVM
   , ripWasm
@@ -26,7 +24,6 @@ import qualified Data.Map.Strict as IM
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IM
 #endif
-import Control.Arrow
 import Data.Bits
 import Data.Char (ord)
 import Data.Int
@@ -72,17 +69,8 @@ putNumVM :: Integral n => Int -> Int32 -> n -> HeroVM a -> HeroVM a
 putNumVM w addr n vm@(HeroVM {mem}) = vm { mem = putNum w addr n mem }
 
 -- | Reads global variables.
-globalVM :: HeroVM a -> IntMap WasmOp
-globalVM vm = globs vm
-
--- | Writes global variables.
-setGlobalVM :: [(Int, WasmOp)] -> HeroVM a -> HeroVM a
-setGlobalVM m vm = vm { globs = IM.fromList m `IM.union` globs vm }
-
--- | Reads persistent global variables.
-permaGlobalVM :: HeroVM a -> IntMap (WasmOp, WasmType)
-permaGlobalVM vm = IM.fromList $ map f $ martinGlobals $ wasm vm where
-  f (i, t) = (i, (globs vm IM.! i, t))
+globalVM :: HeroVM a -> [(Int, WasmOp)]
+globalVM vm = IM.assocs $ globs vm
 
 getNum :: Integral n => Int -> Int32 -> IntMap Int -> n
 --getNum w addr mem = sum $ zipWith (*) (fromIntegral <$> bs) ((256^) <$> [(0 :: Int)..]) where bs = fmap (mem IM.!) ((fromIntegral addr +) <$> [0..w-1])
@@ -337,11 +325,3 @@ setArgsVM ls vm = vm { stack = reverse ls ++ stack vm }
 
 setTable :: Int32 -> VMFun a -> HeroVM a -> HeroVM a
 setTable slot fun vm = vm { table = IM.insert (fromIntegral slot) fun $ table vm }
-
--- Returns elements of original table as
--- association list of slot to (function index, function type).
-origElements :: HeroVM a -> [(Int, (Int, [WasmType]))]
-origElements vm = second (\n -> (n, maybe (error "BUG! missing type")
-  (martinTypes!!) $ lookup (n  - length imports) martinTypeMap)) <$> es where
-  Wasm {martinTypes, martinTypeMap, elemSection, imports} = wasm vm
-  es = concatMap (\(offset, ns) -> zip [offset..] ns) elemSection

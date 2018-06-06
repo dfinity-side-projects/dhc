@@ -3,7 +3,7 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Hero.Parse (parseWasm, Wasm(..), ripWasm) where
+module Hero.Parse (parseWasm, Wasm(..), ripWasm, elTable) where
 
 #ifdef __HASTE__
 import qualified Data.Map.Strict as IM
@@ -44,7 +44,7 @@ data Wasm = Wasm
   , dfnExports :: [(String, [WasmType])]
   , martinTypes :: [[WasmType]]
   , martinTypeMap :: [(Int, Int)]
-  , martinGlobals :: [(Int, WasmType)]
+  , permaGlobals :: [(Int, WasmType)]
   , persist :: [(Int, WasmType)]
   , haskell :: String
   } deriving Show
@@ -300,7 +300,7 @@ wasm = do
             tmp <- varuint7
             when (tmp /= 3) $ bad "expect 3"
             (,) <$> varuint32 <*> martinValueType
-          pure w { martinGlobals = g }
+          pure w { permaGlobals = g }
         "dfndbg" -> remainder >> pure w
         "dfnhs" -> do
           void $ varuint32  -- Should be 1.
@@ -408,3 +408,11 @@ ripWasm es w = (zip es idxs, fMap)
   Just idxs = mapM (`lookup` exports w) es
   reachable = IS.elems $ followCalls idxs $ funBody <$> functions w
   fMap = (\i -> (i, functions w IM.! i)) <$> reachable
+
+-- Returns elements of table as
+-- association list of slot to (function index, function type).
+elTable :: Wasm -> [(Int, (Int, [WasmType]))]
+elTable (Wasm {martinTypes, martinTypeMap, elemSection, imports})
+  = second (\n -> (n, maybe (error "BUG! missing type")
+    (martinTypes!!) $ lookup (n  - length imports) martinTypeMap)) <$> es where
+  es = concatMap (\(offset, ns) -> zip [offset..] ns) elemSection

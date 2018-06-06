@@ -1,6 +1,6 @@
 import qualified Data.ByteString as B
 import Test.HUnit
-import Hero
+import Hero.Hero
 
 main :: IO Counts
 main = runTestTT test42
