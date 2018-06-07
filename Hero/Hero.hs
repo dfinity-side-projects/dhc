@@ -10,10 +10,9 @@ module Hero.Hero
   , runWasmIndex
   , runWasmSlot
   , mkHeroVM
-  , setArgsVM
   , setTable
   , globalVM
-  , getNumVM, putNumVM
+  , getWord8VM, putWord8VM
   , stateVM, putStateVM
   , ripWasm
   ) where
@@ -25,7 +24,6 @@ import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IM
 #endif
 import Data.Bits
-import Data.Char (ord)
 import Data.Int
 import Data.List
 import Data.Maybe
@@ -45,7 +43,7 @@ data HeroVM a = HeroVM
   , locs  :: [IntMap WasmOp]
   , stack :: [WasmOp]
   , insts :: [[WasmOp]]
-  , mem   :: IntMap Int
+  , mem   :: IntMap Word8
   , sigs  :: IntMap ([WasmType], [WasmType])
   , table :: IntMap (VMFun a)
   , wasm  :: Wasm
@@ -72,14 +70,28 @@ putNumVM w addr n vm@(HeroVM {mem}) = vm { mem = putNum w addr n mem }
 globalVM :: HeroVM a -> [(Int, WasmOp)]
 globalVM vm = IM.assocs $ globs vm
 
-getNum :: Integral n => Int -> Int32 -> IntMap Int -> n
---getNum w addr mem = sum $ zipWith (*) (fromIntegral <$> bs) ((256^) <$> [(0 :: Int)..]) where bs = fmap (mem IM.!) ((fromIntegral addr +) <$> [0..w-1])
-getNum w addr mem = sum $ zipWith (*) (fromIntegral <$> bs) ((256^) <$> [(0 :: Int)..]) where bs = fmap (\a -> fromMaybe 0 $ IM.lookup a mem) ((fromIntegral addr +) <$> [0..w-1])
+-- | Reads a byte from memory.
+getWord8VM :: Int32 -> HeroVM a -> Word8
+getWord8VM a vm = getWord8 a $ mem vm
 
-putNum :: Integral n => Int -> Int32 -> n -> IntMap Int -> IntMap Int
+-- | Writes a byte to memory.
+putWord8VM :: Int32 -> Word8 -> HeroVM a -> HeroVM a
+putWord8VM a n vm = vm { mem = putWord8 a n $ mem vm }
+
+getWord8 :: Int32 -> IntMap Word8 -> Word8
+getWord8 a mem = fromMaybe 0 $ IM.lookup (fromIntegral a) mem
+
+putWord8 :: Int32 -> Word8 -> IntMap Word8 -> IntMap Word8
+putWord8 a n mem = IM.insert (fromIntegral a) n mem
+
+getNum :: Integral n => Int -> Int32 -> IntMap Word8 -> n
+getNum w addr mem = sum $ zipWith (*) bs ((256^) <$> [(0 :: Int)..]) where
+  bs = fromIntegral . (`getWord8` mem) . (addr +) <$> [0..fromIntegral w-1]
+
+putNum :: Integral n => Int -> Int32 -> n -> IntMap Word8 -> IntMap Word8
 putNum w addr n mem = foldl' f mem [0..w-1] where
-  f m k = IM.insert (fromIntegral addr + k) (getByte k) m
-  getByte k = fromIntegral n `div` (256^k) `mod` 256
+  f m k = putWord8 (addr + fromIntegral k) (getByte k) m
+  getByte k = fromIntegral $ ((fromIntegral n :: Word64) `shiftR` (8*k)) .&. 255
 
 -- TODO: Check this works as expected on negative inputs.
 rem32 :: Int32 -> Int32 -> Int32
@@ -314,7 +326,7 @@ mkHeroVM st imps w gs = HeroVM
   , state = st
   } where
   initGlobals = IM.fromList $ (zip [0..] $ head . snd <$> globals w) ++ gs
-  strToAssocs ([I32_const n], s) = zip [fromIntegral n..] $ ord <$> s
+  strToAssocs ([I32_const n], s) = zip [fromIntegral n..] $ fromIntegral <$> s
   strToAssocs _ = error "BUG!"
   mkElems (offset, ns) = zip [offset..] $ wrapCall <$> ns
   wrapCall n = \vm args -> runWasmIndex n args vm

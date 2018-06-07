@@ -15,11 +15,12 @@ import qualified Data.IntSet as IS
 #endif
 import Control.Arrow
 import Control.Monad
-import qualified Data.ByteString.Char8 as B8
-import Data.ByteString.Char8 (ByteString)
+import qualified Data.ByteString as B
+import Data.ByteString (ByteString)
 import Data.Char
 import Data.Int
 import Data.Maybe
+import Data.Word
 import WasmOp
 
 #ifdef __HASTE__
@@ -40,7 +41,7 @@ data Wasm = Wasm
   , start :: Maybe Int
   , elemSection :: [(Int, [Int])]
   , functions :: IntMap WasmFun
-  , dataSection :: [([WasmOp], String)]
+  , dataSection :: [([WasmOp], [Word8])]
   , dfnExports :: [(String, [WasmType])]
   , martinTypes :: [[WasmType]]
   , martinTypeMap :: [(Int, Int)]
@@ -61,25 +62,25 @@ instance Monad       ByteParser where
     where good (r, t) = let ByteParser gg = g r in gg t
   return a = ByteParser $ \s -> Right (a, s)
 
-next :: ByteParser Char
+next :: ByteParser Word8
 next = ByteParser f where
-  f s | B8.null s = Left "unexpected EOF"
-      | otherwise = Right (B8.head s, B8.tail s)
+  f s | B.null s = Left "unexpected EOF"
+      | otherwise = Right (B.head s, B.tail s)
 
 repNext :: Int -> ByteParser ByteString
 repNext n = ByteParser f where
-  f s | B8.length s < n = Left "missing bytes or size too large"
-      | otherwise = Right $ B8.splitAt n s
+  f s | B.length s < n = Left "missing bytes or size too large"
+      | otherwise = Right $ B.splitAt n s
 
 isEof :: ByteParser Bool
-isEof = ByteParser f where f s = Right (B8.null s, s)
+isEof = ByteParser f where f s = Right (B.null s, s)
 
 bad :: String -> ByteParser a
 bad = ByteParser . const . Left
 
 byteParse :: ByteParser a -> ByteString -> Either String a
 byteParse (ByteParser f) s = f s >>= (\(w, t) ->
-  if B8.null t then Right w else Left "expected EOF")
+  if B.null t then Right w else Left "expected EOF")
 
 remainder :: ByteParser ByteString
 remainder = ByteParser $ \s -> Right (s, "")
@@ -92,23 +93,23 @@ wasm = do
     varuint = fromIntegral <$> f 1 0 where
       f :: Integer -> Integer -> ByteParser Integer
       f m acc = do
-        d <- fromIntegral . ord <$> next
+        d <- fromIntegral <$> next
         if d > 127 then f (m * 128) $ (d - 128) * m + acc else pure $ d*m + acc
 
     varint = f 1 0 where
       f :: Integer -> Integer -> ByteParser Integer
       f m acc = do
-        d <- fromIntegral . ord <$> next
+        d <- fromIntegral <$> next
         if d > 127 then f (m * 128) $ (d - 128) * m + acc else pure $
           if d >= 64 then d*m + acc - 128*m else d*m + acc
 
     varuint1 = varuint
-    varuint7 = ord <$> next
+    varuint7 = next
     varuint32 = varuint
 
     varint7 :: ByteParser Int
     varint7 = do
-      c <- ord <$> next
+      c <- fromIntegral <$> next
       when (c >= 128) $ error "bad varint7"
       pure $ if c >= 64 then c - 128 else c
 
@@ -118,7 +119,8 @@ wasm = do
     varint64 :: ByteParser Int64
     varint64 = fromIntegral <$> varint
 
-    lstr = rep varuint32 next
+    lstr :: ByteParser String
+    lstr = rep varuint32 $ chr . fromIntegral <$> next
 
     allType = do
       t <- varuint7
@@ -260,7 +262,7 @@ wasm = do
         index <- varuint32
         when (index /= 0) $ bad "MVP allows at most one memory"
         offset <- codeBlock w
-        (,) offset <$> lstr
+        (,) offset <$> rep varuint32 next
       pure w { dataSection = ds }
 
     martinFuncType = do
@@ -305,12 +307,12 @@ wasm = do
         "dfnhs" -> do
           void $ varuint32  -- Should be 1.
           s <- remainder
-          pure w { haskell = B8.unpack s }
+          pure w { haskell = chr . fromIntegral <$> B.unpack s }
         _ -> remainder >> pure w
 
     codeBlock :: Wasm -> ByteParser [WasmOp]
     codeBlock w = do
-      opcode <- varuint7
+      opcode <- fromIntegral <$> varuint7
       s <- if
         | Just s <- lookup opcode $ zeroOperandOps -> pure s
         | Just s <- lookup opcode [(0x02, Block), (0x03, Loop)] -> do
@@ -390,7 +392,7 @@ wasm = do
     bad "bad header or version"
   else sect emptyWasm  -- Sections.
 
-parseWasm :: B8.ByteString -> Either String Wasm
+parseWasm :: B.ByteString -> Either String Wasm
 parseWasm b = do
   w@Wasm{imports, exports, martinTypeMap, martinTypes} <- byteParse wasm b
   let
