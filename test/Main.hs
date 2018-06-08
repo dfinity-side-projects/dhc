@@ -1,14 +1,17 @@
 {-# LANGUAGE QuasiQuotes #-}
 import Control.Arrow
 import Control.Monad
+import Data.Bits
 import qualified Data.ByteString as B
 import Data.ByteString.Char8 (unpack)
 import Data.ByteString.Short (ShortByteString, fromShort, toShort)
 import Data.Char (chr)
 import Data.Int
+import Data.List (foldl')
 import qualified Data.Map as M
 import Data.Maybe
 import Data.Monoid
+import Data.Word
 import Test.HUnit
 import Text.Heredoc (here, there)
 import Asm
@@ -292,12 +295,14 @@ runDemo src = case hsToWasm demoBoost src of
   Left err -> error err
   Right ints -> let
     wasm = either error id $ parseWasm $ B.pack $ fromIntegral <$> ints
-    in stateVM . snd <$> runWasm "main" [] (mkHeroVM "" syscall wasm [])
+    vm0 = mkHeroVM "" syscall wasm []
+    (mainFun, vm1) = getExport "main" vm0
+    in getState . snd <$> runWasm mainFun [] vm1
   where
   syscall ("system", "putStr") vm [I32_const ptr, I32_const len] = pure ([],
-    putStateVM (stateVM vm ++ [chr $ getNumVM 1 (ptr + i) vm | i <- [0..len - 1]]) vm)
+    putState (getState vm ++ [chr $ getNum 1 (ptr + i) vm | i <- [0..len - 1]]) vm)
   syscall ("system", "putInt") vm [I64_const i] = pure ([],
-    putStateVM (stateVM vm ++ show i) vm)
+    putState (getState vm ++ show i) vm)
   syscall _ _ _ = error "BUG! bad syscall"
 
 altWebTests :: [Test]
@@ -319,36 +324,47 @@ runAltWeb src = case hsToWasm altWebBoost src of
   Left err -> error err
   Right ints -> let
     Right wasm = parseWasm $ B.pack $ fromIntegral <$> ints
-    in stateVM . snd <$> runWasm "main" [] (mkHeroVM "" altWebSys wasm [])
+    vm0 = mkHeroVM "" altWebSys wasm []
+    (mainFun, vm1) = getExport "main" vm0
+    in getState . snd <$> runWasm mainFun [] vm1
 
 altWebSys :: (String, String) -> HeroVM String -> [WasmOp] -> IO ([WasmOp], HeroVM String)
 altWebSys ("dhc", "system") vm [I32_const n, I32_const sp, I32_const hp]
   | n == 21 = do
     when (getTag /= 6) $ error "BUG! want String"
     let
-      ptr = getNumVM 4 (addr + 4) vm
-      off = getNumVM 4 (addr + 8) vm
-      slen = getNumVM 4 (addr + 12) vm
-    pure ([], putNumVM 4 hp (5 :: Int)
-            $ putNumVM 4 (hp + 4) (0 :: Int)
-            $ putNumVM 4 sp hp
-            $ putNumVM 4 (sp - 4) (hp + 8)
-            $ putStateVM (stateVM vm ++
-              [chr $ getNumVM 1 (ptr + off + i) vm | i <- [0..slen - 1]])
+      ptr = getNum 4 (addr + 4) vm
+      off = getNum 4 (addr + 8) vm
+      slen = getNum 4 (addr + 12) vm
+    pure ([], putNum 4 hp (5 :: Int)
+            $ putNum 4 (hp + 4) (0 :: Int)
+            $ putNum 4 sp hp
+            $ putNum 4 (sp - 4) (hp + 8)
+            $ putState (getState vm ++
+              [chr $ getNum 1 (ptr + off + i) vm | i <- [0..slen - 1]])
             vm)
   | n == 22 = do
     when (getTag /= 3) $ error "BUG! want Int"
-    pure ([], putNumVM 4 hp (5 :: Int)
-            $ putNumVM 4 (hp + 4) (0 :: Int)
-            $ putNumVM 4 sp hp
-            $ putNumVM 4 (sp - 4) (hp + 8)
-            $ putStateVM (stateVM vm ++ show (getNumVM 8 (addr + 8) vm :: Int))
+    pure ([], putNum 4 hp (5 :: Int)
+            $ putNum 4 (hp + 4) (0 :: Int)
+            $ putNum 4 sp hp
+            $ putNum 4 (sp - 4) (hp + 8)
+            $ putState (getState vm ++ show (getNum 8 (addr + 8) vm :: Int))
             vm)
   | otherwise = error $ "BUG! bad syscall " ++ show n
   where
-    addr = getNumVM 4 (sp + 4) vm :: Int32
-    getTag = getNumVM 1 addr vm :: Int
+    addr = getNum 4 (sp + 4) vm :: Int32
+    getTag = getNum 1 addr vm :: Int
 altWebSys _ _ _ = error "BUG! bad syscall "
 
 main :: IO Counts
 main = runTestTT $ TestList $ lexOffsideTests ++ gmachineTests ++ demoTests ++ altWebTests
+
+getNum :: (Integral n) => Int -> Int32 -> HeroVM a -> n
+getNum w addr vm = sum $ zipWith (*) bs ((256^) <$> [(0 :: Int)..]) where
+  bs = fromIntegral . (`getWord8VM` vm) . (addr +) <$> [0..fromIntegral w-1]
+
+putNum :: (Integral n) => Int -> Int32 -> n -> HeroVM a -> HeroVM a
+putNum w addr n vm = foldl' f vm [0..w-1] where
+  f m k = putWord8VM (addr + fromIntegral k) (getByte k) m
+  getByte k = fromIntegral $ ((fromIntegral n :: Word64) `shiftR` (8*k)) .&. 255

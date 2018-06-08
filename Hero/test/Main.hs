@@ -9,11 +9,13 @@ test42 :: Test
 test42 = TestCase $ assertEqual "i32.const 42" "42" =<< runTiny fortyTwo
 
 runTiny :: B.ByteString -> IO String
-runTiny asm = stateVM . snd <$> (runWasm "e" [] $ mkHeroVM "" syscall wasm [])
+runTiny asm = getState . snd <$> runWasm eFun [] vm1
   where
+  vm0 = mkHeroVM "" syscall wasm []
+  (eFun, vm1) = getExport "e" vm0
   wasm = either error id $ parseWasm asm
   syscall ("i", "f") vm [I32_const a] = pure ([],
-    putStateVM (stateVM vm ++ show a) vm)
+    putState (getState vm ++ show a) vm)
   syscall a _ b = error $ show ("BUG! bad syscall", a, b)
 
 fortyTwo :: B.ByteString

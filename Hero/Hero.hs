@@ -7,13 +7,14 @@ module Hero.Hero
   , HeroVM
   , parseWasm
   , runWasm
-  , runWasmIndex
-  , runWasmSlot
   , mkHeroVM
-  , setTable
+  , setSlot
   , globalVM
   , getWord8VM, putWord8VM
-  , stateVM, putStateVM
+  , getState
+  , putState
+  , getExport
+  , getSlot
   , ripWasm
   ) where
 
@@ -37,6 +38,7 @@ type IntMap = IM.Map Int
 #endif
 
 type VMFun a = HeroVM a -> [WasmOp] -> IO ([WasmOp], HeroVM a)
+data FunRef a = FunInt Int | FunExt (VMFun a)
 
 data HeroVM a = HeroVM
   { globs :: IntMap WasmOp
@@ -45,26 +47,19 @@ data HeroVM a = HeroVM
   , insts :: [[WasmOp]]
   , mem   :: IntMap Word8
   , sigs  :: IntMap ([WasmType], [WasmType])
-  , table :: IntMap (VMFun a)
+  , table :: IntMap (FunRef a)
   , wasm  :: Wasm
   , state :: a
   -- Returns functions corresponding to module imports.
   , sys :: ((String, String) -> VMFun a)
+  , funrefs :: IntMap (FunRef a)
   }
 
-stateVM :: HeroVM a -> a
-stateVM vm = state vm
+getState :: HeroVM a -> a
+getState vm = state vm
 
-putStateVM :: a -> HeroVM a -> HeroVM a
-putStateVM a vm = vm {state = a}
-
--- | Reads an integer of a given width from linear memory.
-getNumVM :: Integral n => Int -> Int32 -> HeroVM a -> n
-getNumVM w addr vm = getNum w addr $ mem vm
-
--- | Writes an integer of a given width to linear memory.
-putNumVM :: Integral n => Int -> Int32 -> n -> HeroVM a -> HeroVM a
-putNumVM w addr n vm@(HeroVM {mem}) = vm { mem = putNum w addr n mem }
+putState :: a -> HeroVM a -> HeroVM a
+putState a vm = vm {state = a}
 
 -- | Reads global variables.
 globalVM :: HeroVM a -> [(Int, WasmOp)]
@@ -151,7 +146,9 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
       -- TODO: Dynamic type-check.
       inCount = length inSig
       (I32_const i:params) = take' (inCount + 1) stack
-    (results, vm1) <- (table vm IM.! fromIntegral i) (step $ drop' (inCount + 1) stack) (reverse params)
+    (results, vm1) <- case table vm IM.! fromIntegral i of
+      FunInt n ->  run vm { insts = (Call n:head insts):tail insts }
+      FunExt fe -> fe (step $ drop' (inCount + 1) stack) (reverse params)
     run $ setArgsVM results vm1
   Call i -> let
     Wasm {imports, functions} = wasm vm
@@ -298,18 +295,28 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
           mem' = putNum sz (addr + fromIntegral off) n mem
       run (step $ drop 2 stack) { mem = mem'}
 
+-- | Returns an exported function.
+getExport :: String -> HeroVM a -> (Int, HeroVM a)
+getExport f vm = (k, vm { funrefs = IM.insert k (FunInt n) $ funrefs vm }) where
+  k = IM.size $ funrefs vm
+  n = fromMaybe (error $ "bad export: " ++ f) $ lookup f $ exports $ wasm vm
+
+-- | Returns a function in the table.
+getSlot :: Int32 -> HeroVM a -> (Int, HeroVM a)
+getSlot i vm = (k, vm { funrefs = IM.insert k x $ funrefs vm }) where
+  k = IM.size $ funrefs vm
+  x = fromMaybe (error $ "bad slot: " ++ show i) $ IM.lookup (fromIntegral i) $ table vm
+
 -- | Runs a function at a given index.
 runWasmIndex :: Int -> [WasmOp] -> HeroVM a -> IO ([WasmOp], HeroVM a)
 runWasmIndex n args vm = run (setArgsVM args vm) { insts = [[Call n]] }
 
--- | Runs an export with arguments in a HeroVM.
-runWasm :: [Char] -> [WasmOp] -> HeroVM a -> IO ([WasmOp], HeroVM a)
-runWasm f args vm = runWasmIndex n args vm where
-  n = fromMaybe (error $ "bad export: " ++ f) $ lookup f $ exports $ wasm vm
-
--- | Runs a given slot.
-runWasmSlot :: Int -> ([WasmType], [WasmType]) -> [WasmOp] -> HeroVM a -> IO ([WasmOp], HeroVM a)
-runWasmSlot k t args vm = run (setArgsVM (args ++ [I32_const (fromIntegral k)]) vm) { insts = [[Call_indirect t]] }
+-- | Runs a function.
+runWasm :: Int -> [WasmOp] -> HeroVM a -> IO ([WasmOp], HeroVM a)
+runWasm f args vm = case IM.lookup f $ funrefs vm of
+  Nothing -> error "no such function"
+  Just (FunInt n) -> runWasmIndex n args vm
+  Just (FunExt fe) -> fe vm args
 
 -- | Builds a HeroVM for given Wasm binary, imports and persistent globals.
 mkHeroVM :: a -> ((String, String) -> VMFun a) -> Wasm -> [(Int, WasmOp)] -> HeroVM a
@@ -324,16 +331,16 @@ mkHeroVM st imps w gs = HeroVM
   , table = IM.fromList $ concatMap mkElems $ elemSection w
   , wasm = w
   , state = st
+  , funrefs = IM.empty
   } where
   initGlobals = IM.fromList $ (zip [0..] $ head . snd <$> globals w) ++ gs
   strToAssocs ([I32_const n], s) = zip [fromIntegral n..] $ fromIntegral <$> s
   strToAssocs _ = error "BUG!"
-  mkElems (offset, ns) = zip [offset..] $ wrapCall <$> ns
-  wrapCall n = \vm args -> runWasmIndex n args vm
+  mkElems (offset, ns) = zip [offset..] $ FunInt <$> ns
 
 -- | Place arguments on WebAssembly stack.
 setArgsVM :: [WasmOp] -> HeroVM a -> HeroVM a
 setArgsVM ls vm = vm { stack = reverse ls ++ stack vm }
 
-setTable :: Int32 -> VMFun a -> HeroVM a -> HeroVM a
-setTable slot fun vm = vm { table = IM.insert (fromIntegral slot) fun $ table vm }
+setSlot :: Int32 -> VMFun a -> HeroVM a -> HeroVM a
+setSlot slot fun vm = vm { table = IM.insert (fromIntegral slot) (FunExt fun) $ table vm }
