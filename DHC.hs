@@ -50,10 +50,11 @@ data Clay = Clay
   --   , (TC "IO", Ast of tuple (io->>=, io-pure))
   --   ]
   , instances :: Map String [(QualType, Ast)]
-  } deriving Show
+  , recursiveCompile :: String -> String
+  }
 
-newClay :: [TopLevel] -> Either String Clay
-newClay ts = do
+newClay :: (String -> String) -> [TopLevel] -> Either String Clay
+newClay rCompile ts = do
   p0 <- foldM f emptyClay ts
   let missing = (fst <$> publics p0) \\ M.keys (supers p0)
   unless (null missing) $ Left $ "missing public functions: " ++ show missing
@@ -63,7 +64,7 @@ newClay ts = do
       | otherwise = (s, TC "Store" `TApp` TV ('@':s))
   pure $ p0 { stores = storeCons . fst <$> stores p0 }
   where
-  emptyClay = Clay [] [] [] M.empty M.empty [] M.empty M.empty M.empty [] M.empty
+  emptyClay = Clay [] [] [] M.empty M.empty [] M.empty M.empty M.empty [] M.empty rCompile
   f p t = case t of
     Super (name, ast) -> Right p { supers = M.insert name ast $ supers p }
     ClassDecl s ty unsorted -> Right p
@@ -121,7 +122,7 @@ methodPrefix ty method = concat [show ty, "-", method]
 
 hsToAst :: Boost -> QQuoter -> String -> Either String Clay
 hsToAst boost qq prog = do
-  cl0 <- showErr $ newClay =<< either (Left . show) Right (parseDfnHs qq prog)
+  cl0 <- showErr $ newClay (either error id . qq "wasm") =<< either (Left . show) Right (parseDfnHs qq prog)
   preludeDefs <- parseDefs $ boostPrelude boost
   let
     cl1 = extractSecrets cl0
@@ -167,7 +168,7 @@ justHere "here" s = Right s
 justHere _ _ = Left "bad scheme"
 
 parseDefs :: String -> Either String Clay
-parseDefs s = newClay =<< either (Left . show) Right (parseDfnHs justHere s)
+parseDefs s = newClay undefined =<< either (Left . show) Right (parseDfnHs justHere s)
 
 -- The Constraints monad combines a State monad and an Either monad.
 -- The state consists of the set of constraints and next integer available
@@ -377,7 +378,7 @@ dictSolve scs cl dsoln soln = ffix $ \h (Ast ast) -> case ast of
       Nothing -> error "BUG! missing instance"
       Just ast -> rec ast
   findInstance "Message" t = Ast . CallSlot tu $ rec . Ast . Placeholder "ctoUnboxed" <$> tu
-    where tu = either (error "want tuple") id $ listFromTupleType t
+    where tu = either (error . show) id $ listFromTupleType t
   -- The "Storage" typeclass has four methods:
   --  1. toAnyRef
   --  2. fromAnyRef
@@ -671,9 +672,8 @@ topo suc vs = fst $ foldl' visit ([], []) vs where
     | otherwise = (\(xs, x:ys) -> (x:xs, ys)) $
       foldl' visit (done, v:doing) (suc v)
 
-freeV :: [(String, Ast)] -> [(String, AAst [String])]
-freeV = map f where
-  f (d, Ast ast) = (d, g [] ast)
+freeVars :: Ast -> AAst [String]
+freeVars (Ast ast) = g [] ast where
   g :: [String] -> AstF Ast -> AAst [String]
   g cand (Lam ss (Ast a)) = AAst (vs \\ ss) $ Lam ss a1 where
     a1@(AAst vs _) = g (union cand ss) a
@@ -693,7 +693,7 @@ freeV = map f where
     binders = fst <$> ds
     ds1 = map h ds
     h (s, Ast x) = (s, g (cand `union` binders) x)
-  g _ x = ffix (\h (Ast ast) -> AAst [] $ h ast) $ Ast x
+  g _ x = ffix (\h (Ast a) -> AAst [] $ h a) $ Ast x
 
 caseVars :: AstF Ast -> [String]
 caseVars (Var v) = [v]
@@ -717,7 +717,7 @@ saturateCons = ffix $ \h ast -> let
 
 liftLambdas :: [(String, Ast)] -> [(String, Ast)]
 liftLambdas scs = existingDefs ++ newDefs where
-  (existingDefs, (_, newDefs)) = runState (mapM f $ freeV scs) ([], [])
+  (existingDefs, (_, newDefs)) = runState (mapM f $ second freeVars <$> scs) ([], [])
   f (s, AAst _ (Lam args body)) = do
     modify $ first $ const [s]
     body1 <- g body
@@ -777,7 +777,7 @@ expandCase = ffix $ \h (Ast ast) -> Ast $ case ast of
         gv <- Ast . Var <$> genVar
         case h of
           Ast (Var _) -> doPack (acc ++ [h]) dpr rest body
-          _     -> doPack (acc ++ [gv]) (dpr ++ [(gv, h)]) rest body
+          _ -> doPack (acc ++ [gv]) (dpr ++ [(gv, h)]) rest body
       g [] body = pure body
       g ((v, w):rest) body = fmap Ast $ Cas v <$> expandAlt onFail rest (w, body)
 

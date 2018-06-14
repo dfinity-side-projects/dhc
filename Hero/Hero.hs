@@ -90,10 +90,13 @@ putNum w addr n mem = foldl' f mem [0..w-1] where
 
 -- TODO: Check this works as expected on negative inputs.
 rem32 :: Int32 -> Int32 -> Int32
-rem32 a b = fromIntegral $ rem ((fromIntegral a) :: Word32) $ fromIntegral (fromIntegral b :: Word32)
+rem32 a b = rem a b
 
 rem32U :: Int32 -> Int32 -> Int32
 rem32U a b = fromIntegral $ mod ((fromIntegral a) :: Word32) $ fromIntegral (fromIntegral b :: Word32)
+
+rem64 :: Int64 -> Int64 -> Int64
+rem64 a b = rem a b
 
 rotateL32 :: Word32 -> Word32 -> Int32
 rotateL32 a b = fromIntegral $ rotateL a $ fromIntegral (b `mod` 32)
@@ -213,9 +216,11 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
   I64_add -> binOp64 (+)
   I64_sub -> binOp64 (-)
   I64_mul -> binOp64 (*)
+  I64_div_s -> binOp64 div
   I64_xor -> binOp64 xor
   I64_and -> binOp64 (.&.)
   I64_or -> binOp64 (.|.)
+  I64_rem_s -> binOp64 rem64
   I64_shr_u -> binOp64 shiftR64U
   I64_shr_s -> binOp64 shiftR64S
   I64_shl -> binOp64 shiftL64

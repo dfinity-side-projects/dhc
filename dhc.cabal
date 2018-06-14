@@ -13,7 +13,6 @@ library
   build-depends:
     base,
     binary,
-    bimap,
     bytestring,
     containers,
     mtl,

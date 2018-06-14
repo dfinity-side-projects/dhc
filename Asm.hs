@@ -281,7 +281,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
     --
     --   f :@ arg0 :@ arg 1 :@ ... :@ #RealWorld
     --
-    -- on the heap, places a pointer to his on the stack, then calls Eval.
+    -- on the heap, places a pointer to this on the stack, then calls Eval.
     --
     -- Additionally, for each non-`main` function, first call `main`
     -- if a certain global flag is false.
