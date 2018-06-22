@@ -399,6 +399,7 @@ dictSolve scs cl dsoln soln = ffix $ \h (Ast ast) -> case ast of
       ltai = aVar "list_to_any_instance" @@ rec (Ast $ Placeholder "Storage" a)
       lfai = aVar "list_from_any_instance" @@ rec (Ast $ Placeholder "Storage" a)
       in boxy ltai lfai
+    TC "()" -> boxy (aVar "unit_to_any_instance") (aVar "unit_from_any_instance")
     TApp (TC "()") (TApp a b) -> let
       -- TODO: Brittle. Relies on order constraints are found.
       -- Implement contexts for instance declarations.
@@ -791,4 +792,4 @@ expandCase = ffix $ \h (Ast ast) -> Ast $ case ast of
     fromApList a = [a]
 
 messageTypes :: [String]
-messageTypes = ["Databuf", "String", "Actor", "Module", "Port", "I32", "Int", "Bool"]
+messageTypes = ["Databuf", "String", "Actor", "Module", "Port", "I32", "Int", "Bool", "()"]

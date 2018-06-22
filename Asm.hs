@@ -147,6 +147,7 @@ toDfnType :: Type -> WasmType
 toDfnType t = case t of
   TApp (TC "()") _ -> Ref "Elem"
   TApp (TC "[]") _ -> Ref "Elem"
+  TC "()" -> Ref "Elem"
   TC "Int" -> I64
   TC "I32" -> I32
   TC "Bool" -> I32

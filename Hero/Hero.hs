@@ -88,30 +88,20 @@ putNum w addr n mem = foldl' f mem [0..w-1] where
   f m k = putWord8 (addr + fromIntegral k) (getByte k) m
   getByte k = fromIntegral $ ((fromIntegral n :: Word64) `shiftR` (8*k)) .&. 255
 
--- TODO: Check this works as expected on negative inputs.
-rem32 :: Int32 -> Int32 -> Int32
-rem32 a b = rem a b
+rotateL32 :: Word32 -> Word32 -> Word32
+rotateL32 a b = rotateL a $ fromIntegral (b `mod` 32)
 
-rem32U :: Int32 -> Int32 -> Int32
-rem32U a b = fromIntegral $ mod ((fromIntegral a) :: Word32) $ fromIntegral (fromIntegral b :: Word32)
+rotateR32 :: Word32 -> Word32 -> Word32
+rotateR32 a b = rotateR a $ fromIntegral (b `mod` 32)
 
-rem64 :: Int64 -> Int64 -> Int64
-rem64 a b = rem a b
+shiftL32 :: Word32 -> Word32 -> Word32
+shiftL32 a b = shiftL a $ fromIntegral (b `mod` 32)
 
-rotateL32 :: Word32 -> Word32 -> Int32
-rotateL32 a b = fromIntegral $ rotateL a $ fromIntegral (b `mod` 32)
-
-rotateR32 :: Word32 -> Word32 -> Int32
-rotateR32 a b = fromIntegral $ rotateR a $ fromIntegral (b `mod` 32)
-
-shiftL32 :: Word32 -> Word32 -> Int32
-shiftL32 a b = fromIntegral $ shiftL a $ fromIntegral (b `mod` 32)
-
-shiftR32U :: Word32 -> Word32 -> Int32
-shiftR32U a b = fromIntegral $ shiftR a $ fromIntegral (b `mod` 32)
+shiftR32U :: Word32 -> Word32 -> Word32
+shiftR32U a b = shiftR a $ fromIntegral (b `mod` 32)
 
 shiftR32S :: Int32 -> Int32 -> Int32
-shiftR32S a b = fromIntegral $ shiftR a $ fromIntegral (b `mod` 32)
+shiftR32S a b = shiftR a $ fromIntegral (b `mod` 32)
 
 shiftR64U :: Int64 -> Int64 -> Int64
 shiftR64U a b = fromIntegral $ shiftR ((fromIntegral a) :: Word64) $ fromIntegral ((fromIntegral b :: Word64) `mod` 64)
@@ -187,9 +177,10 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
   I32_add -> binOp32 (+)
   I32_sub -> binOp32 (-)
   I32_mul -> binOp32 (*)
-  I32_div_s -> binOp32 div  -- TODO: Is this right for negative inputs?
-  I32_rem_u -> binOp32 rem32U
-  I32_rem_s -> binOp32 rem32
+  I32_div_s -> binOp32 div
+  I32_div_u -> binOp32U div
+  I32_rem_s -> binOp32 rem
+  I32_rem_u -> binOp32U rem
   I32_shl -> binOp32U shiftL32
   I32_rotl -> binOp32U rotateL32
   I32_rotr -> binOp32U rotateR32
@@ -199,10 +190,10 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
   I32_gt_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (>)
   I32_le_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (<=)
   I32_lt_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (<)
-  I32_gt_u -> binOp32U $ ((fromIntegral . fromEnum) .) . (>)
-  I32_ge_u -> binOp32U $ ((fromIntegral . fromEnum) .) . (>=)
-  I32_lt_u -> binOp32U $ ((fromIntegral . fromEnum) .) . (<)
-  I32_le_u -> binOp32U $ ((fromIntegral . fromEnum) .) . (<=)
+  I32_gt_u -> binOp32U $ (fromEnum .) . (>)
+  I32_ge_u -> binOp32U $ (fromEnum .) . (>=)
+  I32_lt_u -> binOp32U $ (fromEnum .) . (<)
+  I32_le_u -> binOp32U $ (fromEnum .) . (<=)
   I32_ne -> binOp32 $ ((fromIntegral . fromEnum) .) . (/=)
   I32_eq -> binOp32 $ ((fromIntegral . fromEnum) .) . (==)
   I32_eqz -> let
@@ -212,15 +203,21 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
   I64_lt_s -> boolBinOp64 (<)
   I64_ge_s -> boolBinOp64 (>=)
   I64_gt_s -> boolBinOp64 (>)
+  I64_le_u -> boolBinOp64U (<=)
+  I64_lt_u -> boolBinOp64U (<)
+  I64_ge_u -> boolBinOp64U (>=)
+  I64_gt_u -> boolBinOp64U (>)
   I64_eq -> boolBinOp64 (==)
   I64_add -> binOp64 (+)
   I64_sub -> binOp64 (-)
   I64_mul -> binOp64 (*)
   I64_div_s -> binOp64 div
+  I64_div_u -> binOp64U div
   I64_xor -> binOp64 xor
   I64_and -> binOp64 (.&.)
   I64_or -> binOp64 (.|.)
-  I64_rem_s -> binOp64 rem64
+  I64_rem_s -> binOp64 rem
+  I64_rem_u -> binOp64U rem
   I64_shr_u -> binOp64 shiftR64U
   I64_shr_s -> binOp64 shiftR64S
   I64_shl -> binOp64 shiftL64
@@ -285,16 +282,23 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
       c = I32_const $ f a b
     binOp32U f = run $ step (c:drop 2 stack) where
       (I32_const b:I32_const a:_) = stack
-      c = I32_const $ f (toU32 a) (toU32 b) where
+      c = I32_const $ fromIntegral $ f (toU32 a) (toU32 b) where
         toU32 n = (fromIntegral n :: Word32)
     binOp64 f = run $ step (c:drop 2 stack) where
       (I64_const b:I64_const a:_) = stack
       c = I64_const $ f a b
+    binOp64U f = run $ step (c:drop 2 stack) where
+      (I64_const b:I64_const a:_) = stack
+      c = I64_const $ fromIntegral $ f (toU64 a) (toU64 b)
     boolBinOp64 f = run $ step (c:drop 2 stack) where
       (I64_const b:I64_const a:_) = stack
       c = I32_const $ fromIntegral $ fromEnum $ f a b
+    boolBinOp64U f = run $ step (c:drop 2 stack) where
+      (I64_const b:I64_const a:_) = stack
+      c = I32_const $ fromIntegral $ fromEnum $ f (toU64 a) (toU64 b)
     load32 sz off = run $ step (I32_const (getNum sz (addr + fromIntegral off) mem):tail stack)
       where I32_const addr = head stack
+    toU64 x = fromIntegral x :: Word64
     store32 sz off = do
       let (I32_const n:I32_const addr:_) = stack
           mem' = putNum sz (addr + fromIntegral off) n mem
