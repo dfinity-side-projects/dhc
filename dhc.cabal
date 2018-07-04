@@ -26,14 +26,13 @@ library
     DHC
     Encode
     Hero.Hero
+    Hero.Parse
     Parse
     Std
     WasmOp
   ghc-options:
     -O2
     -Wall
-  other-modules:
-    Hero.Parse
 
 executable dhc
   default-language:
