@@ -63,26 +63,6 @@ executable dhc
    -Wall
    -threaded
 
-executable rundhc
-  default-language:
-    Haskell2010
-  main-is:
-    rundhc.hs
-  build-depends:
-    base,
-    binary,
-    bytestring,
-    containers,
-    dhc,
-    mtl
-  other-modules:
-    Hero.Hero
-    Hero.Parse
-  ghc-options:
-   -O2
-   -Wall
-   -threaded
-
 test-suite test
   default-language:
     Haskell2010
