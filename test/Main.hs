@@ -328,7 +328,7 @@ runAltWeb src = case hsToWasm altWebBoost src of
     (mainFun, vm1) = getExport "main" vm0
     in getState . snd <$> runWasm mainFun [] vm1
 
-altWebSys :: (String, String) -> HeroVM String -> [WasmOp] -> IO ([WasmOp], HeroVM String)
+altWebSys :: (String, String) -> HeroVM IO String -> [WasmOp] -> IO ([WasmOp], HeroVM IO String)
 altWebSys ("dhc", "system") vm [I32_const n, I32_const sp, I32_const hp]
   | n == 21 = do
     when (getTag /= 6) $ error "BUG! want String"
@@ -360,11 +360,11 @@ altWebSys _ _ _ = error "BUG! bad syscall "
 main :: IO Counts
 main = runTestTT $ TestList $ lexOffsideTests ++ gmachineTests ++ demoTests ++ altWebTests
 
-getNum :: (Integral n) => Int -> Int32 -> HeroVM a -> n
+getNum :: (Integral n) => Int -> Int32 -> HeroVM m a -> n
 getNum w addr vm = sum $ zipWith (*) bs ((256^) <$> [(0 :: Int)..]) where
   bs = fromIntegral . (`getWord8VM` vm) . (addr +) <$> [0..fromIntegral w-1]
 
-putNum :: (Integral n) => Int -> Int32 -> n -> HeroVM a -> HeroVM a
+putNum :: (Integral n) => Int -> Int32 -> n -> HeroVM m a -> HeroVM m a
 putNum w addr n vm = foldl' f vm [0..w-1] where
   f m k = putWord8VM (addr + fromIntegral k) (getByte k) m
   getByte k = fromIntegral $ ((fromIntegral n :: Word64) `shiftR` (8*k)) .&. 255
