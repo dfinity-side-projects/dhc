@@ -321,17 +321,19 @@ runWasmIndex :: Monad m => Int -> [WasmOp] -> HeroVM m a -> m ([WasmOp], HeroVM 
 runWasmIndex n args vm = run (setArgsVM args vm) { insts = [[Call n]] }
 
 -- | Runs a function.
-runWasm :: Monad m => Int -> [WasmOp] -> HeroVM m a -> m ([WasmOp], HeroVM m a)
-runWasm f args vm = case IM.lookup f $ funrefs vm of
+runWasm :: Monad m => [(Int, WasmOp)] -> Int -> [WasmOp] -> HeroVM m a -> m ([WasmOp], HeroVM m a)
+runWasm gs f args vm0 = case IM.lookup f $ funrefs vm of
   Nothing -> error "no such function"
   Just (FunInt n) -> runWasmIndex n args vm
   Just (FunExt fe) -> fe vm args
+  where vm = vm0 { globs =
+    IM.fromList $ zip [0..] (head . snd <$> globals (wasm vm0)) ++ gs }
 
 -- | Builds a HeroVM for given Wasm binary, imports and persistent globals.
-mkHeroVM :: a -> ((String, String) -> VMFun m a) -> Wasm -> [(Int, WasmOp)] -> HeroVM m a
-mkHeroVM st imps w gs = HeroVM
+mkHeroVM :: a -> ((String, String) -> VMFun m a) -> Wasm -> HeroVM m a
+mkHeroVM st imps w = HeroVM
   { sys = imps
-  , globs = initGlobals
+  , globs = IM.fromList $ zip [0..] (head . snd <$> globals w)
   , locs = []
   , stack = []
   , insts = []
@@ -342,7 +344,6 @@ mkHeroVM st imps w gs = HeroVM
   , state = st
   , funrefs = IM.empty
   } where
-  initGlobals = IM.fromList $ (zip [0..] $ head . snd <$> globals w) ++ gs
   strToAssocs ([I32_const n], s) = zip [fromIntegral n..] $ fromIntegral <$> s
   strToAssocs _ = error "BUG!"
   mkElems (offset, ns) = zip [offset..] $ FunInt <$> ns
