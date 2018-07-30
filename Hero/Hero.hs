@@ -38,7 +38,6 @@ type IntMap = IM.Map Int
 #endif
 
 type VMFun m a = HeroVM m a -> [WasmOp] -> m ([WasmOp], HeroVM m a)
-data FunRef m a = FunInt Int | FunExt (VMFun m a)
 
 data HeroVM m a = HeroVM
   { globs :: IntMap WasmOp
@@ -47,12 +46,12 @@ data HeroVM m a = HeroVM
   , insts :: [[WasmOp]]
   , mem   :: IntMap Word8
   , sigs  :: IntMap ([WasmType], [WasmType])
-  , table :: IntMap (FunRef m a)
+  , table :: IntMap (Either Int Int)
   , wasm  :: Wasm
   , state :: a
   -- Returns functions corresponding to module imports.
   , sys :: ((String, String) -> VMFun m a)
-  , funrefs :: IntMap (FunRef m a)
+  , funrefs :: IntMap (VMFun m a)
   }
 
 getState :: HeroVM m a -> a
@@ -140,8 +139,10 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
       inCount = length inSig
       (I32_const i:params) = take' (inCount + 1) stack
     (results, vm1) <- case table vm IM.! fromIntegral i of
-      FunInt n ->  run vm { insts = (Call n:head insts):tail insts }
-      FunExt fe -> fe (step $ drop' (inCount + 1) stack) (reverse params)
+      Left n -> run vm { insts = (Call n:head insts):tail insts }
+      Right n -> maybe (error "no such function")
+        (\f -> f (step $ drop' (inCount + 1) stack) $ reverse params)
+        $ IM.lookup n $ funrefs vm
     run $ setArgsVM results vm1
   Call i -> let
     Wasm {imports, functions} = wasm vm
@@ -305,52 +306,64 @@ run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
       run (step $ drop 2 stack) { mem = mem'}
 
 -- | Returns an exported function.
-getExport :: String -> HeroVM m a -> (Int, HeroVM m a)
-getExport f vm = (k, vm { funrefs = IM.insert k (FunInt n) $ funrefs vm }) where
-  k = IM.size $ funrefs vm
-  n = fromMaybe (error $ "bad export: " ++ f) $ lookup f $ exports $ wasm vm
+getExport :: String -> HeroVM m a -> Either Int Int
+getExport f vm =
+  maybe (error $ "bad export: " ++ f) Left $ lookup f $ exports $ wasm vm
 
 -- | Returns a function in the table.
-getSlot :: Int32 -> HeroVM m a -> (Int, HeroVM m a)
-getSlot i vm = (k, vm { funrefs = IM.insert k x $ funrefs vm }) where
-  k = IM.size $ funrefs vm
-  x = fromMaybe (error $ "bad slot: " ++ show i) $ IM.lookup (fromIntegral i) $ table vm
+getSlot :: Int32 -> HeroVM m a -> Either Int Int
+getSlot i vm = fromMaybe (error $ "bad slot: " ++ show i) $ IM.lookup (fromIntegral i) $ table vm
 
 -- | Runs a function at a given index.
 runWasmIndex :: Monad m => Int -> [WasmOp] -> HeroVM m a -> m ([WasmOp], HeroVM m a)
 runWasmIndex n args vm = run (setArgsVM args vm) { insts = [[Call n]] }
 
 -- | Runs a function.
-runWasm :: Monad m => [(Int, WasmOp)] -> Int -> [WasmOp] -> HeroVM m a -> m ([WasmOp], HeroVM m a)
-runWasm gs f args vm0 = case IM.lookup f $ funrefs vm of
-  Nothing -> error "no such function"
-  Just (FunInt n) -> runWasmIndex n args vm
-  Just (FunExt fe) -> fe vm args
-  where vm = vm0 { globs =
-    IM.fromList $ zip [0..] (head . snd <$> globals (wasm vm0)) ++ gs }
-
--- | Builds a HeroVM for given Wasm binary, imports and persistent globals.
-mkHeroVM :: a -> ((String, String) -> VMFun m a) -> Wasm -> HeroVM m a
-mkHeroVM st imps w = HeroVM
-  { sys = imps
-  , globs = IM.fromList $ zip [0..] (head . snd <$> globals w)
-  , locs = []
-  , stack = []
-  , insts = []
-  , mem = IM.fromList $ concatMap strToAssocs $ dataSection w
-  , sigs = IM.fromList $ zip [0..] $ types w
-  , table = IM.fromList $ concatMap mkElems $ elemSection w
-  , wasm = w
-  , state = st
-  , funrefs = IM.empty
-  } where
+runWasm :: Monad m => [(Int, WasmOp)] -> Either Int Int -> [WasmOp] -> a -> HeroVM m a -> m ([WasmOp], HeroVM m a)
+runWasm gs f args st vm0 = case f of
+  Left n -> runWasmIndex n args vm
+  Right n -> maybe (error "no such function") (flip ($ vm) args) $ IM.lookup n $ funrefs vm
+  where
+  Wasm{globals, dataSection, elemSection} = wasm vm0
+  vm = vm0
+    { state = st
+    , locs = []
+    , stack = []
+    , funrefs = IM.empty
+    , globs = IM.fromList $ zip [0..] (head . snd <$> globals) ++ gs
+    , mem = IM.fromList $ concatMap strToAssocs dataSection
+    , table = IM.fromList $ concatMap mkElems elemSection
+    }
   strToAssocs ([I32_const n], s) = zip [fromIntegral n..] $ fromIntegral <$> s
   strToAssocs _ = error "BUG!"
-  mkElems (offset, ns) = zip [offset..] $ FunInt <$> ns
+
+mkElems :: (Int, [Int]) -> [(Int, Either Int Int)]
+mkElems (offset, ns) = zip [offset..] $ Left <$> ns
+
+-- | Builds a HeroVM from imports and wasm binary.
+mkHeroVM :: ((String, String) -> VMFun m a) -> Wasm -> HeroVM m a
+mkHeroVM imps w@Wasm{elemSection, types} = HeroVM
+  { state = undefined
+  , locs = undefined
+  , stack = undefined
+  , insts = undefined
+  , funrefs = undefined
+  , globs = undefined
+  , mem = undefined
+  , table = IM.fromList $ concatMap mkElems elemSection
+  , sigs = IM.fromList $ zip [0..] types
+  , wasm = w
+  , sys = imps
+  }
 
 -- | Place arguments on WebAssembly stack.
 setArgsVM :: [WasmOp] -> HeroVM m a -> HeroVM m a
 setArgsVM ls vm = vm { stack = reverse ls ++ stack vm }
 
+-- TODO: Check slot is in range.
 setSlot :: Int32 -> VMFun m a -> HeroVM m a -> HeroVM m a
-setSlot slot fun vm = vm { table = IM.insert (fromIntegral slot) (FunExt fun) $ table vm }
+setSlot slot fun vm = vm
+  { table = IM.insert (fromIntegral slot) (Right k) $ table vm
+  , funrefs = IM.insert k fun $ funrefs vm
+  }
+  where k = IM.size $ funrefs vm
