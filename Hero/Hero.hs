@@ -11,8 +11,6 @@ module Hero.Hero
   , setSlot
   , globalVM
   , getWord8VM, putWord8VM
-  , getState
-  , putState
   , getExport
   , getSlot
   , ripWasm
@@ -37,9 +35,11 @@ import WasmOp
 type IntMap = IM.Map Int
 #endif
 
-type VMFun m a = HeroVM m a -> [WasmOp] -> m ([WasmOp], HeroVM m a)
+type VMFun m a = [WasmOp] -> a -> HeroVM -> m ([WasmOp], a, HeroVM)
+-- | The import functions and table functions.
+type VMEnv m a = ((String, String) -> VMFun m a, Int -> VMFun m a)
 
-data HeroVM m a = HeroVM
+data HeroVM = HeroVM
   { globs :: IntMap WasmOp
   , locs  :: [IntMap WasmOp]
   , stack :: [WasmOp]
@@ -48,28 +48,18 @@ data HeroVM m a = HeroVM
   , sigs  :: IntMap ([WasmType], [WasmType])
   , table :: IntMap (Either Int Int)
   , wasm  :: Wasm
-  , state :: a
-  -- Returns functions corresponding to module imports.
-  , sys :: ((String, String) -> VMFun m a)
-  , funrefs :: IntMap (VMFun m a)
   }
 
-getState :: HeroVM m a -> a
-getState vm = state vm
-
-putState :: a -> HeroVM m a -> HeroVM m a
-putState a vm = vm {state = a}
-
 -- | Reads global variables.
-globalVM :: HeroVM m a -> [(Int, WasmOp)]
+globalVM :: HeroVM -> [(Int, WasmOp)]
 globalVM vm = IM.assocs $ globs vm
 
 -- | Reads a byte from memory.
-getWord8VM :: Int32 -> HeroVM m a -> Word8
+getWord8VM :: Int32 -> HeroVM -> Word8
 getWord8VM a vm = getWord8 a $ mem vm
 
 -- | Writes a byte to memory.
-putWord8VM :: Int32 -> Word8 -> HeroVM m a -> HeroVM m a
+putWord8VM :: Int32 -> Word8 -> HeroVM -> HeroVM
 putWord8VM a n vm = vm { mem = putWord8 a n $ mem vm }
 
 getWord8 :: Int32 -> IntMap Word8 -> Word8
@@ -127,209 +117,203 @@ initLocal I32 = I32_const 0
 initLocal I64 = I64_const 0
 initLocal _ = error "TODO"
 
-run :: Monad m => HeroVM m a -> m ([WasmOp], HeroVM m a)
-run vm@HeroVM {insts, stack} | null insts = pure (stack, vm)
-run vm@HeroVM {insts} | null $ head insts = case tail insts of
-  ((Loop _ _:rest):t) -> run vm {insts = rest:t}
-  _                   -> run vm {insts = tail insts}
-run vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
-  Call_indirect (inSig, _) -> do
-    let
-      -- TODO: Dynamic type-check.
-      inCount = length inSig
-      (I32_const i:params) = take' (inCount + 1) stack
-    (results, vm1) <- case table vm IM.! fromIntegral i of
-      Left n -> run vm { insts = (Call n:head insts):tail insts }
-      Right n -> maybe (error "no such function")
-        (\f -> f (step $ drop' (inCount + 1) stack) $ reverse params)
-        $ IM.lookup n $ funrefs vm
-    run $ setArgsVM results vm1
-  Call i -> let
-    Wasm {imports, functions} = wasm vm
-    fCount = length imports
-    in if i < fCount then do
+runImps :: Monad m => VMEnv m a -> a -> HeroVM -> m ([WasmOp], a, HeroVM)
+runImps (imps, tabs) st0 engine = run st0 engine where
+  run st vm@HeroVM {insts, stack}
+    | null insts = pure (stack, st, vm)
+    | null $ head insts = case tail insts of
+      ((Loop _ _:rest):t) -> run st vm {insts = rest:t}
+      _                   -> run st vm {insts = tail insts}
+  run st vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
+    Call_indirect (inSig, _) -> do
       let
-        (importName, (ins, _)) = imports!!i
-        k = length ins
-      (results, vm1) <- sys vm importName (step $ drop' k stack) (reverse $ take' k stack)
-      run $ setArgsVM results vm1
-    else do
+        -- TODO: Dynamic type-check.
+        inCount = length inSig
+        (I32_const i:params) = take' (inCount + 1) stack
+      (results, a, vm1) <- case table vm IM.! fromIntegral i of
+        Left n -> run st vm { insts = (Call n:head insts):tail insts }
+        Right n -> tabs n (reverse params) st $ step $ drop' (inCount + 1) stack
+      run a $ setArgsVM results vm1
+    Call i -> let
+      Wasm {imports, functions} = wasm vm
+      fCount = length imports
+      in if i < fCount then do
+        let
+          (importName, (ins, _)) = imports!!i
+          k = length ins
+        (results, a, vm1) <- imps importName (reverse $ take' k stack) st $ step $ drop' k stack
+        run a $ setArgsVM results vm1
+      else do
+        let
+          WasmFun {typeSig, localVars, funBody} = functions IM.! i
+          locals = initLocal <$> localVars
+          k = length $ fst typeSig
+        -- The `End` opcode is reintroduced at the ends of function calls, so
+        -- we know when to pop locals, and when to stop popping instructions
+        -- for `Return`.
+        run st vm { stack = drop' k stack, locs = IM.fromList (zip [0..] $ reverse (take' k stack) ++ locals):locs, insts = funBody:(End:head i1):tail i1 }
+    Return -> run st vm { insts = dropWhile ((End /=) . head) insts }
+    End -> run st vm { locs = tail locs, insts = i1 }
+    Set_local i -> run st vm {locs = IM.insert i (head stack) (head locs):tail locs, stack = tail stack, insts = i1}
+    Get_local i -> if i >= IM.size (head locs) then error $ "BUG! bad local: " ++ show(i, locs) else run st $ step $ head locs IM.! i:stack
+    Tee_local i -> run st vm {locs = IM.insert i (head stack) (head locs):tail locs, insts = i1}
+    Set_global i -> run st vm {globs = IM.insert i (head stack) globs, stack = tail stack, insts = i1}
+    Get_global i -> if i >= IM.size globs then error $ "BUG! bad global: " ++ show (i, globs)
+      else run st $ step $ globs IM.! i:stack
+    c@(I32_const _) -> run st $ step $ c:stack
+    c@(I64_const _) -> run st $ step $ c:stack
+    I32_xor -> binOp32 xor
+    I32_and -> binOp32 (.&.)
+    I32_or -> binOp32 (.|.)
+    I32_add -> binOp32 (+)
+    I32_sub -> binOp32 (-)
+    I32_mul -> binOp32 (*)
+    I32_div_s -> binOp32 div
+    I32_div_u -> binOp32U div
+    I32_rem_s -> binOp32 rem
+    I32_rem_u -> binOp32U rem
+    I32_shl -> binOp32U shiftL32
+    I32_rotl -> binOp32U rotateL32
+    I32_rotr -> binOp32U rotateR32
+    I32_shr_u -> binOp32U shiftR32U
+    I32_shr_s -> binOp32 shiftR32S
+    I32_ge_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (>=)
+    I32_gt_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (>)
+    I32_le_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (<=)
+    I32_lt_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (<)
+    I32_gt_u -> binOp32U $ (fromEnum .) . (>)
+    I32_ge_u -> binOp32U $ (fromEnum .) . (>=)
+    I32_lt_u -> binOp32U $ (fromEnum .) . (<)
+    I32_le_u -> binOp32U $ (fromEnum .) . (<=)
+    I32_ne -> binOp32 $ ((fromIntegral . fromEnum) .) . (/=)
+    I32_eq -> binOp32 $ ((fromIntegral . fromEnum) .) . (==)
+    I32_eqz -> let
+      (I32_const a:t) = stack
+      in run st $ step $ (I32_const $ fromIntegral $ fromEnum $ a == 0):t
+    I64_le_s -> boolBinOp64 (<=)
+    I64_lt_s -> boolBinOp64 (<)
+    I64_ge_s -> boolBinOp64 (>=)
+    I64_gt_s -> boolBinOp64 (>)
+    I64_le_u -> boolBinOp64U (<=)
+    I64_lt_u -> boolBinOp64U (<)
+    I64_ge_u -> boolBinOp64U (>=)
+    I64_gt_u -> boolBinOp64U (>)
+    I64_eq -> boolBinOp64 (==)
+    I64_add -> binOp64 (+)
+    I64_sub -> binOp64 (-)
+    I64_mul -> binOp64 (*)
+    I64_div_s -> binOp64 div
+    I64_div_u -> binOp64U div
+    I64_xor -> binOp64 xor
+    I64_and -> binOp64 (.&.)
+    I64_or -> binOp64 (.|.)
+    I64_rem_s -> binOp64 rem
+    I64_rem_u -> binOp64U rem
+    I64_shr_u -> binOp64 shiftR64U
+    I64_shr_s -> binOp64 shiftR64S
+    I64_shl -> binOp64 shiftL64
+    I64_rotr -> binOp64 rotateR64
+    I64_extend_s_i32 -> let
+      I32_const a = head stack
+      c = I64_const $ fromIntegral a
+      in run st $ step (c:tail stack)
+    I64_extend_u_i32 -> let
+      I32_const a = head stack
+      c = I64_const $ fromIntegral (fromIntegral a :: Word32)
+      in run st $ step (c:tail stack)
+    I32_wrap_i64 -> let
+      I64_const a = head stack
+      c = I32_const $ fromIntegral a
+      in run st $ step (c:tail stack)
+    I32_load8_u  _ o -> load32 1 o
+    I32_load16_u _ o -> load32 2 o
+    I32_load     _ o -> load32 4 o
+    I32_store8   _ o -> store32 1 o
+    I32_store16  _ o -> store32 2 o
+    I32_store    _ o -> store32 4 o
+    I64_store _ o -> do
       let
-        WasmFun {typeSig, localVars, funBody} = functions IM.! i
-        locals = initLocal <$> localVars
-        k = length $ fst typeSig
-      -- The `End` opcode is reintroduced at the ends of function calls, so
-      -- we know when to pop locals, and when to stop popping instructions
-      -- for `Return`.
-      run vm { stack = drop' k stack, locs = IM.fromList (zip [0..] $ reverse (take' k stack) ++ locals):locs, insts = funBody:(End:head i1):tail i1 }
-  Return -> run vm { insts = dropWhile ((End /=) . head) insts }
-  End -> run vm { locs = tail locs, insts = i1 }
-  Set_local i -> run vm {locs = IM.insert i (head stack) (head locs):tail locs, stack = tail stack, insts = i1}
-  Get_local i -> if i >= IM.size (head locs) then error $ "BUG! bad local: " ++ show(i, locs) else run $ step $ head locs IM.! i:stack
-  Tee_local i -> run vm {locs = IM.insert i (head stack) (head locs):tail locs, insts = i1}
-  Set_global i -> run vm {globs = IM.insert i (head stack) globs, stack = tail stack, insts = i1}
-  Get_global i -> if i >= IM.size globs then error $ "BUG! bad global: " ++ show (i, globs)
-    else run $ step $ globs IM.! i:stack
-  c@(I32_const _) -> run $ step $ c:stack
-  c@(I64_const _) -> run $ step $ c:stack
-  I32_xor -> binOp32 xor
-  I32_and -> binOp32 (.&.)
-  I32_or -> binOp32 (.|.)
-  I32_add -> binOp32 (+)
-  I32_sub -> binOp32 (-)
-  I32_mul -> binOp32 (*)
-  I32_div_s -> binOp32 div
-  I32_div_u -> binOp32U div
-  I32_rem_s -> binOp32 rem
-  I32_rem_u -> binOp32U rem
-  I32_shl -> binOp32U shiftL32
-  I32_rotl -> binOp32U rotateL32
-  I32_rotr -> binOp32U rotateR32
-  I32_shr_u -> binOp32U shiftR32U
-  I32_shr_s -> binOp32 shiftR32S
-  I32_ge_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (>=)
-  I32_gt_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (>)
-  I32_le_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (<=)
-  I32_lt_s -> binOp32 $ ((fromIntegral . fromEnum) .) . (<)
-  I32_gt_u -> binOp32U $ (fromEnum .) . (>)
-  I32_ge_u -> binOp32U $ (fromEnum .) . (>=)
-  I32_lt_u -> binOp32U $ (fromEnum .) . (<)
-  I32_le_u -> binOp32U $ (fromEnum .) . (<=)
-  I32_ne -> binOp32 $ ((fromIntegral . fromEnum) .) . (/=)
-  I32_eq -> binOp32 $ ((fromIntegral . fromEnum) .) . (==)
-  I32_eqz -> let
-    (I32_const a:t) = stack
-    in run $ step $ (I32_const $ fromIntegral $ fromEnum $ a == 0):t
-  I64_le_s -> boolBinOp64 (<=)
-  I64_lt_s -> boolBinOp64 (<)
-  I64_ge_s -> boolBinOp64 (>=)
-  I64_gt_s -> boolBinOp64 (>)
-  I64_le_u -> boolBinOp64U (<=)
-  I64_lt_u -> boolBinOp64U (<)
-  I64_ge_u -> boolBinOp64U (>=)
-  I64_gt_u -> boolBinOp64U (>)
-  I64_eq -> boolBinOp64 (==)
-  I64_add -> binOp64 (+)
-  I64_sub -> binOp64 (-)
-  I64_mul -> binOp64 (*)
-  I64_div_s -> binOp64 div
-  I64_div_u -> binOp64U div
-  I64_xor -> binOp64 xor
-  I64_and -> binOp64 (.&.)
-  I64_or -> binOp64 (.|.)
-  I64_rem_s -> binOp64 rem
-  I64_rem_u -> binOp64U rem
-  I64_shr_u -> binOp64 shiftR64U
-  I64_shr_s -> binOp64 shiftR64S
-  I64_shl -> binOp64 shiftL64
-  I64_rotr -> binOp64 rotateR64
-  I64_extend_s_i32 -> let
-    I32_const a = head stack
-    c = I64_const $ fromIntegral a
-    in run $ step (c:tail stack)
-  I64_extend_u_i32 -> let
-    I32_const a = head stack
-    c = I64_const $ fromIntegral (fromIntegral a :: Word32)
-    in run $ step (c:tail stack)
-  I32_wrap_i64 -> let
-    I64_const a = head stack
-    c = I32_const $ fromIntegral a
-    in run $ step (c:tail stack)
-  I32_load8_u  _ o -> load32 1 o
-  I32_load16_u _ o -> load32 2 o
-  I32_load     _ o -> load32 4 o
-  I32_store8   _ o -> store32 1 o
-  I32_store16  _ o -> store32 2 o
-  I32_store    _ o -> store32 4 o
-  I64_store _ o -> do
-    let
-      I32_const addr = stack!!1
-      I64_const n = head stack
-    let mem' = putNum 8 (addr + fromIntegral o) n mem
-    run (step $ drop 2 stack) { mem = mem'}
-  I64_load _ o -> do
-    let I32_const addr = head stack
-        c = I64_const $ getNum 8 (addr + fromIntegral o) mem
-    run $ step (c:tail stack)
+        I32_const addr = stack!!1
+        I64_const n = head stack
+      let mem' = putNum 8 (addr + fromIntegral o) n mem
+      run st (step $ drop 2 stack) { mem = mem'}
+    I64_load _ o -> do
+      let I32_const addr = head stack
+          c = I64_const $ getNum 8 (addr + fromIntegral o) mem
+      run st $ step (c:tail stack)
 
-  If _ t f -> let I32_const n = head stack in if n /= 0
-    then run vm {stack = tail stack, insts = t:i1}
-    else run vm {stack = tail stack, insts = f:i1}
-  Block _ bl -> run vm {insts = bl:i1}
-  Loop _ bl -> run vm {insts = bl:insts}
-  Br k -> run vm {insts = drop (k + 1) insts}
-  Br_if k -> let (I32_const n:t) = stack in if n /= 0
-    then run vm {stack = t, insts = drop (k + 1) insts}
-    else run vm {stack = t, insts = i1}
-  Br_table as d -> do
-    let
-      n = fromIntegral n' where I32_const n' = head stack
-      k = if n < 0 || n >= length as then d else as!!n
-    run vm {stack = tail stack, insts = drop (k + 1) insts}
-  Unreachable -> pure ([], vm)
-  Drop -> run $ step $ tail stack
-  Select -> do
-    let
-      [I32_const c, f, t] = take' 3 stack
-      r = if c /= 0 then t else f
-    run $ step $ r:drop 3 stack
-  _ -> error $ "TODO: " ++ show (head $ head insts)
-  where
+    If _ t f -> let I32_const n = head stack in if n /= 0
+      then run st vm {stack = tail stack, insts = t:i1}
+      else run st vm {stack = tail stack, insts = f:i1}
+    Block _ bl -> run st vm {insts = bl:i1}
+    Loop _ bl -> run st vm {insts = bl:insts}
+    Br k -> run st vm {insts = drop (k + 1) insts}
+    Br_if k -> let (I32_const n:t) = stack in if n /= 0
+      then run st vm {stack = t, insts = drop (k + 1) insts}
+      else run st vm {stack = t, insts = i1}
+    Br_table as d -> do
+      let
+        n = fromIntegral n' where I32_const n' = head stack
+        k = if n < 0 || n >= length as then d else as!!n
+      run st vm {stack = tail stack, insts = drop (k + 1) insts}
+    Unreachable -> pure ([], st, vm)
+    Drop -> run st $ step $ tail stack
+    Select -> do
+      let
+        [I32_const c, f, t] = take' 3 stack
+        r = if c /= 0 then t else f
+      run st $ step $ r:drop 3 stack
+    _ -> error $ "TODO: " ++ show (head $ head insts)
+    where
     step newStack = vmNext { stack = newStack }
     vmNext = vm { insts = i1 }
     i1 = tail (head insts):tail insts
-    binOp32 f = run $ step (c:drop 2 stack) where
+    binOp32 f = run st $ step (c:drop 2 stack) where
       (I32_const b:I32_const a:_) = stack
       c = I32_const $ f a b
-    binOp32U f = run $ step (c:drop 2 stack) where
+    binOp32U f = run st $ step (c:drop 2 stack) where
       (I32_const b:I32_const a:_) = stack
       c = I32_const $ fromIntegral $ f (toU32 a) (toU32 b) where
         toU32 n = (fromIntegral n :: Word32)
-    binOp64 f = run $ step (c:drop 2 stack) where
+    binOp64 f = run st $ step (c:drop 2 stack) where
       (I64_const b:I64_const a:_) = stack
       c = I64_const $ f a b
-    binOp64U f = run $ step (c:drop 2 stack) where
+    binOp64U f = run st $ step (c:drop 2 stack) where
       (I64_const b:I64_const a:_) = stack
       c = I64_const $ fromIntegral $ f (toU64 a) (toU64 b)
-    boolBinOp64 f = run $ step (c:drop 2 stack) where
+    boolBinOp64 f = run st $ step (c:drop 2 stack) where
       (I64_const b:I64_const a:_) = stack
       c = I32_const $ fromIntegral $ fromEnum $ f a b
-    boolBinOp64U f = run $ step (c:drop 2 stack) where
+    boolBinOp64U f = run st $ step (c:drop 2 stack) where
       (I64_const b:I64_const a:_) = stack
       c = I32_const $ fromIntegral $ fromEnum $ f (toU64 a) (toU64 b)
-    load32 sz off = run $ step (I32_const (getNum sz (addr + fromIntegral off) mem):tail stack)
+    load32 sz off = run st $ step (I32_const (getNum sz (addr + fromIntegral off) mem):tail stack)
       where I32_const addr = head stack
     toU64 x = fromIntegral x :: Word64
     store32 sz off = do
       let (I32_const n:I32_const addr:_) = stack
           mem' = putNum sz (addr + fromIntegral off) n mem
-      run (step $ drop 2 stack) { mem = mem'}
+      run st (step $ drop 2 stack) { mem = mem'}
 
 -- | Returns an exported function.
-getExport :: String -> HeroVM m a -> Either Int Int
+getExport :: String -> HeroVM -> Either Int Int
 getExport f vm =
   maybe (error $ "bad export: " ++ f) Left $ lookup f $ exports $ wasm vm
 
 -- | Returns a function in the table.
-getSlot :: Int32 -> HeroVM m a -> Either Int Int
+getSlot :: Int32 -> HeroVM -> Either Int Int
 getSlot i vm = fromMaybe (error $ "bad slot: " ++ show i) $ IM.lookup (fromIntegral i) $ table vm
 
--- | Runs a function at a given index.
-runWasmIndex :: Monad m => Int -> [WasmOp] -> HeroVM m a -> m ([WasmOp], HeroVM m a)
-runWasmIndex n args vm = run (setArgsVM args vm) { insts = [[Call n]] }
-
--- | Runs a function.
-runWasm :: Monad m => [(Int, WasmOp)] -> Either Int Int -> [WasmOp] -> a -> HeroVM m a -> m ([WasmOp], HeroVM m a)
-runWasm gs f args st vm0 = case f of
-  Left n -> runWasmIndex n args vm
-  Right n -> maybe (error "no such function") (flip ($ vm) args) $ IM.lookup n $ funrefs vm
+-- | Interprets a wasm function.
+runWasm :: Monad m => VMEnv m a -> [(Int, WasmOp)] -> Either Int Int -> [WasmOp] -> a -> HeroVM -> m ([WasmOp], a, HeroVM)
+runWasm env gs f args st vm0 = case f of
+  Left n -> runImps env st (setArgsVM args vm) { insts = [[Call n]] }
+  Right n -> snd env n args st vm
   where
   Wasm{globals, dataSection, elemSection} = wasm vm0
   vm = vm0
-    { state = st
-    , locs = []
+    { locs = []
     , stack = []
-    , funrefs = IM.empty
     , globs = IM.fromList $ zip [0..] (head . snd <$> globals) ++ gs
     , mem = IM.fromList $ concatMap strToAssocs dataSection
     , table = IM.fromList $ concatMap mkElems elemSection
@@ -341,29 +325,23 @@ mkElems :: (Int, [Int]) -> [(Int, Either Int Int)]
 mkElems (offset, ns) = zip [offset..] $ Left <$> ns
 
 -- | Builds a HeroVM from imports and wasm binary.
-mkHeroVM :: ((String, String) -> VMFun m a) -> Wasm -> HeroVM m a
-mkHeroVM imps w@Wasm{elemSection, types} = HeroVM
-  { state = undefined
-  , locs = undefined
+mkHeroVM :: Wasm -> HeroVM
+mkHeroVM w@Wasm{elemSection, types} = HeroVM
+  { locs = undefined
   , stack = undefined
   , insts = undefined
-  , funrefs = undefined
   , globs = undefined
   , mem = undefined
   , table = IM.fromList $ concatMap mkElems elemSection
   , sigs = IM.fromList $ zip [0..] types
   , wasm = w
-  , sys = imps
   }
 
 -- | Place arguments on WebAssembly stack.
-setArgsVM :: [WasmOp] -> HeroVM m a -> HeroVM m a
+setArgsVM :: [WasmOp] -> HeroVM -> HeroVM
 setArgsVM ls vm = vm { stack = reverse ls ++ stack vm }
 
 -- TODO: Check slot is in range.
-setSlot :: Int32 -> VMFun m a -> HeroVM m a -> HeroVM m a
-setSlot slot fun vm = vm
-  { table = IM.insert (fromIntegral slot) (Right k) $ table vm
-  , funrefs = IM.insert k fun $ funrefs vm
-  }
-  where k = IM.size $ funrefs vm
+setSlot :: Int32 -> Int -> HeroVM -> HeroVM
+setSlot slot k vm = vm
+  { table = IM.insert (fromIntegral slot) (Right k) $ table vm }

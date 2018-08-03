@@ -287,6 +287,9 @@ lookup n xs = case xs of
 demoTests :: [Test]
 demoTests = (\(result, source) -> TestCase $ runDemo source >>= assertEqual source result) <$> demoCases
 
+state :: (a, b, c) -> b
+state (_, st, _) = st
+
 -- Could be turned into a runhaskell-like tool with:
 --
 --   main = putStr =<< runDemo =<< getContents
@@ -294,15 +297,13 @@ runDemo :: String -> IO String
 runDemo src = case hsToWasm demoBoost src of
   Left err -> error err
   Right ints -> let
-    vm = mkHeroVM syscall $ either error id $
-      parseWasm $ B.pack $ fromIntegral <$> ints
-    in getState . snd <$> runWasm [] (getExport "main" vm) [] "" vm
+    vm = mkHeroVM $ either error id $ parseWasm $ B.pack $ fromIntegral <$> ints
+    in state <$> runWasm (sys, undefined) [] (getExport "main" vm) [] "" vm
   where
-  syscall ("system", "putStr") vm [I32_const ptr, I32_const len] = pure ([],
-    putState (getState vm ++ [chr $ getNum 1 (ptr + i) vm | i <- [0..len - 1]]) vm)
-  syscall ("system", "putInt") vm [I64_const i] = pure ([],
-    putState (getState vm ++ show i) vm)
-  syscall _ _ _ = error "BUG! bad syscall"
+  sys ("system", "putStr") [I32_const ptr, I32_const len] s vm =
+    pure ([], s ++ [chr $ getNum 1 (ptr + i) vm | i <- [0..len - 1]], vm)
+  sys ("system", "putInt") [I64_const i] s vm = pure ([], s ++ show i, vm)
+  sys _ _ _ _ = error "BUG! bad syscall"
 
 altWebTests :: [Test]
 altWebTests = (\(result, source) -> TestCase $ runAltWeb source >>= assertEqual source result) <$> demoCases
@@ -322,47 +323,45 @@ runAltWeb :: String -> IO String
 runAltWeb src = case hsToWasm altWebBoost src of
   Left err -> error err
   Right ints -> let
-    vm = mkHeroVM altWebSys $ either error id $
-       parseWasm $ B.pack $ fromIntegral <$> ints
-    in getState . snd <$> runWasm [] (getExport "main" vm) [] "" vm
+    vm = mkHeroVM $ either error id $ parseWasm $ B.pack $ fromIntegral <$> ints
+    in state <$> runWasm (altWebSys, undefined) [] (getExport "main" vm) [] "" vm
 
-altWebSys :: (String, String) -> HeroVM IO String -> [WasmOp] -> IO ([WasmOp], HeroVM IO String)
-altWebSys ("dhc", "system") vm [I32_const n, I32_const sp, I32_const hp]
+altWebSys :: (String, String) -> [WasmOp] -> String -> HeroVM ->  IO ([WasmOp], String, HeroVM)
+altWebSys ("dhc", "system") [I32_const n, I32_const sp, I32_const hp] s vm
   | n == 21 = do
     when (getTag /= 6) $ error "BUG! want String"
     let
       ptr = getNum 4 (addr + 4) vm
       off = getNum 4 (addr + 8) vm
       slen = getNum 4 (addr + 12) vm
-    pure ([], putNum 4 hp (5 :: Int)
-            $ putNum 4 (hp + 4) (0 :: Int)
-            $ putNum 4 sp hp
-            $ putNum 4 (sp - 4) (hp + 8)
-            $ putState (getState vm ++
-              [chr $ getNum 1 (ptr + off + i) vm | i <- [0..slen - 1]])
-            vm)
+    pure ([], s ++ [chr $ getNum 1 (ptr + off + i) vm | i <- [0..slen - 1]]
+      , putNum 4 hp (5 :: Int)
+      $ putNum 4 (hp + 4) (0 :: Int)
+      $ putNum 4 sp hp
+      $ putNum 4 (sp - 4) (hp + 8)
+      vm)
   | n == 22 = do
     when (getTag /= 3) $ error "BUG! want Int"
-    pure ([], putNum 4 hp (5 :: Int)
-            $ putNum 4 (hp + 4) (0 :: Int)
-            $ putNum 4 sp hp
-            $ putNum 4 (sp - 4) (hp + 8)
-            $ putState (getState vm ++ show (getNum 8 (addr + 8) vm :: Int))
-            vm)
+    pure ([], s ++ show (getNum 8 (addr + 8) vm :: Int)
+      , putNum 4 hp (5 :: Int)
+      $ putNum 4 (hp + 4) (0 :: Int)
+      $ putNum 4 sp hp
+      $ putNum 4 (sp - 4) (hp + 8)
+      vm)
   | otherwise = error $ "BUG! bad syscall " ++ show n
   where
     addr = getNum 4 (sp + 4) vm :: Int32
     getTag = getNum 1 addr vm :: Int
-altWebSys _ _ _ = error "BUG! bad syscall "
+altWebSys _ _ _ _ = error "BUG! bad syscall "
 
 main :: IO Counts
 main = runTestTT $ TestList $ lexOffsideTests ++ gmachineTests ++ demoTests ++ altWebTests
 
-getNum :: (Integral n) => Int -> Int32 -> HeroVM m a -> n
+getNum :: (Integral n) => Int -> Int32 -> HeroVM -> n
 getNum w addr vm = sum $ zipWith (*) bs ((256^) <$> [(0 :: Int)..]) where
   bs = fromIntegral . (`getWord8VM` vm) . (addr +) <$> [0..fromIntegral w-1]
 
-putNum :: (Integral n) => Int -> Int32 -> n -> HeroVM m a -> HeroVM m a
+putNum :: (Integral n) => Int -> Int32 -> n -> HeroVM -> HeroVM
 putNum w addr n vm = foldl' f vm [0..w-1] where
   f m k = putWord8VM (addr + fromIntegral k) (getByte k) m
   getByte k = fromIntegral $ ((fromIntegral n :: Word64) `shiftR` (8*k)) .&. 255

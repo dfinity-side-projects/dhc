@@ -1,21 +1,21 @@
 import qualified Data.ByteString as B
 import Test.HUnit
 import Hero.Hero
+import Data.Functor.Identity
 
 main :: IO Counts
 main = runTestTT test42
 
 test42 :: Test
-test42 = TestCase $ assertEqual "i32.const 42" "42" =<< runTiny fortyTwo
+test42 = TestCase $ assertEqual "i32.const 42" "42" =<< pure (runTiny fortyTwo)
 
-runTiny :: B.ByteString -> IO String
-runTiny asm = getState . snd <$> runWasm [] (getExport "e" vm0) [] "" vm0
+runTiny :: B.ByteString -> String
+runTiny asm = runIdentity $ (\(_, t, _) -> t) <$>
+  runWasm (syscall, undefined) [] (getExport "e" vm0) [] "" vm0
   where
-  vm0 = mkHeroVM syscall wasm
-  wasm = either error id $ parseWasm asm
-  syscall ("i", "f") vm [I32_const a] = pure ([],
-    putState (getState vm ++ show a) vm)
-  syscall a _ b = error $ show ("BUG! bad syscall", a, b)
+  vm0 = mkHeroVM $ either error id $ parseWasm asm
+  syscall ("i", "f") [I32_const a] s vm = pure ([], s ++ show a, vm)
+  syscall a b _ _ = error $ show ("BUG! bad syscall", a, b)
 
 fortyTwo :: B.ByteString
 -- Minimal wasm that exports a function returning the 32-bit integer 42.
