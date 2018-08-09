@@ -11,8 +11,6 @@ module Hero.Hero
   , setSlot
   , globalVM
   , getWord8VM, putWord8VM
-  , getState
-  , putState
   , getExport
   , getSlot
   , ripWasm
@@ -48,17 +46,10 @@ data HeroVM m a = HeroVM
   , sigs  :: IntMap ([WasmType], [WasmType])
   , table :: IntMap (Either Int Int)
   , wasm  :: Wasm
-  , state :: a
   -- Returns functions corresponding to module imports.
   , sys :: ((String, String) -> VMFun m a)
   , funrefs :: IntMap (VMFun m a)
   }
-
-getState :: HeroVM m a -> a
-getState vm = state vm
-
-putState :: a -> HeroVM m a -> HeroVM m a
-putState a vm = vm {state = a}
 
 -- | Reads global variables.
 globalVM :: HeroVM m a -> [(Int, WasmOp)]
@@ -319,15 +310,14 @@ runWasmIndex :: Monad m => Int -> [WasmOp] -> HeroVM m a -> m ([WasmOp], HeroVM 
 runWasmIndex n args vm = run (setArgsVM args vm) { insts = [[Call n]] }
 
 -- | Runs a function.
-runWasm :: Monad m => [(Int, WasmOp)] -> Either Int Int -> [WasmOp] -> a -> HeroVM m a -> m ([WasmOp], HeroVM m a)
-runWasm gs f args st vm0 = case f of
+runWasm :: Monad m => [(Int, WasmOp)] -> Either Int Int -> [WasmOp] -> HeroVM m () -> m ([WasmOp], HeroVM m ())
+runWasm gs f args vm0 = case f of
   Left n -> runWasmIndex n args vm
   Right n -> maybe (error "no such function") (flip ($ vm) args) $ IM.lookup n $ funrefs vm
   where
   Wasm{globals, dataSection, elemSection} = wasm vm0
   vm = vm0
-    { state = st
-    , locs = []
+    { locs = []
     , stack = []
     , funrefs = IM.empty
     , globs = IM.fromList $ zip [0..] (head . snd <$> globals) ++ gs
@@ -341,10 +331,9 @@ mkElems :: (Int, [Int]) -> [(Int, Either Int Int)]
 mkElems (offset, ns) = zip [offset..] $ Left <$> ns
 
 -- | Builds a HeroVM from imports and wasm binary.
-mkHeroVM :: ((String, String) -> VMFun m a) -> Wasm -> HeroVM m a
+mkHeroVM :: ((String, String) -> VMFun m ()) -> Wasm -> HeroVM m ()
 mkHeroVM imps w@Wasm{elemSection, types} = HeroVM
-  { state = undefined
-  , locs = undefined
+  { locs = undefined
   , stack = undefined
   , insts = undefined
   , funrefs = undefined

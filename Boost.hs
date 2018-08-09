@@ -9,10 +9,6 @@ module Boost
 #endif
   ) where
 
-#ifndef __HASTE__
-import Data.Semigroup
-#endif
-
 import Ast
 import WasmOp
 

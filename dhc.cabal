@@ -33,6 +33,7 @@ library
   ghc-options:
     -O2
     -Wall
+    -Werror
 
 executable dhc
   default-language:
@@ -58,9 +59,10 @@ executable dhc
     mtl,
     parsec
   ghc-options:
-   -O2
-   -Wall
-   -threaded
+    -O2
+    -Wall
+    -Werror
+    -threaded
 
 test-suite test
   default-language:

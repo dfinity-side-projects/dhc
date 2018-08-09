@@ -151,6 +151,7 @@ protoWasm is fs = ProtoWasm is fs [] [] [] [] [] [] []
 sectElements :: [(Int, [Int])] -> ProtoWasm -> ProtoWasm
 sectElements es p = p { tableEntries = es }
 
+sectGlobals :: [[Int]] -> ProtoWasm -> ProtoWasm
 sectGlobals gs p = p { globals = gs }
 
 sectExports :: [(String, Int)] -> ProtoWasm -> ProtoWasm
