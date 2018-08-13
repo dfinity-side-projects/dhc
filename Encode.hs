@@ -3,6 +3,7 @@ module Encode
   ( encodeWasm
   , protoWasm
   , sectsMartin
+  , sectGlobals
   , sectExports
   , sectElements
   , sectPersist
@@ -136,6 +137,7 @@ data ProtoWasm = ProtoWasm
   { imports :: [((String, String), FuncType)]
   , functions :: [WasmFun]
   , tableEntries :: [(Int, [Int])]
+  , globals :: [[Int]]
   , exports :: [(String, Int)]
   , sections :: [(Int, [[Int]])]
   , martinFuns :: [(Int, [WasmType])]
@@ -144,10 +146,12 @@ data ProtoWasm = ProtoWasm
   }
 
 protoWasm :: [((String, String), FuncType)] -> [WasmFun] -> ProtoWasm
-protoWasm is fs = ProtoWasm is fs [] [] [] [] [] []
+protoWasm is fs = ProtoWasm is fs [] [] [] [] [] [] []
 
 sectElements :: [(Int, [Int])] -> ProtoWasm -> ProtoWasm
 sectElements es p = p { tableEntries = es }
+
+sectGlobals gs p = p { globals = gs }
 
 sectExports :: [(String, Int)] -> ProtoWasm -> ProtoWasm
 sectExports es p = p { exports = es }
@@ -164,13 +168,15 @@ encodeWasm fatP = concat
   , encSect 1 $ encSig <$> sigs  -- Type section.
   , encSect 2 $ importFun <$> imports p  -- Import section.
   , encSect 3 $ pure . findSig . typeSig <$> functions p  -- Function section.
-  , concat $ concatMap getSect [4..6]
+  , concat $ concatMap getSect [4, 5]
+  , encSect 6 $ globals p  -- Global section.
   , encSect 7 $  -- Export section.
     -- The "public" functions.
     [encStr s ++ (0 : leb128 n) | (s, n) <- exports p] ++
     [ encStr "memory" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
     , encStr "table" ++ [1, 0]  -- 1 = external_kind Table, 0 = memory index.
-    ]
+    ] ++  -- Export all globals. Forbidden by the spec, but we need it.
+    [ encStr ("global" ++ show n) ++ (3:leb128 n) | n <- [0..length (globals p) - 1]]
   , concat $ getSect 8
   -- Element section.
   , if null $ tableEntries p then [] else

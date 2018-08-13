@@ -190,7 +190,7 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
     , sectPersist $ zip [mainCalled..] $ toDfnType <$> TC "I32":storeTypes
     , sectTable 256
     , sect 5 [0 : leb128 nPages]  -- Memory section (0 = no-maximum).
-    , sect 6 $  -- Global section (1 = mutable).
+    , sectGlobals $  -- Global section (1 = mutable).
       [ [encType I32, 1, 0x41] ++ sleb128 memTop ++ [0xb]  -- SP
       , [encType I32, 1, 0x41] ++ sleb128 (strEndHP wm) ++ [0xb]  -- HP
       , [encType I32, 1, 0x41, 0, 0xb]  -- BP
