@@ -183,14 +183,11 @@ mk64 a b = fromIntegral a + shift (fromIntegral b) 32
 
 insToBin :: String -> Boost -> (WasmMeta, Map String [Ins]) -> [Int]
 insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, strAddrs, storeTypes}, gmachine) = wasm where
-  wasm = encodeWasm $ foldl' (flip ($)) (protoWasm imps $ snd <$> wasmFuns)
-    [ sectElements [(0, wasmFunNo . ('@':) . fst <$> ees)]
-    , sectExports [(s, wasmFunNo ('@':s)) | (s, _) <- exports]
-    , sectsMartin $ ((wasmFunNo . ('@':)) *** map (toDfnType . fst)) <$> ees
-    , sectPersist $ zip [mainCalled..] $ toDfnType <$> TC "I32":storeTypes
-    , sectTable 256
-    , sect 5 [0 : leb128 nPages]  -- Memory section (0 = no-maximum).
-    , sectGlobals $  -- Global section (1 = mutable).
+  wasm = encodeWasm ProtoWasm
+    { sectImports = imps
+    , sectFunctions = snd <$> wasmFuns
+    , tableSize = 256
+    , sectGlobals =  -- Global section (1 = mutable).
       [ [encType I32, 1, 0x41] ++ sleb128 memTop ++ [0xb]  -- SP
       , [encType I32, 1, 0x41] ++ sleb128 (strEndHP wm) ++ [0xb]  -- HP
       , [encType I32, 1, 0x41, 0, 0xb]  -- BP
@@ -199,10 +196,19 @@ insToBin src boost@(Boost imps _ _ boostFuns) (wm@WasmMeta {exports, elements, s
       -- Global stores.
       -- First one records if `main` has been run yet.
       ++ map declareGlobal (TC "I32":storeTypes)
-    , sect 11 $ encStrConsts <$> M.assocs strAddrs  -- Data section.
-    , sectCustom "dfndbg" [ord <$> show (sort $ swp <$> M.assocs wasmFunMap)]
-    , sectCustom "dfnhs" [ord <$> src]
-    ]
+    , sectExports = [(s, wasmFunNo ('@':s)) | (s, _) <- exports]
+    , sectElements = [(0, wasmFunNo . ('@':) . fst <$> ees)]
+    , sectDfn = ((wasmFunNo . ('@':)) *** map (toDfnType . fst)) <$> ees
+    , sectPersist = zip [mainCalled..] $ toDfnType <$> TC "I32":storeTypes
+    , sectsGeneric =
+      [ (5, [0 : leb128 nPages])  -- Memory section (0 = no-maximum).
+      , (11, encStrConsts <$> M.assocs strAddrs)  -- Data section.
+      ]
+    , sectsCustom =
+      [ ("dfndbg", [ord <$> show (sort $ swp <$> M.assocs wasmFunMap)])
+      , ("dfnhs", [ord <$> src])
+      ]
+    }
   ees = exports ++ elements
   declareGlobal (TC "Int") = [encType I64, 1, 0x42, 0, 0xb]
   declareGlobal _ = [encType I32, 1, 0x41, 0, 0xb]

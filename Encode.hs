@@ -1,15 +1,7 @@
 {-# LANGUAGE CPP #-}
 module Encode
   ( encodeWasm
-  , protoWasm
-  , sectsMartin
-  , sectGlobals
-  , sectExports
-  , sectElements
-  , sectPersist
-  , sectCustom
-  , sectTable
-  , sect
+  , ProtoWasm(..)
   , leb128
   , sleb128
   , enc32
@@ -134,56 +126,52 @@ lenc :: [Int] -> [Int]
 lenc xs = varlen xs ++ xs
 
 data ProtoWasm = ProtoWasm
-  { imports :: [((String, String), FuncType)]
-  , functions :: [WasmFun]
-  , tableEntries :: [(Int, [Int])]
-  , globals :: [[Int]]
-  , exports :: [(String, Int)]
-  , sections :: [(Int, [[Int]])]
-  , martinFuns :: [(Int, [WasmType])]
-  , persists :: [(Int, WasmType)]
-  , customs :: [(String, [[Int]])]
+  { sectImports :: [((String, String), FuncType)]
+  , sectFunctions :: [WasmFun]
+  , tableSize :: Int
+  , sectGlobals :: [[Int]]
+  , sectExports :: [(String, Int)]
+  , sectElements :: [(Int, [Int])]
+  , sectPersist :: [(Int, WasmType)]
+  , sectDfn :: [(Int, [WasmType])]
+  , sectsCustom :: [(String, [[Int]])]
+  , sectsGeneric :: [(Int, [[Int]])]
   }
-
-protoWasm :: [((String, String), FuncType)] -> [WasmFun] -> ProtoWasm
-protoWasm is fs = ProtoWasm is fs [] [] [] [] [] [] []
-
-sectElements :: [(Int, [Int])] -> ProtoWasm -> ProtoWasm
-sectElements es p = p { tableEntries = es }
-
-sectGlobals gs p = p { globals = gs }
-
-sectExports :: [(String, Int)] -> ProtoWasm -> ProtoWasm
-sectExports es p = p { exports = es }
 
 encodeWasm :: ProtoWasm -> [Int]
 encodeWasm fatP = concat
   [ wasmHeader
   -- Custom sections using Martin's annotations.
-  , encCustom "types" $ encMartinTypes . snd <$> martinFuns p
+  , encCustom "types" $ encMartinTypes . snd <$> sectDfn p
   -- Martin subtracts the number of imports from the function index.
-  , encCustom "typeMap" $ zipWith (++) (leb128 . (+(-length (imports p))) . fst <$> martinFuns p) $ leb128 <$> [0..]
+  , encCustom "typeMap" $ zipWith (++) (leb128 . (+(-length (sectImports p))) . fst <$> sectDfn p) $ leb128 <$> [0..]
   -- Encodes persistent globals.
-  , encCustom "persist" . fmap encMartinGlobal . sortOn fst $ persists p
+  , encCustom "persist" . fmap encMartinGlobal . sortOn fst $ sectPersist p
   , encSect 1 $ encSig <$> sigs  -- Type section.
-  , encSect 2 $ importFun <$> imports p  -- Import section.
-  , encSect 3 $ pure . findSig . typeSig <$> functions p  -- Function section.
-  , concat $ concatMap getSect [4, 5]
-  , encSect 6 $ globals p  -- Global section.
+  , encSect 2 $ importFun <$> sectImports p  -- Import section.
+  , encSect 3 $ pure . findSig . typeSig <$> sectFunctions p  -- Function section.
+  -- Table section.
+  -- Selects "no-maximum" (0).
+  , if tableSize p == 0 then [] else encSect 4 [[encType AnyFunc, 0] ++ leb128 (tableSize p)]
+  , concat $ getSect 5
+  , encSect 6 $ sectGlobals p  -- Global section.
   , encSect 7 $  -- Export section.
     -- The "public" functions.
-    [encStr s ++ (0 : leb128 n) | (s, n) <- exports p] ++
+    [encStr s ++ (0 : leb128 n) | (s, n) <- sectExports p] ++
     [ encStr "memory" ++ [2, 0]  -- 2 = external_kind Memory, 0 = memory index.
     , encStr "table" ++ [1, 0]  -- 1 = external_kind Table, 0 = memory index.
-    ] ++  -- Export all globals. Forbidden by the spec, but we need it.
-    [ encStr ("global" ++ show n) ++ (3:leb128 n) | n <- [0..length (globals p) - 1]]
+    ]
+  -- Export all globals. Forbidden by the spec, but our engine can handle it.
+#ifndef __HASTE__
+    ++ [ encStr ("global" ++ show n) ++ (3:leb128 n) | n <- [0..length (sectGlobals p) - 1]]
+#endif
   , concat $ getSect 8
   -- Element section.
-  , if null $ tableEntries p then [] else
-    encSect 9 $ encTableChunk <$> tableEntries p
-  , encSect 10 $ encProcedure <$> functions p
+  , if null $ sectElements p then [] else
+    encSect 9 $ encTableChunk <$> sectElements p
+  , encSect 10 $ encProcedure <$> sectFunctions p
   , concat $ getSect 11
-  , concatMap (uncurry encCustom) $ customs p
+  , concatMap (uncurry encCustom) $ sectsCustom p
   ]
   where
   p = trim fatP
@@ -193,12 +181,12 @@ encodeWasm fatP = concat
     ++ leb128 (length entries)
     ++ concatMap leb128 entries
   getSect k
-    | Just ns <- lookup k $ sections p = [encSect k ns]
+    | Just ns <- lookup k $ sectsGeneric p = [encSect k ns]
     | otherwise = []
   sigs = nub $ fmap standardSig $
-    (snd <$> imports p) ++  -- Types of imports.
-    (typeSig <$> functions p) ++  -- Types of functions.
-    concatMap (concatMap ciType . funBody) (functions p) -- Types of Call_indirect types.
+    (snd <$> sectImports p) ++  -- Types of imports.
+    (typeSig <$> sectFunctions p) ++  -- Types of functions.
+    concatMap (concatMap ciType . funBody) (sectFunctions p) -- Types of Call_indirect types.
   ciType (Call_indirect t) = [t]
   ciType (Block _ xs) = concatMap ciType xs
   ciType (Loop _ xs) = concatMap ciType xs
@@ -218,34 +206,18 @@ encodeWasm fatP = concat
     concatMap (encWasmOp findSig) (funBody wf)
   encSect t xs = t : lenc (varlen xs ++ concat xs)
 
--- Selects "no-maximum" (0).
-sectTable :: Int -> ProtoWasm -> ProtoWasm
-sectTable sz p = p { sections = (4, [[encType AnyFunc, 0] ++ leb128 sz]):sections p }
-
-sectsMartin :: [(Int, [WasmType])] -> ProtoWasm -> ProtoWasm
-sectsMartin fs p = p { martinFuns = fs }
-
-sectPersist :: [(Int, WasmType)] -> ProtoWasm -> ProtoWasm
-sectPersist gs p = p { persists = gs }
-
-sect :: Int -> [[Int]] -> ProtoWasm -> ProtoWasm
-sect t xs p = p { sections = (t, xs):sections p }
-
-sectCustom :: String -> [[Int]] -> ProtoWasm -> ProtoWasm
-sectCustom s xs p = p { customs = (s, xs):customs p }
-
 -- Trim unreachable wasm code.
 trim :: ProtoWasm -> ProtoWasm
 trim p = p
-  { imports = liveImps
-  , functions = IM.elems liveFuns
-  , exports = second (liveRenames IM.!) <$> exports p
-  , tableEntries = filter (not . null . snd) $ second (map (liveRenames IM.!)) <$> tableEntries p
-  , martinFuns = first (liveRenames IM.!) <$> martinFuns p
+  { sectImports = liveImps
+  , sectFunctions = IM.elems liveFuns
+  , sectExports = second (liveRenames IM.!) <$> sectExports p
+  , sectElements = filter (not . null . snd) $ second (map (liveRenames IM.!)) <$> sectElements p
+  , sectDfn = first (liveRenames IM.!) <$> sectDfn p
   }
   where
-  nonImports = IM.fromList $ zip [length $ imports p..] $ functions p
-  liveCalls = followCalls ((snd <$> exports p) `union` concatMap snd (tableEntries p)) $ funBody <$> nonImports
+  nonImports = IM.fromList $ zip [length $ sectImports p..] $ sectFunctions p
+  liveCalls = followCalls ((snd <$> sectExports p) `union` concatMap snd (sectElements p)) $ funBody <$> nonImports
   liveRenames = IM.fromList $ zip (IS.elems liveCalls) [0..]
-  liveImps = map snd $ filter ((`IM.member` liveRenames) . fst) $ zip [0..] $ imports p
+  liveImps = map snd $ filter ((`IM.member` liveRenames) . fst) $ zip [0..] $ sectImports p
   liveFuns = (\wf -> wf { funBody = renumberCalls liveRenames $ funBody wf }) <$> restrictKeys nonImports (IM.keysSet liveRenames)
