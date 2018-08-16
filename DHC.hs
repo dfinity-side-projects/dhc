@@ -394,6 +394,7 @@ dictSolve scs cl dsoln soln = ffix $ \h (Ast ast) -> case ast of
     TC "Actor" -> boxy (aVar "#reduce") (aVar "#reduce")
     TC "Module" -> boxy (aVar "#reduce") (aVar "#reduce")
     TC "Int" -> Ast (Pack 0 4) @@ aVar "Int-toAny" @@ aVar "Int-fromAny" @@ aVar "#reduce" @@ aVar "#reduce"
+    TC "I32" -> Ast (Pack 0 4) @@ aVar "#reduce" @@ aVar "#reduce" @@ aVar "#reduce" @@ aVar "#reduce"
     TC "Bool" -> Ast (Pack 0 4) @@ aVar "Bool-toAny" @@ aVar "Bool-fromAny" @@ aVar "Bool-toUnboxed" @@ aVar "Bool-fromUnboxed"
     TApp (TC "[]") a -> let
       ltai = aVar "list_to_any_instance" @@ rec (Ast $ Placeholder "Storage" a)
