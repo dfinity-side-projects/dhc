@@ -35,7 +35,7 @@ import WasmOp
 type IntMap = IM.Map Int
 #endif
 
-type VMFun m a = [WasmOp] -> a -> Hero -> m ([WasmOp], a, Hero)
+type VMFun m a = [WasmOp] -> (a, Hero) -> m ([WasmOp], (a, Hero))
 -- | The import functions and table functions.
 type VMEnv m a = ((String, String) -> VMFun m a, Int -> VMFun m a)
 
@@ -117,10 +117,10 @@ initLocal I32 = I32_const 0
 initLocal I64 = I64_const 0
 initLocal _ = error "TODO"
 
-runImps :: Monad m => VMEnv m a -> a -> Hero -> m ([WasmOp], a, Hero)
-runImps (imps, tabs) st0 engine = run st0 engine where
+runImps :: Monad m => VMEnv m a -> (a, Hero) -> m ([WasmOp], (a, Hero))
+runImps (imps, tabs) (st0, engine) = run st0 engine where
   run st vm@Hero {insts, stack}
-    | null insts = pure (stack, st, vm)
+    | null insts = pure (stack, (st, vm))
     | null $ head insts = case tail insts of
       ((Loop _ _:rest):t) -> run st vm {insts = rest:t}
       _                   -> run st vm {insts = tail insts}
@@ -130,9 +130,9 @@ runImps (imps, tabs) st0 engine = run st0 engine where
         -- TODO: Dynamic type-check.
         inCount = length inSig
         (I32_const i:params) = take' (inCount + 1) stack
-      (results, a, vm1) <- case table vm IM.! fromIntegral i of
+      (results, (a, vm1)) <- case table vm IM.! fromIntegral i of
         Left n -> run st vm { insts = (Call n:head insts):tail insts }
-        Right n -> tabs n (reverse params) st $ step $ drop' (inCount + 1) stack
+        Right n -> tabs n (reverse params) (st, step $ drop' (inCount + 1) stack)
       run a $ setArgsVM results vm1
     Call i -> let
       Wasm {imports, functions} = wasm vm
@@ -141,7 +141,7 @@ runImps (imps, tabs) st0 engine = run st0 engine where
         let
           (importName, (ins, _)) = imports!!i
           k = length ins
-        (results, a, vm1) <- imps importName (reverse $ take' k stack) st $ step $ drop' k stack
+        (results, (a, vm1)) <- imps importName (reverse $ take' k stack) (st, step $ drop' k stack)
         run a $ setArgsVM results vm1
       else do
         let
@@ -256,7 +256,7 @@ runImps (imps, tabs) st0 engine = run st0 engine where
         n = fromIntegral n' where I32_const n' = head stack
         k = if n < 0 || n >= length as then d else as!!n
       run st vm {stack = tail stack, insts = drop (k + 1) insts}
-    Unreachable -> pure ([], st, vm)
+    Unreachable -> pure ([], (st, vm))
     Drop -> run st $ step $ tail stack
     Select -> do
       let
@@ -307,9 +307,9 @@ getSlot i vm = either id (error $ "must be called before invoke") $
   IM.lookup (fromIntegral i) $ table vm
 
 -- | Interprets a wasm function.
-invoke :: Monad m => VMEnv m a -> [(Int, WasmOp)] -> Int -> [WasmOp] -> a -> Hero -> m ([WasmOp], a, Hero)
-invoke env gs k args st vm0 =
-  runImps env st (setArgsVM args vm) { insts = [[Call k]] }
+invoke :: Monad m => VMEnv m a -> [(Int, WasmOp)] -> Int -> [WasmOp] -> (a, Hero) -> m ([WasmOp], (a, Hero))
+invoke env gs k args (st, vm0) =
+  runImps env (st, (setArgsVM args vm) { insts = [[Call k]] })
   where
   Wasm{globalSection, dataSection, elemSection} = wasm vm0
   vm = vm0

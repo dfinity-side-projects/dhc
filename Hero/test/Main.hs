@@ -10,12 +10,12 @@ test42 :: Test
 test42 = TestCase $ assertEqual "i32.const 42" "42" =<< pure (runTiny fortyTwo)
 
 runTiny :: B.ByteString -> String
-runTiny asm = runIdentity $ (\(_, t, _) -> t) <$>
-  invoke (syscall, undefined) [] (getExport "e" vm0) [] "" vm0
+runTiny asm = runIdentity $ fst . snd <$>
+  invoke (syscall, undefined) [] (getExport "e" vm0) [] ("", vm0)
   where
   vm0 = decode $ either error id $ parseWasm asm
-  syscall ("i", "f") [I32_const a] s vm = pure ([], s ++ show a, vm)
-  syscall a b _ _ = error $ show ("BUG! bad syscall", a, b)
+  syscall ("i", "f") [I32_const a] (s, vm) = pure ([], (s ++ show a, vm))
+  syscall a b _ = error $ show ("BUG! bad syscall", a, b)
 
 fortyTwo :: B.ByteString
 -- Minimal wasm that exports a function returning the 32-bit integer 42.

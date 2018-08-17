@@ -24,7 +24,7 @@ import Hero.Hero (Hero)
 import qualified Hero.Hero as Hero
 import WasmOp
 
-newtype HeroAux = HeroAux ([WasmOp] -> IntMap HeroAux -> Hero -> IO ([WasmOp], IntMap HeroAux, Hero))
+newtype HeroAux = HeroAux ([WasmOp] -> (IntMap HeroAux, Hero) -> IO ([WasmOp], (IntMap HeroAux, Hero)))
 
 type HeroIO = (IntMap HeroAux, Hero)
 
@@ -47,7 +47,7 @@ globals :: HeroIO -> [(Int, WasmOp)]
 globals (_, h) = Hero.globals h
 
 setSlot :: Int32 -> ([WasmOp] -> HeroIO -> IO ([WasmOp], HeroIO)) -> HeroIO -> HeroIO
-setSlot n f (x, vm) = (IM.insert k (HeroAux $ wrap f) x, Hero.setSlot n k vm)
+setSlot n f (x, vm) = (IM.insert k (HeroAux f) x, Hero.setSlot n k vm)
   where k = IM.size x
 
 invoke
@@ -58,11 +58,7 @@ invoke
   -> [WasmOp]         -- Arguments.
   -> HeroIO           -- VM.
   -> IO ([WasmOp], HeroIO)
-invoke imps gs f args (x, vm) = (\(a, b, c) -> (a, (b, c))) <$>
-  Hero.invoke (wrap . imps, resolve) gs f args x vm
+invoke imps = Hero.invoke (imps, resolve)
 
-wrap :: (t -> (a1, b1) -> IO (a2, (b2, c))) -> t -> a1 -> b1 -> IO (a2, b2, c)
-wrap f a b c = (\(x, (y, z)) -> (x, y, z)) <$> f a (b, c)
-
-resolve :: Int -> [WasmOp] -> IntMap HeroAux -> Hero -> IO ([WasmOp], IntMap HeroAux, Hero)
-resolve k args x vm = f args x vm where HeroAux f = x IM.! k
+resolve :: Int -> [WasmOp] -> (IntMap HeroAux, Hero) -> IO ([WasmOp], (IntMap HeroAux, Hero))
+resolve k args (x, vm) = f args (x, vm) where HeroAux f = x IM.! k
