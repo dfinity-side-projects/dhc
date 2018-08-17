@@ -11,9 +11,9 @@ test42 = TestCase $ assertEqual "i32.const 42" "42" =<< pure (runTiny fortyTwo)
 
 runTiny :: B.ByteString -> String
 runTiny asm = runIdentity $ (\(_, t, _) -> t) <$>
-  runWasm (syscall, undefined) [] (getExport "e" vm0) [] "" vm0
+  invoke (syscall, undefined) [] (getExport "e" vm0) [] "" vm0
   where
-  vm0 = mkHeroVM $ either error id $ parseWasm asm
+  vm0 = decode $ either error id $ parseWasm asm
   syscall ("i", "f") [I32_const a] s vm = pure ([], s ++ show a, vm)
   syscall a b _ _ = error $ show ("BUG! bad syscall", a, b)
 

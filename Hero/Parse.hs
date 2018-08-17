@@ -36,7 +36,7 @@ data Wasm = Wasm
   , decls :: [FuncType]
   , tableSize :: Int
   , memory :: [(Int, Maybe Int)]
-  , globals :: [((WasmType, Bool), [WasmOp])]
+  , globalSection :: [((WasmType, Bool), [WasmOp])]
   , exports :: [(String, Int)]
   , start :: Maybe Int
   , elemSection :: [(Int, [Int])]
@@ -229,7 +229,7 @@ wasm = do
         gt <- globalType
         x <- codeBlock w
         pure (gt, x)
-      pure w { globals = gs }
+      pure w { globalSection = gs }
 
     sectStart w = do
       i <- varuint32

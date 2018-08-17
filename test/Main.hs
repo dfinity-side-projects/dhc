@@ -297,8 +297,8 @@ runDemo :: String -> IO String
 runDemo src = case hsToWasm demoBoost src of
   Left err -> error err
   Right ints -> let
-    vm = mkHeroVM $ either error id $ parseWasm $ B.pack $ fromIntegral <$> ints
-    in state <$> runWasm (sys, undefined) [] (getExport "main" vm) [] "" vm
+    vm = decode $ either error id $ parseWasm $ B.pack $ fromIntegral <$> ints
+    in state <$> invoke (sys, undefined) [] (getExport "main" vm) [] "" vm
   where
   sys ("system", "putStr") [I32_const ptr, I32_const len] s vm =
     pure ([], s ++ [chr $ getNum 1 (ptr + i) vm | i <- [0..len - 1]], vm)
@@ -323,10 +323,10 @@ runAltWeb :: String -> IO String
 runAltWeb src = case hsToWasm altWebBoost src of
   Left err -> error err
   Right ints -> let
-    vm = mkHeroVM $ either error id $ parseWasm $ B.pack $ fromIntegral <$> ints
-    in state <$> runWasm (altWebSys, undefined) [] (getExport "main" vm) [] "" vm
+    vm = decode $ either error id $ parseWasm $ B.pack $ fromIntegral <$> ints
+    in state <$> invoke (altWebSys, undefined) [] (getExport "main" vm) [] "" vm
 
-altWebSys :: (String, String) -> [WasmOp] -> String -> HeroVM ->  IO ([WasmOp], String, HeroVM)
+altWebSys :: (String, String) -> [WasmOp] -> String -> Hero ->  IO ([WasmOp], String, Hero)
 altWebSys ("dhc", "system") [I32_const n, I32_const sp, I32_const hp] s vm
   | n == 21 = do
     when (getTag /= 6) $ error "BUG! want String"
@@ -357,11 +357,11 @@ altWebSys _ _ _ _ = error "BUG! bad syscall "
 main :: IO Counts
 main = runTestTT $ TestList $ lexOffsideTests ++ gmachineTests ++ demoTests ++ altWebTests
 
-getNum :: (Integral n) => Int -> Int32 -> HeroVM -> n
+getNum :: (Integral n) => Int -> Int32 -> Hero -> n
 getNum w addr vm = sum $ zipWith (*) bs ((256^) <$> [(0 :: Int)..]) where
-  bs = fromIntegral . (`getWord8VM` vm) . (addr +) <$> [0..fromIntegral w-1]
+  bs = fromIntegral . (`getMemory` vm) . (addr +) <$> [0..fromIntegral w-1]
 
-putNum :: (Integral n) => Int -> Int32 -> n -> HeroVM -> HeroVM
+putNum :: (Integral n) => Int -> Int32 -> n -> Hero -> Hero
 putNum w addr n vm = foldl' f vm [0..w-1] where
-  f m k = putWord8VM (addr + fromIntegral k) (getByte k) m
+  f m k = putMemory (addr + fromIntegral k) (getByte k) m
   getByte k = fromIntegral $ ((fromIntegral n :: Word64) `shiftR` (8*k)) .&. 255

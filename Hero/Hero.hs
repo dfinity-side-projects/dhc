@@ -4,13 +4,13 @@
 module Hero.Hero
   ( Wasm(dfnExports, haskell)
   , CustomWasmOp(I32_const, I64_const), WasmOp
-  , HeroVM
+  , Hero
   , parseWasm
-  , runWasm
-  , mkHeroVM
+  , invoke
+  , decode
   , setSlot
-  , globalVM
-  , getWord8VM, putWord8VM
+  , globals
+  , getMemory, putMemory
   , getExport
   , getSlot
   , ripWasm
@@ -35,11 +35,11 @@ import WasmOp
 type IntMap = IM.Map Int
 #endif
 
-type VMFun m a = [WasmOp] -> a -> HeroVM -> m ([WasmOp], a, HeroVM)
+type VMFun m a = [WasmOp] -> a -> Hero -> m ([WasmOp], a, Hero)
 -- | The import functions and table functions.
 type VMEnv m a = ((String, String) -> VMFun m a, Int -> VMFun m a)
 
-data HeroVM = HeroVM
+data Hero = Hero
   { globs :: IntMap WasmOp
   , locs  :: [IntMap WasmOp]
   , stack :: [WasmOp]
@@ -51,16 +51,16 @@ data HeroVM = HeroVM
   }
 
 -- | Reads global variables.
-globalVM :: HeroVM -> [(Int, WasmOp)]
-globalVM vm = IM.assocs $ globs vm
+globals :: Hero -> [(Int, WasmOp)]
+globals vm = IM.assocs $ globs vm
 
 -- | Reads a byte from memory.
-getWord8VM :: Int32 -> HeroVM -> Word8
-getWord8VM a vm = getWord8 a $ mem vm
+getMemory :: Int32 -> Hero -> Word8
+getMemory a vm = getWord8 a $ mem vm
 
 -- | Writes a byte to memory.
-putWord8VM :: Int32 -> Word8 -> HeroVM -> HeroVM
-putWord8VM a n vm = vm { mem = putWord8 a n $ mem vm }
+putMemory :: Int32 -> Word8 -> Hero -> Hero
+putMemory a n vm = vm { mem = putWord8 a n $ mem vm }
 
 getWord8 :: Int32 -> IntMap Word8 -> Word8
 getWord8 a mem = fromMaybe 0 $ IM.lookup (fromIntegral a) mem
@@ -117,14 +117,14 @@ initLocal I32 = I32_const 0
 initLocal I64 = I64_const 0
 initLocal _ = error "TODO"
 
-runImps :: Monad m => VMEnv m a -> a -> HeroVM -> m ([WasmOp], a, HeroVM)
+runImps :: Monad m => VMEnv m a -> a -> Hero -> m ([WasmOp], a, Hero)
 runImps (imps, tabs) st0 engine = run st0 engine where
-  run st vm@HeroVM {insts, stack}
+  run st vm@Hero {insts, stack}
     | null insts = pure (stack, st, vm)
     | null $ head insts = case tail insts of
       ((Loop _ _:rest):t) -> run st vm {insts = rest:t}
       _                   -> run st vm {insts = tail insts}
-  run st vm@HeroVM{globs, locs, stack, insts, mem} = case head $ head insts of
+  run st vm@Hero{globs, locs, stack, insts, mem} = case head $ head insts of
     Call_indirect (inSig, _) -> do
       let
         -- TODO: Dynamic type-check.
@@ -296,25 +296,26 @@ runImps (imps, tabs) st0 engine = run st0 engine where
       run st (step $ drop 2 stack) { mem = mem'}
 
 -- | Returns an exported function.
-getExport :: String -> HeroVM -> Either Int Int
+getExport :: String -> Hero -> Int
 getExport f vm =
-  maybe (error $ "bad export: " ++ f) Left $ lookup f $ exports $ wasm vm
+  fromMaybe (error $ "bad export: " ++ f) $ lookup f $ exports $ wasm vm
 
--- | Returns a function in the table.
-getSlot :: Int32 -> HeroVM -> Either Int Int
-getSlot i vm = fromMaybe (error $ "bad slot: " ++ show i) $ IM.lookup (fromIntegral i) $ table vm
+-- | Returns a function initially in the table.
+getSlot :: Int32 -> Hero -> Int
+getSlot i vm = either id (error $ "must be called before invoke") $
+  fromMaybe (error $ "bad slot: " ++ show i) $
+  IM.lookup (fromIntegral i) $ table vm
 
 -- | Interprets a wasm function.
-runWasm :: Monad m => VMEnv m a -> [(Int, WasmOp)] -> Either Int Int -> [WasmOp] -> a -> HeroVM -> m ([WasmOp], a, HeroVM)
-runWasm env gs f args st vm0 = case f of
-  Left n -> runImps env st (setArgsVM args vm) { insts = [[Call n]] }
-  Right n -> snd env n args st vm
+invoke :: Monad m => VMEnv m a -> [(Int, WasmOp)] -> Int -> [WasmOp] -> a -> Hero -> m ([WasmOp], a, Hero)
+invoke env gs k args st vm0 =
+  runImps env st (setArgsVM args vm) { insts = [[Call k]] }
   where
-  Wasm{globals, dataSection, elemSection} = wasm vm0
+  Wasm{globalSection, dataSection, elemSection} = wasm vm0
   vm = vm0
     { locs = []
     , stack = []
-    , globs = IM.fromList $ zip [0..] (head . snd <$> globals) ++ gs
+    , globs = IM.fromList $ zip [0..] (head . snd <$> globalSection) ++ gs
     , mem = IM.fromList $ concatMap strToAssocs dataSection
     , table = IM.fromList $ concatMap mkElems elemSection
     }
@@ -324,9 +325,9 @@ runWasm env gs f args st vm0 = case f of
 mkElems :: (Int, [Int]) -> [(Int, Either Int Int)]
 mkElems (offset, ns) = zip [offset..] $ Left <$> ns
 
--- | Builds a HeroVM from imports and wasm binary.
-mkHeroVM :: Wasm -> HeroVM
-mkHeroVM w@Wasm{elemSection, types} = HeroVM
+-- | Builds a Hero from imports and wasm binary.
+decode :: Wasm -> Hero
+decode w@Wasm{elemSection, types} = Hero
   { locs = undefined
   , stack = undefined
   , insts = undefined
@@ -338,10 +339,10 @@ mkHeroVM w@Wasm{elemSection, types} = HeroVM
   }
 
 -- | Place arguments on WebAssembly stack.
-setArgsVM :: [WasmOp] -> HeroVM -> HeroVM
+setArgsVM :: [WasmOp] -> Hero -> Hero
 setArgsVM ls vm = vm { stack = reverse ls ++ stack vm }
 
 -- TODO: Check slot is in range.
-setSlot :: Int32 -> Int -> HeroVM -> HeroVM
+setSlot :: Int32 -> Int -> Hero -> Hero
 setSlot slot k vm = vm
   { table = IM.insert (fromIntegral slot) (Right k) $ table vm }
