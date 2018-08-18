@@ -24,6 +24,7 @@ library
     Haskell2010
   exposed-modules:
     Hero.Hero
+    Hero.HeroIO
     Hero.Parse
   ghc-options:
     -O2

@@ -26,6 +26,7 @@ library
     DHC
     Encode
     Hero.Hero
+    Hero.HeroIO
     Hero.Parse
     Parse
     Std
@@ -88,4 +89,5 @@ test-suite test
     Std
     WasmOp
     Hero.Hero
+    Hero.HeroIO
     Hero.Parse
