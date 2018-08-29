@@ -39,6 +39,8 @@ import Encode
 import Std
 import WasmOp
 
+import System.IO.Unsafe (unsafePerformIO)
+
 #ifdef __HASTE__
 sbslen :: String -> Int
 sbslen = length
@@ -90,15 +92,20 @@ hsToWasm :: Boost -> String -> Either String [Int]
 hsToWasm boost s = insToBin s b . astToIns <$> hsToAst b qq s where
   b = stdBoost <> boost
   qq "here" h = Right h
+  qq "wasmFromFile" fileName = do
+    let prog = unsafePerformIO (readFile fileName)
+    case hsToWasm boost prog of
+        Left err -> Left err
+        Right ints -> Right $ chr <$> ints
   qq "wasm" prog = case hsToWasm boost prog of
     Left err -> Left err
     Right ints -> Right $ chr <$> ints
-  qq _ _ = Left "bad scheme"
+  qq scheme _ = Left $ "hsToWasm: bad scheme: " ++ scheme
 
 hsToIns :: Boost -> String -> Either String (WasmMeta, Map String [Ins])
 hsToIns boost s = astToIns <$> hsToAst (stdBoost <> boost) qq s where
   qq "here" h = Right h
-  qq _ _ = Left "bad scheme"
+  qq scheme _ = Left $ "hsToIns: bad scheme: " ++ scheme
 
 data CompilerState = CompilerState
   -- Bindings are local. They start empty and finish empty.
