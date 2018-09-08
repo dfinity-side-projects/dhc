@@ -24,12 +24,12 @@ import Hero.Hero (Hero)
 import qualified Hero.Hero as Hero
 import WasmOp
 
-newtype HeroAux = HeroAux ([WasmOp] -> (IntMap HeroAux, Hero) -> IO ([WasmOp], (IntMap HeroAux, Hero)))
+newtype HeroAux = HeroAux { heroAux :: [WasmOp] -> HeroIO -> IO ([WasmOp], HeroIO) }
 
-type HeroIO = (IntMap HeroAux, Hero)
+type HeroIO = (((String, String) -> HeroAux, IntMap HeroAux), Hero)
 
-decode :: Hero.Wasm -> HeroIO
-decode w = (IM.empty, Hero.decode w)
+decode :: ((String, String) -> [WasmOp] -> HeroIO -> IO ([WasmOp], HeroIO)) -> Hero.Wasm -> HeroIO
+decode imps w = ((HeroAux . imps, IM.empty), Hero.decode w)
 
 getMemory :: Int32 -> HeroIO -> Word8
 getMemory k (_, h) = Hero.getMemory k h
@@ -47,18 +47,16 @@ globals :: HeroIO -> [(Int, WasmOp)]
 globals (_, h) = Hero.globals h
 
 setSlot :: Int32 -> ([WasmOp] -> HeroIO -> IO ([WasmOp], HeroIO)) -> HeroIO -> HeroIO
-setSlot n f (x, vm) = (IM.insert k (HeroAux f) x, Hero.setSlot n k vm)
+setSlot n f ((imps, x), vm) = ((imps, IM.insert k (HeroAux f) x), Hero.setSlot n k vm)
   where k = IM.size x
 
 invoke
-  -- Imports.
-  :: ((String, String) -> [WasmOp] -> HeroIO -> IO ([WasmOp], HeroIO))
-  -> [(Int, WasmOp)]  -- Globals.
+  :: [(Int, WasmOp)]  -- Globals.
   -> Int              -- Function.
   -> [WasmOp]         -- Arguments.
   -> HeroIO           -- VM.
   -> IO ([WasmOp], HeroIO)
-invoke imps = Hero.invoke (imps, resolve)
+invoke gs f as h = Hero.invoke (heroAux . fst (fst h), resolve) gs f as h
 
-resolve :: Int -> [WasmOp] -> (IntMap HeroAux, Hero) -> IO ([WasmOp], (IntMap HeroAux, Hero))
-resolve k args (x, vm) = f args (x, vm) where HeroAux f = x IM.! k
+resolve :: Int -> [WasmOp] -> HeroIO -> IO ([WasmOp], HeroIO)
+resolve k args h = (heroAux $ snd (fst h) IM.! k) args h
