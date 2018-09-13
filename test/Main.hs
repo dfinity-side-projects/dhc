@@ -281,7 +281,7 @@ lookup n xs = case xs of
   , (unlines
     [ "recursion with fix: 10000"
     , "5! + (10 + 20 + 30 + 40 + 50) = 270"
-    ], [there|test/demo.hs|])
+    ], [there|test/example.hs|])
   ]
 
 demoTests :: [Test]
