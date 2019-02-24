@@ -10,7 +10,7 @@ module Boost
   ) where
 
 #ifndef __HASTE__
-import Data.Semigroup
+import Data.Semigroup ()
 #endif
 
 import Ast

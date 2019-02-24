@@ -240,7 +240,7 @@ wasm = do
       es <- rep varuint32 $ do
         index <- varuint32
         when (index /= 0) $ bad "MVP allows at most one table"
-        [I32_const offset] <- codeBlock w
+        ~[I32_const offset] <- codeBlock w
         ns <- rep varuint32 $ do
           i <- varuint32
           when (i > functionCount w) $ bad "function index out of range"
@@ -355,7 +355,7 @@ wasm = do
             pure $ Call i
           0x11 -> do
             i <- varuint32
-            0 <- varuint1
+            ~ 0 <- varuint1
             when (i >= length (types w)) $ bad "Call_indirect index out of range"
             pure $ Call_indirect $ types w !! i
           _ -> bad ("bad opcode " ++ show opcode)
