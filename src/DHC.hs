@@ -231,7 +231,7 @@ gather cl globs env (Ast ast) = case ast of
       (t1, qs1) <- instantiate qt
       pure $ foldl' ((AAst t1 .) . (:@)) (AAst t1 $ Var v) $ (\(a, b) -> AAst (TC $ "Dict-" ++ a) $ Placeholder a (TV b)) <$> qs1
     | Just (ty, _, typeClass) <- M.lookup v $ methods cl -> do
-      (t1, [(_, x)]) <- instantiate (ty, [typeClass])
+      ~(t1, [(_, x)]) <- instantiate (ty, [typeClass])
       pure $ AAst t1 $ Placeholder v $ TV x
     | Just (ma, gt) <- M.lookup v globs ->
       flip AAst (maybe (Var v) (uncurry Pack) ma) . fst <$> instantiate (gt, [])

@@ -22,7 +22,7 @@ import Control.Monad.State
 import Data.ByteString.Short (ShortByteString, unpack)
 import qualified Data.ByteString.Short as SBS
 import Data.Map.Strict (Map, restrictKeys)
-import Data.Semigroup
+import Data.Semigroup ()
 #endif
 import Data.Bits
 import Data.Char
